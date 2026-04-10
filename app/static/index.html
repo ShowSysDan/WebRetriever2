@@ -58,7 +58,9 @@
 
   /* Instance cards */
   .instances { display:flex; flex-direction:column; gap:6px; }
-  .instance-card { display:grid; grid-template-columns:32px 1.2fr 100px 1fr 80px 80px 200px; align-items:center; gap:12px; padding:14px 18px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); transition:border-color .15s; }
+  .instance-card { display:grid; grid-template-columns:32px 130px 1.2fr 100px 1fr 80px 80px 200px; align-items:center; gap:12px; padding:14px 18px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); transition:border-color .15s; }
+  .instance-preview { width:120px; height:67px; border-radius:4px; object-fit:cover; background:var(--bg); border:1px solid var(--border); }
+  .instance-preview-empty { width:120px; height:67px; border-radius:4px; background:var(--bg); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-size:10px; color:var(--text-dim); }
   .instance-card:hover { border-color:var(--border-hover); }
   .instance-card.running { border-left:3px solid var(--accent); }
   .instance-card.stopped { border-left:3px solid var(--border); }
@@ -252,8 +254,13 @@ function renderInstanceCard(inst) {
     ? (inst.refresh_interval >= 60 ? `↻ ${Math.round(inst.refresh_interval/60)}m` : `↻ ${inst.refresh_interval}s`)
     : '';
 
+  const preview = inst.running
+    ? h('img',{className:'instance-preview',src:`/api/instances/${inst.id}/preview?t=${Math.floor(Date.now()/2000)}`,alt:'Preview',loading:'lazy'})
+    : h('div',{className:'instance-preview-empty'},'No preview');
+
   return h('div',{className:`instance-card ${inst.running?'running':'stopped'}`},
     h('div',{className:`instance-status ${inst.running?'on':''}`}),
+    preview,
     h('div',{className:'instance-info'},
       h('h3',null,inst.name),
       h('div',{className:'meta'},`NDI Source: ${inst.name}`),

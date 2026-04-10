@@ -25,6 +25,10 @@ class Config:
     # Browser recycling (hours) — restarts Chromium to prevent memory leaks
     BROWSER_RECYCLE_HOURS = float(os.getenv("BROWSER_RECYCLE_HOURS", "4"))
 
+    # Preview thumbnails for the web UI
+    PREVIEW_FOLDER = os.path.join(BASE_DIR, "previews")
+    PREVIEW_INTERVAL = 2.0  # seconds between preview saves
+
     # Syslog
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     SYSLOG_ENABLED = os.getenv("SYSLOG_ENABLED", "false").lower() == "true"

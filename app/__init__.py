@@ -23,8 +23,9 @@ def create_app(config_class=Config):
     db.init_app(app)
     Migrate(app, db)
 
-    # Ensure upload directory exists
+    # Ensure upload and preview directories exist
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+    os.makedirs(app.config["PREVIEW_FOLDER"], exist_ok=True)
 
     # Register API
     app.register_blueprint(api)
