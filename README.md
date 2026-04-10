@@ -83,7 +83,7 @@ pip --version
 
 ```bash
 git clone https://github.com/showsysdan/webretriever2.git
-cd ndi-streamer
+cd webretriever2
 chmod +x setup.sh
 ./setup.sh
 source venv/bin/activate
@@ -98,8 +98,9 @@ Open **http://localhost:5000** in your browser.
 
 ```powershell
 git clone https://github.com/showsysdan/webretriever2.git
-cd ndi-streamer
+cd webretriever2
 python -m venv venv
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process   # if needed
 venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium
@@ -117,7 +118,7 @@ Open **http://localhost:5000** in your browser.
 
 ```bash
 git clone https://github.com/showsysdan/webretriever2.git
-cd ndi-streamer
+cd webretriever2
 ```
 
 ### 2. Run the setup script
@@ -161,13 +162,14 @@ python run.py
 
 ```powershell
 git clone https://github.com/showsysdan/webretriever2.git
-cd ndi-streamer
+cd webretriever2
 ```
 
 ### 2. Create virtual environment and install dependencies
 
 ```powershell
 python -m venv venv
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process   # if activation fails
 venv\Scripts\activate
 pip install --upgrade pip
 pip install -r requirements.txt
@@ -751,7 +753,7 @@ Current version is tracked in the `VERSION` file at the project root.
 
 ```bash
 git clone https://github.com/showsysdan/webretriever2.git
-cd ndi-streamer
+cd webretriever2
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -764,7 +766,7 @@ python run.py
 
 ```powershell
 git clone https://github.com/showsysdan/webretriever2.git
-cd ndi-streamer
+cd webretriever2
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
@@ -846,6 +848,11 @@ ndi-streamer/
 - Restart your terminal/PowerShell after installing the NDI SDK
 - Verify: `where.exe ndi-*` should return a path, or check `C:\Program Files\NDI\`
 - If using a venv, make sure you activated it: `venv\Scripts\activate`
+
+**`venv\Scripts\activate` — "running scripts is disabled on this system"**
+- PowerShell's default execution policy blocks activation scripts. Fix with either:
+  - Allow scripts for the current session only: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process` then retry `venv\Scripts\activate`
+  - Or use Command Prompt instead: `venv\Scripts\activate.bat`
 
 **`playwright._impl._errors.Error: Executable doesn't exist`**
 - Run `playwright install chromium` inside the activated venv
