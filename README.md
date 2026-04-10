@@ -82,7 +82,7 @@ pip --version
 ## Quick Start (Linux)
 
 ```bash
-git clone https://github.com/YOUR_ORG/ndi-streamer.git
+git clone https://github.com/showsysdan/webretriever2.git
 cd ndi-streamer
 chmod +x setup.sh
 ./setup.sh
@@ -97,7 +97,7 @@ Open **http://localhost:5000** in your browser.
 ## Quick Start (Windows)
 
 ```powershell
-git clone https://github.com/YOUR_ORG/ndi-streamer.git
+git clone https://github.com/showsysdan/webretriever2.git
 cd ndi-streamer
 python -m venv venv
 venv\Scripts\activate
@@ -116,7 +116,7 @@ Open **http://localhost:5000** in your browser.
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_ORG/ndi-streamer.git
+git clone https://github.com/showsysdan/webretriever2.git
 cd ndi-streamer
 ```
 
@@ -160,7 +160,7 @@ python run.py
 ### 1. Clone the repository
 
 ```powershell
-git clone https://github.com/YOUR_ORG/ndi-streamer.git
+git clone https://github.com/showsysdan/webretriever2.git
 cd ndi-streamer
 ```
 
@@ -464,10 +464,12 @@ NDI Streamer can forward structured event logs to syslog for centralized monitor
 
 ```env
 SYSLOG_ENABLED=true
-SYSLOG_ADDRESS=/dev/log        # local syslog
+SYSLOG_ADDRESS=/dev/log        # local syslog (Linux only)
 SYSLOG_FACILITY=local0
 SYSLOG_TAG=ndi-streamer
 ```
+
+> **Windows note:** `/dev/log` does not exist on Windows. Leave `SYSLOG_ENABLED=false` (the default) or point `SYSLOG_ADDRESS` to a remote syslog server (e.g. `192.168.1.100:514`). See [Running as a Service (Windows)](#running-as-a-service-windows) for details.
 
 ### Remote syslog
 
@@ -748,7 +750,7 @@ Current version is tracked in the `VERSION` file at the project root.
 ### Local setup (Linux)
 
 ```bash
-git clone https://github.com/YOUR_ORG/ndi-streamer.git
+git clone https://github.com/showsysdan/webretriever2.git
 cd ndi-streamer
 python3 -m venv venv
 source venv/bin/activate
@@ -761,7 +763,7 @@ python run.py
 ### Local setup (Windows)
 
 ```powershell
-git clone https://github.com/YOUR_ORG/ndi-streamer.git
+git clone https://github.com/showsysdan/webretriever2.git
 cd ndi-streamer
 python -m venv venv
 venv\Scripts\activate
@@ -820,7 +822,7 @@ ndi-streamer/
 - Ensure no firewall is blocking mDNS (port 5353) or NDI traffic (TCP 5960+)
 
 **Playwright fails to launch**
-- Run `playwright install-deps chromium` to install system dependencies
+- Run `playwright install-deps chromium` to install system dependencies (Linux only — this installs required apt packages; Windows/macOS bundles them automatically)
 - If running as a service, ensure the service user has access to the browser binaries
 
 **High CPU usage**
