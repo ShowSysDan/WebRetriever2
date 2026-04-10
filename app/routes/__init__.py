@@ -71,6 +71,9 @@ def get_settings():
 @api.route("/settings", methods=["PUT"])
 def update_settings():
     data = request.get_json()
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
+
     settings = GlobalSettings.query.first()
     if not settings:
         settings = GlobalSettings()
@@ -80,9 +83,14 @@ def update_settings():
     if "ndi_hostname" in data and data["ndi_hostname"] != settings.ndi_hostname:
         settings.ndi_hostname = data["ndi_hostname"]
         changed.append(f"hostname={data['ndi_hostname']}")
-    if "output_fps" in data and int(data["output_fps"]) != settings.output_fps:
-        settings.output_fps = int(data["output_fps"])
-        changed.append(f"output_fps={data['output_fps']}")
+    if "output_fps" in data:
+        try:
+            fps = int(data["output_fps"])
+        except (ValueError, TypeError):
+            return jsonify({"error": "output_fps must be a number"}), 400
+        if fps != settings.output_fps:
+            settings.output_fps = fps
+            changed.append(f"output_fps={fps}")
 
     db.session.commit()
     if changed:
@@ -142,6 +150,8 @@ def list_instances():
 @api.route("/instances", methods=["POST"])
 def create_instance():
     data = request.get_json()
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
     if not data.get("name"):
         return jsonify({"error": "Name is required"}), 400
 
@@ -183,6 +193,8 @@ def get_instance(instance_id):
 def update_instance(instance_id):
     inst = OutputInstance.query.get_or_404(instance_id)
     data = request.get_json()
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
     was_running = manager.is_running(inst.id)
     needs_restart = False
 
@@ -287,6 +299,8 @@ def upload_media():
         return jsonify({"error": "File type not allowed"}), 400
 
     original_name = secure_filename(file.filename)
+    if not original_name or "." not in original_name:
+        return jsonify({"error": "Invalid filename"}), 400
     ext = original_name.rsplit(".", 1)[1].lower()
     unique_name = f"{uuid.uuid4().hex}.{ext}"
 
@@ -315,7 +329,16 @@ def upload_media():
         height_px=height_px,
     )
     db.session.add(media)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        # Remove orphaned file from disk
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+        return jsonify({"error": "Failed to save media record"}), 500
     log_event("MEDIA_UPLOADED", f"id={media.id} name='{original_name}' size={file_size}")
     return jsonify(media.to_dict()), 201
 
@@ -344,14 +367,20 @@ def delete_media(media_id):
         inst.source_value = ""
     db.session.commit()
 
-    # Delete file from disk
-    filepath = os.path.join(current_app.config["UPLOAD_FOLDER"], media.filename)
-    if os.path.exists(filepath):
-        os.remove(filepath)
-
+    # Delete DB record first, then file (avoids orphaned DB records if file delete fails)
+    original_name = media.original_name
+    filename = media.filename
     db.session.delete(media)
     db.session.commit()
-    log_event("MEDIA_DELETED", f"id={media_id} name='{media.original_name}'")
+
+    filepath = os.path.join(current_app.config["UPLOAD_FOLDER"], filename)
+    try:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+    except OSError as e:
+        logger.warning(f"Failed to delete media file {filepath}: {e}")
+
+    log_event("MEDIA_DELETED", f"id={media_id} name='{original_name}'")
     return jsonify({"message": "Deleted", "unlinked_instances": [i.id for i in instances]})
 
 

@@ -222,8 +222,13 @@ class NDIWorker:
 
     def run(self):
         """Main loop — runs in a child process."""
-        signal.signal(signal.SIGTERM, lambda *_: self._stop_event.set())
-        signal.signal(signal.SIGINT, lambda *_: self._stop_event.set())
+        try:
+            signal.signal(signal.SIGTERM, lambda *_: self._stop_event.set())
+            signal.signal(signal.SIGINT, lambda *_: self._stop_event.set())
+        except OSError:
+            # Windows may not support these signals in all contexts;
+            # graceful shutdown still works via _stop_event.set() from parent.
+            pass
 
         try:
             import NDIlib as ndi
@@ -264,77 +269,91 @@ class NDIWorker:
 
         # --- Playwright setup ---
         pw = sync_playwright().start()
-        browser, context, page = self._launch_browser(pw)
+        browser = context = page = None
+        try:
+            browser, context, page = self._launch_browser(pw)
 
-        # --- Timing ---
-        capture_interval = 1.0 / self.capture_fps
-        output_interval = 1.0 / self.output_fps
-        recycle_interval = self.browser_recycle_hours * 3600.0
+            # --- Timing ---
+            capture_interval = 1.0 / self.capture_fps
+            output_interval = 1.0 / self.output_fps
+            recycle_interval = self.browser_recycle_hours * 3600.0
 
-        last_capture_time = 0.0
-        last_refresh_time = time.monotonic()
-        last_recycle_time = time.monotonic()
+            last_capture_time = 0.0
+            last_refresh_time = time.monotonic()
+            last_recycle_time = time.monotonic()
 
-        logger.info(
-            f"Worker started: {self.ndi_name} | "
-            f"{self.width}x{self.height} | "
-            f"capture={self.capture_fps}fps, output={self.output_fps}fps, "
-            f"refresh={self.refresh_interval}s, "
-            f"recycle={self.browser_recycle_hours}h"
-        )
+            logger.info(
+                f"Worker started: {self.ndi_name} | "
+                f"{self.width}x{self.height} | "
+                f"capture={self.capture_fps}fps, output={self.output_fps}fps, "
+                f"refresh={self.refresh_interval}s, "
+                f"recycle={self.browser_recycle_hours}h"
+            )
 
-        self._update_heartbeat()
+            self._update_heartbeat()
 
-        while not self._stop_event.is_set():
-            frame_start = time.monotonic()
+            while not self._stop_event.is_set():
+                frame_start = time.monotonic()
 
-            # --- Browser recycle ---
-            if frame_start - last_recycle_time >= recycle_interval:
-                logger.info(f"Recycling browser: {self.ndi_name}")
+                # --- Browser recycle ---
+                if frame_start - last_recycle_time >= recycle_interval:
+                    logger.info(f"Recycling browser: {self.ndi_name}")
+                    self._teardown_browser(page, context, browser)
+                    browser, context, page = self._launch_browser(pw)
+                    last_recycle_time = frame_start
+                    last_refresh_time = frame_start  # content was just loaded
+                    logger.info(f"Browser recycled: {self.ndi_name}")
+
+                # --- Auto-refresh content ---
+                if self.refresh_interval > 0:
+                    if frame_start - last_refresh_time >= self.refresh_interval:
+                        try:
+                            logger.info(f"Auto-refreshing: {self.ndi_name}")
+                            self._load_content(page)
+                            last_refresh_time = frame_start
+                        except Exception as e:
+                            logger.warning(f"Auto-refresh failed for {self.ndi_name}: {e}")
+
+                # --- Capture into buffer ---
+                if frame_start - last_capture_time >= capture_interval:
+                    if self._capture_into_buffer(page, frame_buffer):
+                        frame_ready = True
+                        last_capture_time = frame_start
+
+                # --- Send to NDI ---
+                if frame_ready:
+                    video_frame.data = frame_buffer
+                    ndi.send_send_video_v2(ndi_send, video_frame)
+                    self._update_heartbeat()
+
+                # --- Pace to output FPS with drift correction ---
+                target_time = frame_start + output_interval
+                now = time.monotonic()
+                sleep_time = target_time - now
+                if sleep_time > 0.001:
+                    time.sleep(sleep_time)
+                elif sleep_time < -output_interval:
+                    # We're more than a full frame behind; reset to avoid spiral
+                    pass
+        except Exception:
+            logger.exception(f"Worker crashed: {self.ndi_name}")
+        finally:
+            # --- Cleanup (always runs) ---
+            logger.info(f"Stopping worker: {self.ndi_name}")
+            if page is not None:
                 self._teardown_browser(page, context, browser)
-                browser, context, page = self._launch_browser(pw)
-                last_recycle_time = frame_start
-                last_refresh_time = frame_start  # content was just loaded
-                logger.info(f"Browser recycled: {self.ndi_name}")
-
-            # --- Auto-refresh content ---
-            if self.refresh_interval > 0:
-                if frame_start - last_refresh_time >= self.refresh_interval:
-                    try:
-                        logger.info(f"Auto-refreshing: {self.ndi_name}")
-                        self._load_content(page)
-                        last_refresh_time = frame_start
-                    except Exception as e:
-                        logger.warning(f"Auto-refresh failed for {self.ndi_name}: {e}")
-
-            # --- Capture into buffer ---
-            if frame_start - last_capture_time >= capture_interval:
-                if self._capture_into_buffer(page, frame_buffer):
-                    frame_ready = True
-                    last_capture_time = frame_start
-
-            # --- Send to NDI ---
-            if frame_ready:
-                video_frame.data = frame_buffer
-                ndi.send_send_video_v2(ndi_send, video_frame)
-                self._update_heartbeat()
-
-            # --- Pace to output FPS with drift correction ---
-            target_time = frame_start + output_interval
-            now = time.monotonic()
-            sleep_time = target_time - now
-            if sleep_time > 0.001:
-                time.sleep(sleep_time)
-            elif sleep_time < -output_interval:
-                # We're more than a full frame behind; reset to avoid spiral
+            try:
+                pw.stop()
+            except Exception:
                 pass
-
-        # --- Cleanup ---
-        logger.info(f"Stopping worker: {self.ndi_name}")
-        self._teardown_browser(page, context, browser)
-        pw.stop()
-        ndi.send_destroy(ndi_send)
-        ndi.destroy()
+            try:
+                ndi.send_destroy(ndi_send)
+            except Exception:
+                pass
+            try:
+                ndi.destroy()
+            except Exception:
+                pass
 
     def _run_dummy_mode(self):
         """Fallback when NDI SDK is not available."""
@@ -345,39 +364,47 @@ class NDIWorker:
         frame_buffer = self._alloc_frame_buffer()
 
         pw = sync_playwright().start()
-        browser, context, page = self._launch_browser(pw)
+        browser = context = page = None
+        try:
+            browser, context, page = self._launch_browser(pw)
 
-        capture_interval = 1.0 / self.capture_fps
-        recycle_interval = self.browser_recycle_hours * 3600.0
-        last_refresh_time = time.monotonic()
-        last_recycle_time = time.monotonic()
+            capture_interval = 1.0 / self.capture_fps
+            recycle_interval = self.browser_recycle_hours * 3600.0
+            last_refresh_time = time.monotonic()
+            last_recycle_time = time.monotonic()
 
-        while not self._stop_event.is_set():
-            now = time.monotonic()
+            while not self._stop_event.is_set():
+                now = time.monotonic()
 
-            # Browser recycle
-            if now - last_recycle_time >= recycle_interval:
-                logger.info(f"Recycling browser (dummy): {self.ndi_name}")
-                self._teardown_browser(page, context, browser)
-                browser, context, page = self._launch_browser(pw)
-                last_recycle_time = now
-                last_refresh_time = now
-
-            # Auto-refresh
-            if self.refresh_interval > 0 and now - last_refresh_time >= self.refresh_interval:
-                try:
-                    self._load_content(page)
+                # Browser recycle
+                if now - last_recycle_time >= recycle_interval:
+                    logger.info(f"Recycling browser (dummy): {self.ndi_name}")
+                    self._teardown_browser(page, context, browser)
+                    browser, context, page = self._launch_browser(pw)
+                    last_recycle_time = now
                     last_refresh_time = now
-                    logger.info(f"Auto-refreshed (dummy): {self.ndi_name}")
-                except Exception:
-                    pass
 
-            self._capture_into_buffer(page, frame_buffer)
-            self._update_heartbeat()
-            time.sleep(capture_interval)
+                # Auto-refresh
+                if self.refresh_interval > 0 and now - last_refresh_time >= self.refresh_interval:
+                    try:
+                        self._load_content(page)
+                        last_refresh_time = now
+                        logger.info(f"Auto-refreshed (dummy): {self.ndi_name}")
+                    except Exception:
+                        pass
 
-        self._teardown_browser(page, context, browser)
-        pw.stop()
+                self._capture_into_buffer(page, frame_buffer)
+                self._update_heartbeat()
+                time.sleep(capture_interval)
+        except Exception:
+            logger.exception(f"Dummy worker crashed: {self.ndi_name}")
+        finally:
+            if page is not None:
+                self._teardown_browser(page, context, browser)
+            try:
+                pw.stop()
+            except Exception:
+                pass
 
     def stop(self):
         self._stop_event.set()
