@@ -133,7 +133,6 @@ let state = {
   media: [],
   modal: null,
   tab: 'instances',
-  hostnameInput: '',
   fpsInput: '60',
 };
 
@@ -158,7 +157,6 @@ async function loadData() {
   state.instances = instances;
   state.media = media;
   if (!settingsEditing) {
-    state.hostnameInput = settings.ndi_hostname;
     state.fpsInput = String(settings.output_fps);
   }
   render();
@@ -166,7 +164,7 @@ async function loadData() {
 
 // Actions
 async function saveSettings() {
-  state.settings = await api('/settings', { method:'PUT', body:{ ndi_hostname:state.hostnameInput, output_fps:parseInt(state.fpsInput)||60 }});
+  state.settings = await api('/settings', { method:'PUT', body:{ output_fps:parseInt(state.fpsInput)||60 }});
   render();
 }
 async function startAll() { await api('/start-all',{method:'POST'}); await loadData(); }
@@ -228,16 +226,11 @@ function renderTabs() {
 }
 
 function renderSettingsBar() {
-  const hi = h('input',{type:'text',value:state.hostnameInput,placeholder:'NDI-STREAMER'});
-  hi.addEventListener('input',e=>{state.hostnameInput=e.target.value;});
-  hi.addEventListener('focus',()=>{settingsEditing=true;});
-  hi.addEventListener('blur',()=>{settingsEditing=false;});
   const fi = h('input',{type:'number',value:state.fpsInput,style:{width:'80px'}});
   fi.addEventListener('input',e=>{state.fpsInput=e.target.value;});
   fi.addEventListener('focus',()=>{settingsEditing=true;});
   fi.addEventListener('blur',()=>{settingsEditing=false;});
   return h('div',{className:'settings-bar'},
-    h('div',{className:'settings-group'},h('label',null,'NDI Hostname'),hi),
     h('div',{className:'settings-group'},h('label',null,'Output FPS'),fi),
     h('button',{className:'sm',onClick:saveSettings},'Save Settings'),
   );
