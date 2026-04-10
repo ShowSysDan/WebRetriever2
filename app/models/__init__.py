@@ -121,6 +121,6 @@ class OutputInstance(db.Model):
 
     @property
     def ndi_source_name(self):
-        settings = GlobalSettings.query.first()
-        hostname = settings.ndi_hostname if settings else "NDI-STREAMER"
-        return f"{hostname} ({self.name})"
+        """NDI source name — just the instance name.
+        NDI protocol automatically prefixes with MACHINE_NAME."""
+        return self.name

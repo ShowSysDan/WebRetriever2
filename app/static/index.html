@@ -256,7 +256,7 @@ function renderInstanceCard(inst) {
     h('div',{className:`instance-status ${inst.running?'on':''}`}),
     h('div',{className:'instance-info'},
       h('h3',null,inst.name),
-      h('div',{className:'meta'},`${state.settings.ndi_hostname} (${inst.name})`),
+      h('div',{className:'meta'},`NDI Source: ${inst.name}`),
     ),
     h('div',{className:'instance-res'},`${inst.width}×${inst.height}`),
     h('div',{className:'instance-source'},srcLabel),
@@ -266,7 +266,7 @@ function renderInstanceCard(inst) {
       h('div',{className:`toggle ${inst.enabled?'on':''}`,onClick:()=>toggleEnabled(inst),title:inst.enabled?'Enabled':'Disabled'}),
       inst.running
         ? h('button',{className:'sm danger',onClick:()=>stopInstance(inst.id)},'■')
-        : h('button',{className:'sm primary',onClick:()=>startInstance(inst.id),disabled:!inst.enabled},'▶'),
+        : h('button',{className:'sm primary',onClick:()=>startInstance(inst.id)},'▶'),
       h('button',{className:'sm',onClick:()=>refreshInstance(inst.id),title:'Refresh'},'↻'),
       h('button',{className:'sm',onClick:()=>{state.modal=inst;render();}},'✎'),
       h('button',{className:'sm danger',onClick:()=>deleteInstance(inst.id)},'✕'),
