@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NDI Streamer</title>
+<title>WebRetriever V2</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -203,7 +203,7 @@ function renderHeader() {
   const run = state.instances.filter(i=>i.running).length;
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
-      h('div',{className:'logo'},'⬡ NDI',h('span',null,'Streamer')),
+      h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
       h('span',{className:'version'},'v0.1.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
@@ -471,7 +471,7 @@ function render() {
 }
 
 loadData();
-setInterval(loadData, 5000);
+setInterval(() => { if (!state.modal) loadData(); }, 5000);
 </script>
 </body>
 </html>
