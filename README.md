@@ -138,6 +138,14 @@ The setup script will:
 - Initialize the SQLite database
 - Optionally install as a systemd service (requires `sudo`)
 
+After setup, install optional dependencies if needed:
+
+```bash
+source venv/bin/activate
+pip install ndi-python        # Requires NDI SDK installed; app runs in dummy mode without it
+pip install psycopg2-binary   # Only if using PostgreSQL instead of SQLite
+```
+
 ### 3. Configure
 
 ```bash
@@ -173,6 +181,13 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process   # if activati
 venv\Scripts\activate
 pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+#### Optional: NDI output and PostgreSQL
+
+```powershell
+pip install ndi-python        # Requires NDI SDK installed; app runs in dummy mode without it
+pip install psycopg2-binary   # Only if using PostgreSQL instead of SQLite
 ```
 
 ### 3. Install Playwright browser

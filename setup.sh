@@ -63,7 +63,15 @@ ok "Virtual environment active"
 info "Installing Python dependencies..."
 pip install --upgrade pip -q
 pip install -r "$APP_DIR/requirements.txt" -q
-ok "Dependencies installed"
+ok "Core dependencies installed"
+
+# Optional: NDI Python bindings (best-effort)
+info "Installing ndi-python (optional)..."
+if pip install ndi-python -q 2>/dev/null; then
+    ok "ndi-python installed"
+else
+    warn "ndi-python could not be installed — app will run in dummy mode until NDI SDK is available"
+fi
 
 # ------------------------------------------------------------------
 # 4. Playwright (headless Chromium)
