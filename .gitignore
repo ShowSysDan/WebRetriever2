@@ -39,6 +39,7 @@ logs/
 
 # NDI SDK (installed separately)
 ndi-sdk/
+ndi-python/
 
 # Systemd (generated during install)
 # The template is tracked; the installed copy is not.
