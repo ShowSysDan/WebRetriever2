@@ -3,7 +3,7 @@ import logging
 from flask import Flask, send_from_directory
 from flask_migrate import Migrate
 from app.config import Config
-from app.models import db, GlobalSettings
+from app.models import db, GlobalSettings, OutputInstance
 from app.routes import api
 from app.logging_config import setup_logging
 
@@ -46,6 +46,23 @@ def create_app(config_class=Config):
                 output_fps=app.config.get("NDI_OUTPUT_FPS", 60),
             )
             db.session.add(settings)
+            db.session.commit()
+
+    # Auto-start instances that were running before shutdown
+    with app.app_context():
+        from app.routes import _start_worker
+        previously_running = OutputInstance.query.filter_by(running=True).all()
+        if previously_running:
+            settings = GlobalSettings.query.first()
+            logger = logging.getLogger(__name__)
+            logger.info(f"Auto-starting {len(previously_running)} previously running instance(s)")
+            for inst in previously_running:
+                try:
+                    _start_worker(inst, settings)
+                    logger.info(f"Auto-started: {inst.name}")
+                except Exception as e:
+                    logger.error(f"Failed to auto-start {inst.name}: {e}")
+                    inst.running = False
             db.session.commit()
 
     return app
