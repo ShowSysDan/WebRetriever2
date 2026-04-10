@@ -146,6 +146,8 @@ async function api(path, opts={}) {
   return res.json();
 }
 
+let settingsEditing = false;
+
 async function loadData() {
   const [settings, instances, media] = await Promise.all([
     api('/settings'), api('/instances'), api('/media'),
@@ -153,8 +155,10 @@ async function loadData() {
   state.settings = settings;
   state.instances = instances;
   state.media = media;
-  state.hostnameInput = settings.ndi_hostname;
-  state.fpsInput = String(settings.output_fps);
+  if (!settingsEditing) {
+    state.hostnameInput = settings.ndi_hostname;
+    state.fpsInput = String(settings.output_fps);
+  }
   render();
 }
 
@@ -224,8 +228,12 @@ function renderTabs() {
 function renderSettingsBar() {
   const hi = h('input',{type:'text',value:state.hostnameInput,placeholder:'NDI-STREAMER'});
   hi.addEventListener('input',e=>{state.hostnameInput=e.target.value;});
+  hi.addEventListener('focus',()=>{settingsEditing=true;});
+  hi.addEventListener('blur',()=>{settingsEditing=false;});
   const fi = h('input',{type:'number',value:state.fpsInput,style:{width:'80px'}});
   fi.addEventListener('input',e=>{state.fpsInput=e.target.value;});
+  fi.addEventListener('focus',()=>{settingsEditing=true;});
+  fi.addEventListener('blur',()=>{settingsEditing=false;});
   return h('div',{className:'settings-bar'},
     h('div',{className:'settings-group'},h('label',null,'NDI Hostname'),hi),
     h('div',{className:'settings-group'},h('label',null,'Output FPS'),fi),
