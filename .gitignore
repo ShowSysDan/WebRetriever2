@@ -1,0 +1,44 @@
+# Environment & secrets
+.env
+*.env
+!.env.example
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Database
+*.db
+*.sqlite3
+instance/
+
+# Uploads (user content)
+app/uploads/*
+!app/uploads/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# NDI SDK (installed separately)
+ndi-sdk/
+
+# Systemd (generated during install)
+# The template is tracked; the installed copy is not.

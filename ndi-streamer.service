@@ -1,0 +1,36 @@
+[Unit]
+Description=NDI Streamer Service
+Documentation=https://github.com/YOUR_ORG/ndi-streamer
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=ndi-streamer
+Group=ndi-streamer
+WorkingDirectory=/opt/ndi-streamer
+Environment=PATH=/opt/ndi-streamer/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LD_LIBRARY_PATH=/usr/share/ndi/lib
+EnvironmentFile=/opt/ndi-streamer/.env
+
+ExecStart=/opt/ndi-streamer/venv/bin/python run.py
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ndi-streamer
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ndi-streamer
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

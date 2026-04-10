@@ -1,0 +1,12 @@
+Flask==3.1.1
+Flask-SQLAlchemy==3.1.1
+Flask-Migrate==4.1.0
+SQLAlchemy==2.0.40
+alembic==1.15.2
+playwright==1.52.0
+ndi-python==5.6.2.0
+Pillow==11.2.1
+numpy==2.2.5
+psycopg2-binary==2.9.10
+python-dotenv==1.1.0
+Werkzeug==3.1.3

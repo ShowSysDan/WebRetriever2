@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NDI Streamer</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0b0f; --surface: #12141a; --surface2: #1a1d26;
+    --border: #2a2d38; --border-hover: #3a3d48;
+    --text: #e4e6ed; --text-dim: #8b8fa3;
+    --accent: #22c55e; --accent-dim: #166534;
+    --danger: #ef4444; --danger-dim: #7f1d1d;
+    --warning: #f59e0b; --blue: #3b82f6;
+    --radius: 8px;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'Outfit',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
+
+  /* Header */
+  .header { display:flex; align-items:center; justify-content:space-between; padding:16px 28px; border-bottom:1px solid var(--border); background:var(--surface); }
+  .header-left { display:flex; align-items:center; gap:14px; }
+  .logo { font-family:'JetBrains Mono',monospace; font-size:18px; font-weight:700; color:var(--accent); letter-spacing:-0.5px; }
+  .logo span { color:var(--text-dim); font-weight:400; }
+  .version { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; background:var(--surface2); padding:2px 8px; border-radius:10px; }
+  .status-pill { font-size:11px; padding:4px 12px; border-radius:20px; font-family:'JetBrains Mono',monospace; background:var(--accent-dim); color:var(--accent); }
+  .status-pill.stopped { background:var(--danger-dim); color:var(--danger); }
+  .header-actions { display:flex; gap:8px; }
+
+  /* Buttons */
+  button { font-family:'Outfit',sans-serif; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface2); color:var(--text); padding:7px 14px; cursor:pointer; font-size:13px; font-weight:500; transition:all .15s; }
+  button:hover { border-color:var(--border-hover); background:var(--border); }
+  button.primary { background:var(--accent); color:#000; border-color:var(--accent); font-weight:600; }
+  button.primary:hover { background:#16a34a; }
+  button.danger { background:var(--danger-dim); color:var(--danger); border-color:#991b1b; }
+  button.danger:hover { background:#991b1b; }
+  button.sm { padding:4px 9px; font-size:12px; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+
+  /* Tabs */
+  .tabs { display:flex; gap:0; border-bottom:1px solid var(--border); background:var(--surface); padding:0 28px; }
+  .tab { padding:10px 20px; font-size:13px; font-weight:500; color:var(--text-dim); cursor:pointer; border-bottom:2px solid transparent; transition:all .15s; }
+  .tab:hover { color:var(--text); }
+  .tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+
+  /* Settings bar */
+  .settings-bar { display:flex; align-items:center; gap:16px; padding:14px 28px; border-bottom:1px solid var(--border); background:var(--surface); flex-wrap:wrap; }
+  .settings-bar label { font-size:11px; color:var(--text-dim); font-weight:500; text-transform:uppercase; letter-spacing:.5px; }
+  .settings-bar input { font-family:'JetBrains Mono',monospace; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); padding:5px 10px; font-size:13px; width:180px; }
+  .settings-bar input:focus { outline:none; border-color:var(--accent); }
+  .settings-group { display:flex; align-items:center; gap:8px; }
+
+  /* Main */
+  .main { padding:20px 28px; }
+  .section-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+  .section-title { font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim); }
+
+  /* Instance cards */
+  .instances { display:flex; flex-direction:column; gap:6px; }
+  .instance-card { display:grid; grid-template-columns:32px 1.2fr 100px 1fr 80px 80px 200px; align-items:center; gap:12px; padding:14px 18px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); transition:border-color .15s; }
+  .instance-card:hover { border-color:var(--border-hover); }
+  .instance-card.running { border-left:3px solid var(--accent); }
+  .instance-card.stopped { border-left:3px solid var(--border); }
+  .instance-status { width:9px; height:9px; border-radius:50%; background:var(--border); }
+  .instance-status.on { background:var(--accent); box-shadow:0 0 8px var(--accent); }
+  .instance-info h3 { font-size:13px; font-weight:600; margin-bottom:1px; }
+  .instance-info .meta { font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+  .instance-res { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text-dim); }
+  .instance-source { font-size:11px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .instance-fps { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--warning); }
+  .instance-refresh { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--blue); }
+  .instance-actions { display:flex; gap:5px; justify-content:flex-end; }
+
+  /* Toggle */
+  .toggle { position:relative; width:34px; height:18px; background:var(--border); border-radius:9px; cursor:pointer; transition:background .2s; flex-shrink:0; }
+  .toggle.on { background:var(--accent); }
+  .toggle::after { content:''; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:white; transition:transform .2s; }
+  .toggle.on::after { transform:translateX(16px); }
+
+  /* Modal */
+  .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.7); display:flex; align-items:center; justify-content:center; z-index:100; }
+  .modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px; width:540px; max-height:85vh; overflow-y:auto; }
+  .modal h2 { font-size:16px; margin-bottom:18px; font-weight:600; }
+  .form-group { margin-bottom:12px; }
+  .form-group label { display:block; font-size:11px; font-weight:500; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; margin-bottom:5px; }
+  .form-group input,.form-group select,.form-group textarea { width:100%; font-family:'JetBrains Mono',monospace; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); padding:7px 11px; font-size:13px; }
+  .form-group textarea { min-height:70px; resize:vertical; font-family:'Outfit',sans-serif; }
+  .form-group input:focus,.form-group select:focus,.form-group textarea:focus { outline:none; border-color:var(--accent); }
+  .form-row { display:flex; gap:10px; }
+  .form-row .form-group { flex:1; }
+  .modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:18px; }
+  .text-settings,.refresh-settings { border-top:1px solid var(--border); padding-top:12px; margin-top:12px; }
+  .form-hint { font-size:11px; color:var(--text-dim); margin-top:3px; }
+
+  /* Media library */
+  .media-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; }
+  .media-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; cursor:pointer; transition:border-color .15s; position:relative; }
+  .media-card:hover { border-color:var(--border-hover); }
+  .media-card.selected { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+  .media-card img { width:100%; height:120px; object-fit:cover; display:block; background:#000; }
+  .media-card-info { padding:8px 10px; }
+  .media-card-name { font-size:12px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .media-card-meta { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; margin-top:2px; }
+  .media-card-actions { position:absolute; top:6px; right:6px; display:none; }
+  .media-card:hover .media-card-actions { display:flex; gap:4px; }
+  .media-usage { font-size:10px; color:var(--accent); margin-top:2px; }
+
+  .upload-zone { border:2px dashed var(--border); border-radius:var(--radius); padding:32px; text-align:center; color:var(--text-dim); cursor:pointer; transition:border-color .15s; }
+  .upload-zone:hover { border-color:var(--accent); color:var(--text); }
+  .upload-zone.dragover { border-color:var(--accent); background:var(--accent-dim); }
+
+  .empty-state { text-align:center; padding:50px 20px; color:var(--text-dim); font-size:13px; }
+  .empty-state .icon { font-size:36px; margin-bottom:10px; opacity:.3; }
+
+  /* Media picker in modal */
+  .media-picker { max-height:200px; overflow-y:auto; display:grid; grid-template-columns:repeat(auto-fill,minmax(80px,1fr)); gap:6px; padding:4px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); }
+  .media-picker-item { border:2px solid transparent; border-radius:4px; overflow:hidden; cursor:pointer; }
+  .media-picker-item:hover { border-color:var(--border-hover); }
+  .media-picker-item.selected { border-color:var(--accent); }
+  .media-picker-item img { width:100%; height:60px; object-fit:cover; display:block; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const API = '/api';
+let state = {
+  settings: { ndi_hostname:'NDI-STREAMER', output_fps:60, all_running:false },
+  instances: [],
+  media: [],
+  modal: null,
+  tab: 'instances',
+  hostnameInput: '',
+  fpsInput: '60',
+};
+
+async function api(path, opts={}) {
+  const headers = {};
+  if (opts.body && !(opts.body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const res = await fetch(API+path, { headers, ...opts,
+    body: opts.body instanceof FormData ? opts.body : (opts.body ? JSON.stringify(opts.body) : undefined)
+  });
+  return res.json();
+}
+
+async function loadData() {
+  const [settings, instances, media] = await Promise.all([
+    api('/settings'), api('/instances'), api('/media'),
+  ]);
+  state.settings = settings;
+  state.instances = instances;
+  state.media = media;
+  state.hostnameInput = settings.ndi_hostname;
+  state.fpsInput = String(settings.output_fps);
+  render();
+}
+
+// Actions
+async function saveSettings() {
+  state.settings = await api('/settings', { method:'PUT', body:{ ndi_hostname:state.hostnameInput, output_fps:parseInt(state.fpsInput)||60 }});
+  render();
+}
+async function startAll() { await api('/start-all',{method:'POST'}); await loadData(); }
+async function stopAll() { await api('/stop-all',{method:'POST'}); await loadData(); }
+async function startInstance(id) { await api(`/instances/${id}/start`,{method:'POST'}); await loadData(); }
+async function stopInstance(id) { await api(`/instances/${id}/stop`,{method:'POST'}); await loadData(); }
+async function refreshInstance(id) { await api(`/instances/${id}/refresh`,{method:'POST'}); await loadData(); }
+async function deleteInstance(id) { if(!confirm('Delete this instance?'))return; await api(`/instances/${id}`,{method:'DELETE'}); await loadData(); }
+async function toggleEnabled(inst) { await api(`/instances/${inst.id}`,{method:'PUT',body:{enabled:!inst.enabled}}); await loadData(); }
+async function saveInstance(data, id) {
+  if(id) await api(`/instances/${id}`,{method:'PUT',body:data});
+  else await api('/instances',{method:'POST',body:data});
+  state.modal=null; await loadData();
+}
+async function uploadFile(file) {
+  const fd = new FormData(); fd.append('file', file);
+  await api('/media',{method:'POST',body:fd});
+  await loadData();
+}
+async function deleteMedia(id) {
+  if(!confirm('Delete this file? It will be unlinked from any instances using it.'))return;
+  await api(`/media/${id}`,{method:'DELETE'});
+  await loadData();
+}
+
+// DOM helper
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  if(attrs) for(const [k,v] of Object.entries(attrs)) {
+    if(k.startsWith('on')) el.addEventListener(k.slice(2).toLowerCase(),v);
+    else if(k==='className') el.className=v;
+    else if(k==='style'&&typeof v==='object') Object.assign(el.style,v);
+    else el.setAttribute(k,v);
+  }
+  for(const c of children.flat()) { if(c==null)continue; el.appendChild(typeof c==='string'?document.createTextNode(c):c); }
+  return el;
+}
+
+function renderHeader() {
+  const run = state.instances.filter(i=>i.running).length;
+  return h('div',{className:'header'},
+    h('div',{className:'header-left'},
+      h('div',{className:'logo'},'⬡ NDI',h('span',null,'Streamer')),
+      h('span',{className:'version'},'v0.1.0'),
+      h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
+    ),
+    h('div',{className:'header-actions'},
+      h('button',{className:'primary',onClick:startAll},'▶ Start All'),
+      h('button',{className:'danger',onClick:stopAll},'■ Stop All'),
+    ),
+  );
+}
+
+function renderTabs() {
+  const tabs = [['instances','Instances'],['media','Media Library']];
+  return h('div',{className:'tabs'}, ...tabs.map(([id,label])=>
+    h('div',{className:`tab ${state.tab===id?'active':''}`,onClick:()=>{state.tab=id;render();}},label)
+  ));
+}
+
+function renderSettingsBar() {
+  const hi = h('input',{type:'text',value:state.hostnameInput,placeholder:'NDI-STREAMER'});
+  hi.addEventListener('input',e=>{state.hostnameInput=e.target.value;});
+  const fi = h('input',{type:'number',value:state.fpsInput,style:{width:'80px'}});
+  fi.addEventListener('input',e=>{state.fpsInput=e.target.value;});
+  return h('div',{className:'settings-bar'},
+    h('div',{className:'settings-group'},h('label',null,'NDI Hostname'),hi),
+    h('div',{className:'settings-group'},h('label',null,'Output FPS'),fi),
+    h('button',{className:'sm',onClick:saveSettings},'Save Settings'),
+  );
+}
+
+function renderInstanceCard(inst) {
+  const srcLabel = {
+    webpage:'🌐 '+(inst.source_value||'—'),
+    image: inst.media_file ? '🖼 '+inst.media_file.original_name : '🖼 '+(inst.source_value||'—'),
+    text:'📝 '+(inst.text_content||'—').substring(0,30),
+  }[inst.source_type]||inst.source_value;
+
+  const refreshLabel = inst.refresh_interval > 0
+    ? (inst.refresh_interval >= 60 ? `↻ ${Math.round(inst.refresh_interval/60)}m` : `↻ ${inst.refresh_interval}s`)
+    : '';
+
+  return h('div',{className:`instance-card ${inst.running?'running':'stopped'}`},
+    h('div',{className:`instance-status ${inst.running?'on':''}`}),
+    h('div',{className:'instance-info'},
+      h('h3',null,inst.name),
+      h('div',{className:'meta'},`${state.settings.ndi_hostname} (${inst.name})`),
+    ),
+    h('div',{className:'instance-res'},`${inst.width}×${inst.height}`),
+    h('div',{className:'instance-source'},srcLabel),
+    h('div',{className:'instance-fps'},`⚡ ${inst.capture_fps}fps`),
+    h('div',{className:'instance-refresh'},refreshLabel),
+    h('div',{className:'instance-actions'},
+      h('div',{className:`toggle ${inst.enabled?'on':''}`,onClick:()=>toggleEnabled(inst),title:inst.enabled?'Enabled':'Disabled'}),
+      inst.running
+        ? h('button',{className:'sm danger',onClick:()=>stopInstance(inst.id)},'■')
+        : h('button',{className:'sm primary',onClick:()=>startInstance(inst.id),disabled:!inst.enabled},'▶'),
+      h('button',{className:'sm',onClick:()=>refreshInstance(inst.id),title:'Refresh'},'↻'),
+      h('button',{className:'sm',onClick:()=>{state.modal=inst;render();}},'✎'),
+      h('button',{className:'sm danger',onClick:()=>deleteInstance(inst.id)},'✕'),
+    ),
+  );
+}
+
+function renderInstancesPage() {
+  const main = h('div',{className:'main'},
+    h('div',{className:'section-header'},
+      h('div',{className:'section-title'},`Output Instances (${state.instances.length})`),
+      h('button',{className:'primary',onClick:()=>{state.modal='create';render();}},`+ New Instance`),
+    ),
+  );
+  if(!state.instances.length) {
+    main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'⬡'),h('div',null,'No instances yet. Create one to start streaming.')));
+  } else {
+    const list = h('div',{className:'instances'});
+    state.instances.forEach(i=>list.appendChild(renderInstanceCard(i)));
+    main.appendChild(list);
+  }
+  return main;
+}
+
+function renderMediaPage() {
+  const main = h('div',{className:'main'});
+
+  // Upload zone
+  const zone = h('div',{className:'upload-zone'},'Drop files here or click to upload');
+  const fileInput = h('input',{type:'file',accept:'image/*',multiple:'true',style:{display:'none'}});
+  fileInput.addEventListener('change',e=>{Array.from(e.target.files).forEach(uploadFile);});
+  zone.addEventListener('click',()=>fileInput.click());
+  zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('dragover');});
+  zone.addEventListener('dragleave',()=>zone.classList.remove('dragover'));
+  zone.addEventListener('drop',e=>{e.preventDefault();zone.classList.remove('dragover');Array.from(e.dataTransfer.files).forEach(uploadFile);});
+  main.appendChild(zone);
+  main.appendChild(fileInput);
+
+  // Media grid
+  const title = h('div',{className:'section-header',style:{marginTop:'20px'}},
+    h('div',{className:'section-title'},`Library (${state.media.length} files)`),
+  );
+  main.appendChild(title);
+
+  if(!state.media.length) {
+    main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'🖼'),h('div',null,'No files uploaded yet.')));
+  } else {
+    const grid = h('div',{className:'media-grid'});
+    state.media.forEach(m=>{
+      const usedBy = state.instances.filter(i=>i.media_file_id===m.id);
+      const card = h('div',{className:'media-card'},
+        h('img',{src:m.url,alt:m.original_name,loading:'lazy'}),
+        h('div',{className:'media-card-info'},
+          h('div',{className:'media-card-name'},m.original_name),
+          h('div',{className:'media-card-meta'},
+            `${m.width_px||'?'}×${m.height_px||'?'} · ${(m.file_size/1024).toFixed(0)}KB`),
+          usedBy.length ? h('div',{className:'media-usage'},`Used by: ${usedBy.map(i=>i.name).join(', ')}`) : null,
+        ),
+        h('div',{className:'media-card-actions'},
+          h('button',{className:'sm danger',onClick:(e)=>{e.stopPropagation();deleteMedia(m.id);}},'✕'),
+        ),
+      );
+      grid.appendChild(card);
+    });
+    main.appendChild(grid);
+  }
+  return main;
+}
+
+function renderModal() {
+  if(!state.modal) return null;
+  const isEdit = state.modal !== 'create';
+  const inst = isEdit ? state.modal : {};
+  const field = (k,d) => isEdit ? (inst[k]??d) : d;
+
+  const sourceTypeSelect = h('select',null,
+    h('option',{value:'webpage'},'Webpage URL'),
+    h('option',{value:'image'},'Image'),
+    h('option',{value:'text'},'Text'),
+  );
+  if(isEdit) sourceTypeSelect.value = inst.source_type;
+
+  const nameInput = h('input',{type:'text',value:field('name',''),placeholder:'Lower Third'});
+  const sourceInput = h('input',{type:'text',value:field('source_value',''),placeholder:'https://...'});
+  const widthInput = h('input',{type:'number',value:String(field('width',1920))});
+  const heightInput = h('input',{type:'number',value:String(field('height',1080))});
+  const fpsInput = h('input',{type:'number',value:String(field('capture_fps',30)),min:'1',max:'60'});
+  const refreshInput = h('input',{type:'number',value:String(field('refresh_interval',0)),min:'0',placeholder:'0'});
+
+  // Text settings
+  const textContent = h('textarea',{placeholder:'Enter text to display...'},field('text_content',''));
+  const textFont = h('input',{type:'text',value:field('text_font','Arial')});
+  const textSize = h('input',{type:'number',value:String(field('text_size',48))});
+  const textColor = h('input',{type:'color',value:field('text_color','#FFFFFF')});
+  const textBg = h('input',{type:'color',value:field('text_bg_color','#000000')});
+  const textAlign = h('select',null,h('option',{value:'left'},'Left'),h('option',{value:'center'},'Center'),h('option',{value:'right'},'Right'));
+  textAlign.value = field('text_align','center');
+
+  const textSection = h('div',{className:'text-settings',id:'text-settings'},
+    h('div',{className:'form-group'},h('label',null,'Text Content'),textContent),
+    h('div',{className:'form-row'},
+      h('div',{className:'form-group'},h('label',null,'Font'),textFont),
+      h('div',{className:'form-group'},h('label',null,'Size'),textSize),
+    ),
+    h('div',{className:'form-row'},
+      h('div',{className:'form-group'},h('label',null,'Color'),textColor),
+      h('div',{className:'form-group'},h('label',null,'Background'),textBg),
+      h('div',{className:'form-group'},h('label',null,'Align'),textAlign),
+    ),
+  );
+
+  // Media picker for image type
+  let selectedMediaId = field('media_file_id', null);
+  const mediaPicker = h('div',{className:'form-group',id:'media-picker-group'},
+    h('label',null,'Select from Library'),
+  );
+  const pickerGrid = h('div',{className:'media-picker'});
+  // "None" option
+  const noneItem = h('div',{className:`media-picker-item ${!selectedMediaId?'selected':''}`,onClick:()=>{
+    selectedMediaId=null;
+    pickerGrid.querySelectorAll('.media-picker-item').forEach(el=>el.classList.remove('selected'));
+    noneItem.classList.add('selected');
+  }},h('div',{style:{width:'100%',height:'60px',background:'var(--surface2)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',color:'var(--text-dim)'}},'None'));
+  pickerGrid.appendChild(noneItem);
+
+  state.media.forEach(m=>{
+    const item = h('div',{className:`media-picker-item ${selectedMediaId===m.id?'selected':''}`,onClick:()=>{
+      selectedMediaId=m.id;
+      pickerGrid.querySelectorAll('.media-picker-item').forEach(el=>el.classList.remove('selected'));
+      item.classList.add('selected');
+      sourceInput.value = m.url;
+    }},h('img',{src:m.url,alt:m.original_name,title:m.original_name}));
+    pickerGrid.appendChild(item);
+  });
+  mediaPicker.appendChild(pickerGrid);
+  mediaPicker.appendChild(h('div',{className:'form-hint'},'Or enter a URL above'));
+
+  function updateVisibility() {
+    const st = sourceTypeSelect.value;
+    textSection.style.display = st==='text'?'block':'none';
+    mediaPicker.style.display = st==='image'?'block':'none';
+  }
+  sourceTypeSelect.addEventListener('change', updateVisibility);
+
+  function handleSave() {
+    const data = {
+      name: nameInput.value,
+      source_type: sourceTypeSelect.value,
+      source_value: sourceInput.value,
+      media_file_id: sourceTypeSelect.value==='image' ? selectedMediaId : null,
+      width: parseInt(widthInput.value)||1920,
+      height: parseInt(heightInput.value)||1080,
+      capture_fps: parseInt(fpsInput.value)||30,
+      refresh_interval: parseInt(refreshInput.value)||0,
+      text_content: textContent.value,
+      text_font: textFont.value,
+      text_size: parseInt(textSize.value)||48,
+      text_color: textColor.value,
+      text_bg_color: textBg.value,
+      text_align: textAlign.value,
+    };
+    saveInstance(data, isEdit?inst.id:null);
+  }
+
+  const modal = h('div',{className:'modal-overlay',onClick:e=>{
+    if(e.target.className==='modal-overlay'){state.modal=null;render();}
+  }},
+    h('div',{className:'modal'},
+      h('h2',null,isEdit?'Edit Instance':'New Instance'),
+      h('div',{className:'form-group'},h('label',null,'Instance Name (NDI Source Name)'),nameInput),
+      h('div',{className:'form-group'},h('label',null,'Source Type'),sourceTypeSelect),
+      h('div',{className:'form-group'},h('label',null,'Source URL'),sourceInput),
+      mediaPicker,
+      h('div',{className:'form-row'},
+        h('div',{className:'form-group'},h('label',null,'Width'),widthInput),
+        h('div',{className:'form-group'},h('label',null,'Height'),heightInput),
+      ),
+      h('div',{className:'form-row'},
+        h('div',{className:'form-group'},h('label',null,'Capture FPS'),fpsInput),
+        h('div',{className:'form-group'},
+          h('label',null,'Auto-Refresh (seconds)'),
+          refreshInput,
+          h('div',{className:'form-hint'},'0 = disabled. e.g. 1800 = 30 min'),
+        ),
+      ),
+      textSection,
+      h('div',{className:'modal-actions'},
+        h('button',{onClick:()=>{state.modal=null;render();}},'Cancel'),
+        h('button',{className:'primary',onClick:handleSave},isEdit?'Save Changes':'Create Instance'),
+      ),
+    ),
+  );
+  setTimeout(updateVisibility,0);
+  return modal;
+}
+
+function render() {
+  const root = document.getElementById('app');
+  root.innerHTML = '';
+  root.appendChild(renderHeader());
+  root.appendChild(renderTabs());
+  if(state.tab==='instances') {
+    root.appendChild(renderSettingsBar());
+    root.appendChild(renderInstancesPage());
+  } else {
+    root.appendChild(renderMediaPage());
+  }
+  const modal = renderModal();
+  if(modal) root.appendChild(modal);
+}
+
+loadData();
+setInterval(loadData, 5000);
+</script>
+</body>
+</html>
