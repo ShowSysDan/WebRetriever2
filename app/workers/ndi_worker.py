@@ -29,11 +29,13 @@ Heartbeat:
 """
 
 import io
+import os
 import gc
 import time
 import signal
 import ctypes
 import logging
+import tempfile
 import multiprocessing as mp
 from typing import Optional
 
@@ -66,6 +68,8 @@ class NDIWorker:
         browser_recycle_hours: float = DEFAULT_RECYCLE_HOURS,
         text_settings: Optional[dict] = None,
         heartbeat: Optional[mp.Value] = None,
+        preview_dir: Optional[str] = None,
+        preview_interval: float = 2.0,
     ):
         self.instance_id = instance_id
         self.ndi_name = ndi_name
@@ -80,6 +84,8 @@ class NDIWorker:
         self.text_settings = text_settings or {}
         self._stop_event = mp.Event()
         self._heartbeat = heartbeat  # shared with parent process
+        self._preview_dir = preview_dir
+        self._preview_interval = preview_interval
 
     # ------------------------------------------------------------------
     # Frame buffer management
@@ -217,6 +223,38 @@ class NDIWorker:
             self._heartbeat.value = time.monotonic()
 
     # ------------------------------------------------------------------
+    # Preview thumbnail
+    # ------------------------------------------------------------------
+
+    def _save_preview(self, frame_buffer: np.ndarray):
+        """Save a small JPEG preview from the current frame buffer."""
+        if not self._preview_dir:
+            return
+        try:
+            # BGRX → RGB
+            rgb = frame_buffer[:, :, [2, 1, 0]]
+            img = Image.fromarray(rgb, "RGB")
+            # Downscale to 320px wide, maintain aspect ratio
+            thumb_w = 320
+            thumb_h = int(self.height * (thumb_w / self.width))
+            img = img.resize((thumb_w, thumb_h), Image.Resampling.LANCZOS)
+            # Atomic write: temp file then replace
+            dest = os.path.join(self._preview_dir, f"{self.instance_id}.jpg")
+            fd, tmp = tempfile.mkstemp(suffix=".jpg", dir=self._preview_dir)
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    img.save(f, "JPEG", quality=60)
+                os.replace(tmp, dest)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            logger.debug(f"Preview save failed for {self.ndi_name}: {e}")
+
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
@@ -281,6 +319,7 @@ class NDIWorker:
             last_capture_time = 0.0
             last_refresh_time = time.monotonic()
             last_recycle_time = time.monotonic()
+            last_preview_time = 0.0
 
             logger.info(
                 f"Worker started: {self.ndi_name} | "
@@ -319,6 +358,10 @@ class NDIWorker:
                     if self._capture_into_buffer(page, frame_buffer):
                         frame_ready = True
                         last_capture_time = frame_start
+                        # --- Save preview thumbnail ---
+                        if frame_start - last_preview_time >= self._preview_interval:
+                            self._save_preview(frame_buffer)
+                            last_preview_time = frame_start
 
                 # --- Send to NDI ---
                 if frame_ready:
@@ -372,6 +415,7 @@ class NDIWorker:
             recycle_interval = self.browser_recycle_hours * 3600.0
             last_refresh_time = time.monotonic()
             last_recycle_time = time.monotonic()
+            last_preview_time = 0.0
 
             while not self._stop_event.is_set():
                 now = time.monotonic()
@@ -393,7 +437,10 @@ class NDIWorker:
                     except Exception:
                         pass
 
-                self._capture_into_buffer(page, frame_buffer)
+                if self._capture_into_buffer(page, frame_buffer):
+                    if now - last_preview_time >= self._preview_interval:
+                        self._save_preview(frame_buffer)
+                        last_preview_time = now
                 self._update_heartbeat()
                 time.sleep(capture_interval)
         except Exception:

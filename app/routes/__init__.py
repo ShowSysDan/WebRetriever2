@@ -5,7 +5,7 @@ REST API routes for NDI output instances, global settings, and media library.
 import os
 import uuid
 import logging
-from flask import Blueprint, request, jsonify, current_app, send_from_directory
+from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
 from werkzeug.utils import secure_filename
 from PIL import Image as PILImage
 
@@ -51,6 +51,8 @@ def _start_worker(inst, settings=None):
         refresh_interval=inst.refresh_interval,
         browser_recycle_hours=current_app.config.get("BROWSER_RECYCLE_HOURS", 4),
         text_settings=text_settings,
+        preview_dir=current_app.config.get("PREVIEW_FOLDER"),
+        preview_interval=current_app.config.get("PREVIEW_INTERVAL", 2.0),
     )
 
 
@@ -274,6 +276,18 @@ def refresh_instance(instance_id):
     db.session.commit()
     log_event("INSTANCE_REFRESHED", f"id={inst.id} name='{inst.name}'")
     return jsonify(inst.to_dict())
+
+
+@api.route("/instances/<int:instance_id>/preview", methods=["GET"])
+def instance_preview(instance_id):
+    """Serve the latest preview thumbnail for an instance."""
+    preview_dir = current_app.config.get("PREVIEW_FOLDER")
+    if not preview_dir:
+        return jsonify({"error": "Previews not configured"}), 404
+    preview_path = os.path.join(preview_dir, f"{instance_id}.jpg")
+    if os.path.exists(preview_path):
+        return send_file(preview_path, mimetype="image/jpeg")
+    return "", 204
 
 
 # =========================================================================

@@ -50,6 +50,8 @@ class WorkerManager:
         refresh_interval: int = 0,
         browser_recycle_hours: float = DEFAULT_RECYCLE_HOURS,
         text_settings: Optional[dict] = None,
+        preview_dir: Optional[str] = None,
+        preview_interval: float = 2.0,
     ) -> bool:
         if instance_id in self._processes and self._processes[instance_id].is_alive():
             logger.warning(f"Instance {instance_id} already running")
@@ -66,6 +68,8 @@ class WorkerManager:
             refresh_interval=refresh_interval,
             browser_recycle_hours=browser_recycle_hours,
             text_settings=text_settings,
+            preview_dir=preview_dir,
+            preview_interval=preview_interval,
         )
         self._configs[instance_id] = config
 

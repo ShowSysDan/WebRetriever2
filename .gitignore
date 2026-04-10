@@ -22,6 +22,9 @@ instance/
 app/uploads/*
 !app/uploads/.gitkeep
 
+# Preview thumbnails (generated at runtime)
+app/previews/
+
 # IDE
 .vscode/
 .idea/
