@@ -138,6 +138,14 @@ The setup script will:
 - Initialize the SQLite database
 - Optionally install as a systemd service (requires `sudo`)
 
+After setup, install optional dependencies if needed:
+
+```bash
+source venv/bin/activate
+pip install ndi-python        # Requires NDI SDK installed; app runs in dummy mode without it
+pip install psycopg2-binary   # Only if using PostgreSQL instead of SQLite
+```
+
 ### 3. Configure
 
 ```bash
@@ -173,6 +181,13 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process   # if activati
 venv\Scripts\activate
 pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+#### Optional: NDI output and PostgreSQL
+
+```powershell
+pip install ndi-python        # Requires NDI SDK installed; app runs in dummy mode without it
+pip install psycopg2-binary   # Only if using PostgreSQL instead of SQLite
 ```
 
 ### 3. Install Playwright browser
@@ -425,7 +440,16 @@ If running as a systemd service, the library path is already set in the service 
 
 4. **Reboot** or log out and back in if the PATH change isn't picked up.
 
-No additional environment variables are needed on Windows — the installer handles everything.
+5. **Install the Python bindings** (inside your activated venv):
+   ```powershell
+   # PyPI source tarball is missing pybind11 — build from GitHub instead:
+   git clone --recursive https://github.com/buresu/ndi-python.git
+   cd ndi-python
+   $env:CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+   pip install .
+   cd ..
+   ```
+   Requires CMake and Visual Studio Build Tools (C++ workload). If the build fails, the app still runs in dummy mode (captures work, no NDI output).
 
 ---
 
