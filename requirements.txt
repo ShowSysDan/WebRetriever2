@@ -4,9 +4,9 @@ Flask-Migrate==4.1.0
 SQLAlchemy==2.0.40
 alembic==1.15.2
 playwright==1.52.0
-ndi-python==5.6.2.0
+ndi-python>=5.1.1  # Platform-dependent; app runs in dummy mode if unavailable
 Pillow==11.2.1
 numpy==2.2.5
-psycopg2-binary==2.9.10
+psycopg2-binary==2.9.10  # Only needed for PostgreSQL; safe to skip on SQLite setups
 python-dotenv==1.1.0
 Werkzeug==3.1.3
