@@ -78,7 +78,21 @@ fi
 # ------------------------------------------------------------------
 info "Installing Playwright Chromium..."
 playwright install chromium 2>/dev/null || true
-playwright install-deps chromium 2>/dev/null || true
+
+# install-deps needs root to apt-install Chromium's shared libraries
+# (libnss3, libatk-bridge2.0-0, libasound2, libxkbcommon0, etc.).
+if [ "$EUID" -eq 0 ]; then
+    playwright install-deps chromium 2>/dev/null || \
+        warn "playwright install-deps failed — Chromium may be missing shared libs"
+else
+    info "Installing Chromium system libraries (requires sudo)..."
+    if command -v sudo &>/dev/null; then
+        sudo "$(command -v playwright)" install-deps chromium 2>/dev/null || \
+            warn "playwright install-deps failed — run manually: sudo $(command -v playwright) install-deps chromium"
+    else
+        warn "sudo not found. Run manually as root: $(command -v playwright) install-deps chromium"
+    fi
+fi
 ok "Playwright ready"
 
 # ------------------------------------------------------------------
@@ -184,6 +198,14 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     # Set ownership
     chown -R "$SERVICE_NAME:$SERVICE_NAME" "$INSTALL_DIR"
 
+    # Verify service user can execute the venv Python
+    if ! sudo -u "$SERVICE_NAME" test -x "$INSTALL_DIR/venv/bin/python"; then
+        err "Service user '$SERVICE_NAME' cannot execute $INSTALL_DIR/venv/bin/python"
+        err "Check permissions: ls -la $INSTALL_DIR/venv/bin/python"
+        exit 1
+    fi
+    ok "Service user permissions verified"
+
     # Install service
     cp "$INSTALL_DIR/ndi-streamer.service" /etc/systemd/system/
     systemctl daemon-reload
@@ -196,6 +218,11 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo "    sudo systemctl stop $SERVICE_NAME"
     echo "    sudo systemctl status $SERVICE_NAME"
     echo "    sudo journalctl -u $SERVICE_NAME -f"
+    echo ""
+    warn "Firewall reminder: open 5000/tcp (web UI), 5960-5969/tcp (NDI),"
+    warn "and 5353/udp (mDNS discovery) if clients are on another subnet."
+    warn "The web UI has no built-in authentication — restrict access by"
+    warn "firewall, or place it behind nginx with basic auth (see README)."
     echo ""
 else
     echo ""

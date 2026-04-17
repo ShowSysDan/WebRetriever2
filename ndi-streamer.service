@@ -31,6 +31,23 @@ ProtectSystem=strict
 ReadWritePaths=/opt/ndi-streamer
 ProtectHome=true
 PrivateTmp=true
+UMask=0077
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+# AF_NETLINK is required for mDNS / NDI discovery on Linux.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=4G
+TasksMax=4096
 
 [Install]
 WantedBy=multi-user.target

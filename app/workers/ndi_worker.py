@@ -159,8 +159,15 @@ class NDIWorker:
 </style></head>
 <body><div class="content">{content}</div></body></html>"""
 
-    def _load_content(self, page):
-        """Load or reload content into the Playwright page."""
+    def _load_content(self, page, reload: bool = False):
+        """Load or reload content into the Playwright page.
+
+        When reload=True and the source is a webpage, issue page.reload() instead
+        of page.goto(). This reuses the already-parsed frame tree and compiled
+        JS/CSS caches, which is cheaper and produces less memory churn than a
+        full navigation. For text/image sources the HTML is regenerated either
+        way (and may have changed), so set_content is still used.
+        """
         if self.source_type == "text":
             page.set_content(self._build_text_html())
         elif self.source_type == "image":
@@ -174,7 +181,10 @@ class NDIWorker:
             page.set_content(img_html)
             page.wait_for_load_state("networkidle")
         else:  # webpage
-            page.goto(self.source_value, wait_until="networkidle", timeout=30000)
+            if reload:
+                page.reload(wait_until="networkidle", timeout=30000)
+            else:
+                page.goto(self.source_value, wait_until="networkidle", timeout=30000)
 
     def _launch_browser(self, pw):
         """Create a fresh browser + context + page and load content."""
@@ -187,6 +197,10 @@ class NDIWorker:
                 "--disable-background-timer-throttling",
                 "--disable-renderer-backgrounding",
                 "--disable-backgrounding-occluded-windows",
+                "--mute-audio",
+                "--disable-extensions",
+                "--disable-features=TranslateUI",
+                "--disable-blink-features=AutomationControlled",
                 f"--window-size={self.width},{self.height}",
             ],
         )
@@ -238,9 +252,10 @@ class NDIWorker:
         if not self._preview_dir:
             return
         try:
-            # BGRX → RGB
-            rgb = frame_buffer[:, :, [2, 1, 0]]
-            img = Image.fromarray(rgb, "RGB")
+            # BGRX → RGB as a reversed-stride view (no copy); Pillow
+            # materializes on resize/save so the zero-copy view is safe.
+            rgb_view = frame_buffer[:, :, 2::-1]
+            img = Image.fromarray(rgb_view, "RGB")
             # Downscale to 320px wide, maintain aspect ratio
             thumb_w = 320
             thumb_h = int(self.height * (thumb_w / self.width))
@@ -355,7 +370,7 @@ class NDIWorker:
                     if frame_start - last_refresh_time >= self.refresh_interval:
                         try:
                             logger.info(f"Auto-refreshing: {self.ndi_name}")
-                            self._load_content(page)
+                            self._load_content(page, reload=True)
                             last_refresh_time = frame_start
                         except Exception as e:
                             logger.warning(f"Auto-refresh failed for {self.ndi_name}: {e}")
