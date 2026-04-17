@@ -13,6 +13,7 @@ class Config:
 
     NDI_HOSTNAME = os.getenv("NDI_HOSTNAME", "NDI-STREAMER")
     NDI_OUTPUT_FPS = int(os.getenv("NDI_OUTPUT_FPS", "60"))
+    FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
     FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
 
     # Uploads — always resolve to absolute path so Flask's send_from_directory works

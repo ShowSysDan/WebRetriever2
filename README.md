@@ -56,12 +56,20 @@ A self-hosted Flask application that captures webpages, images, or text via head
 | **Chromium** | (auto-installed) | Managed by Playwright |
 | **Git** | Any | Windows: [git-scm.com](https://git-scm.com/download/win) |
 
-### System packages (Ubuntu/Debian)
+### System packages (Debian 11/12, Ubuntu 22.04+)
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip git rsync
+sudo apt install -y python3 python3-venv python3-pip git rsync curl ca-certificates
 ```
+
+On Debian 11 (bullseye) the default Python is 3.9, which is too old. Use the
+`python3.11` backport (`sudo apt install -y python3.11 python3.11-venv`) or
+upgrade to Debian 12 (bookworm), which ships Python 3.11 out of the box.
+
+Playwright will download Chromium inside the venv, but Chromium needs system
+shared libraries (libnss3, libatk-bridge, libasound2, libxkbcommon, fonts,
+etc.). These are installed in the next section via `playwright install-deps`.
 
 ### Windows prerequisites
 
@@ -114,16 +122,21 @@ Open **http://localhost:5000** in your browser.
 
 ## Installation (Linux)
 
-### 1. Clone the repository
+There are two paths:
+
+- **A. Scripted install** — good for a developer workstation or when you just
+  want to try it out. Clones anywhere, runs `setup.sh`, optionally registers
+  the systemd service.
+- **B. Manual production install** — recommended for a dedicated Debian server
+  that will run 24/7. Each step is explicit so you know exactly what landed
+  where, the venv is created as the service user, and the service runs under
+  its own account with a hardened unit file.
+
+### A. Scripted install
 
 ```bash
 git clone https://github.com/showsysdan/webretriever2.git
 cd webretriever2
-```
-
-### 2. Run the setup script
-
-```bash
 chmod +x setup.sh
 ./setup.sh
 ```
@@ -132,35 +145,118 @@ The setup script will:
 - Detect and validate your Python version (3.10+ required)
 - Create a virtual environment in `./venv`
 - Install all Python dependencies
-- Install Playwright and headless Chromium
+- Install Playwright and headless Chromium (with `sudo playwright install-deps`)
 - Check for the NDI SDK runtime (warns if missing)
 - Create `.env` from `.env.example`
 - Initialize the SQLite database
 - Optionally install as a systemd service (requires `sudo`)
 
-After setup, install optional dependencies if needed:
+Then edit `.env` (at minimum change `SECRET_KEY`) and start with
+`source venv/bin/activate && python run.py`.
+
+### B. Manual production install (Debian 12)
+
+The service will run as a dedicated `ndi-streamer` user with its home at
+`/opt/ndi-streamer`. Run the following as a user with `sudo` access.
+
+#### 1. System packages
 
 ```bash
-source venv/bin/activate
-pip install ndi-python        # Requires NDI SDK installed; app runs in dummy mode without it
-pip install psycopg2-binary   # Only if using PostgreSQL instead of SQLite
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git rsync curl ca-certificates
 ```
 
-### 3. Configure
+#### 2. Clone into /opt and create the service user
 
 ```bash
-# Edit the environment file
-nano .env
+sudo git clone https://github.com/showsysdan/webretriever2.git /opt/ndi-streamer
+sudo useradd --system --home /opt/ndi-streamer --shell /usr/sbin/nologin ndi-streamer
+sudo chown -R ndi-streamer:ndi-streamer /opt/ndi-streamer
 ```
 
-At minimum, change `SECRET_KEY` for production use.
+#### 3. Create the venv and install Python dependencies
 
-### 4. Start the application
+Do this **as the service user** so the venv is owned correctly from the start:
 
 ```bash
-source venv/bin/activate
-python run.py
+sudo -u ndi-streamer python3 -m venv /opt/ndi-streamer/venv
+sudo -u ndi-streamer /opt/ndi-streamer/venv/bin/pip install --upgrade pip wheel
+sudo -u ndi-streamer /opt/ndi-streamer/venv/bin/pip install -r /opt/ndi-streamer/requirements.txt
 ```
+
+#### 4. Install Playwright + Chromium system libraries
+
+Playwright downloads Chromium into the user's cache (under
+`/opt/ndi-streamer/.cache/ms-playwright/` for the service user). The system
+libraries Chromium links against (`libnss3`, `libatk-bridge2.0-0`, `libasound2`,
+`libxkbcommon0`, fonts, etc.) must be installed as root via `apt`.
+
+```bash
+sudo -u ndi-streamer /opt/ndi-streamer/venv/bin/playwright install chromium
+sudo /opt/ndi-streamer/venv/bin/playwright install-deps chromium
+```
+
+Verify:
+
+```bash
+sudo -u ndi-streamer /opt/ndi-streamer/venv/bin/python -c \
+  "from playwright.sync_api import sync_playwright; pw=sync_playwright().start(); b=pw.chromium.launch(); print('Chromium OK', b.version); b.close(); pw.stop()"
+```
+
+#### 5. Install the NDI SDK
+
+See the [NDI SDK Installation](#ndi-sdk-installation) section for the full
+recipe (download, accept EULA, install to `/usr/local/ndi/`, register with
+`ld.so.conf.d`, install `ndi-python` into the venv).
+
+Short version — after the SDK is installed system-wide:
+
+```bash
+sudo -u ndi-streamer /opt/ndi-streamer/venv/bin/pip install ndi-python
+sudo -u ndi-streamer /opt/ndi-streamer/venv/bin/python -c \
+  "import NDIlib as n; n.initialize(); print('NDI ready'); n.destroy()"
+```
+
+If you skip this step the app still runs; it just falls back to "dummy mode"
+(Chromium captures frames but no NDI streams go out).
+
+#### 6. Configure `.env`
+
+```bash
+sudo -u ndi-streamer cp /opt/ndi-streamer/.env.example /opt/ndi-streamer/.env
+sudo -u ndi-streamer nano /opt/ndi-streamer/.env
+```
+
+Required for production:
+
+- Set `SECRET_KEY` to a long random string
+  (`python3 -c 'import secrets; print(secrets.token_hex(32))'`).
+- Set `FLASK_ENV=production` (disables the debugger / auto-reloader).
+- If you are fronting the app with nginx on the same box, set
+  `FLASK_HOST=127.0.0.1` so Flask only listens on loopback. If clients will
+  hit `:5000` directly on the LAN, leave it at the default `0.0.0.0` and rely
+  on the firewall (see [Firewall](#firewall)).
+
+#### 7. Initialize the database
+
+```bash
+cd /opt/ndi-streamer
+sudo -u ndi-streamer /opt/ndi-streamer/venv/bin/python -c "from app import create_app; create_app()"
+```
+
+#### 8. Install the systemd service
+
+```bash
+sudo cp /opt/ndi-streamer/ndi-streamer.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ndi-streamer
+sudo systemctl status ndi-streamer
+sudo journalctl -u ndi-streamer -f
+```
+
+The unit file already runs under the `ndi-streamer` user, restarts on crash,
+and applies the systemd hardening described in
+[Running as a Service (Linux)](#running-as-a-service-linux).
 
 ---
 
@@ -268,8 +364,19 @@ NDI_OUTPUT_FPS=60
 ```env
 SECRET_KEY=change-me-to-a-random-string
 FLASK_ENV=production
+FLASK_HOST=0.0.0.0            # bind address. Set to 127.0.0.1 when behind nginx.
 FLASK_PORT=5000
 ```
+
+> **Security:** the app has no built-in authentication. Anyone who can reach
+> `FLASK_HOST:FLASK_PORT` can create, start, stop, and delete instances.
+> Restrict access with a firewall (see [Firewall](#firewall)), put it behind
+> nginx with basic auth (see [Reverse proxy with TLS](#reverse-proxy-with-tls)),
+> or set `FLASK_HOST=127.0.0.1` so it's only reachable from the local machine.
+
+> **SECRET_KEY:** defaults to `dev-secret-key` if unset. The app logs a warning
+> on startup when it sees the default. Always generate a fresh one for
+> production: `python3 -c 'import secrets; print(secrets.token_hex(32))'`.
 
 ### Uploads
 
@@ -321,8 +428,182 @@ sudo systemctl disable ndi-streamer
 
 - **Auto-start** on boot
 - **Auto-restart** on crash (5 attempts within 60 seconds)
-- **Security hardening** — runs as a dedicated user, restricted filesystem access
+- **Dedicated system user** (`ndi-streamer`) with `/usr/sbin/nologin`
 - **Journal logging** — all output captured by systemd journal
+
+### systemd hardening
+
+The shipped unit file applies the following restrictions. Confirm they are
+active on your box with `systemctl show ndi-streamer | grep -E "Protect|Restrict|UMask|LimitNOFILE|MemoryMax"`:
+
+| Directive | Effect |
+|-----------|--------|
+| `NoNewPrivileges=true` | Process can't gain privileges via setuid binaries |
+| `ProtectSystem=strict` | `/usr`, `/boot`, `/etc` are read-only to the service |
+| `ReadWritePaths=/opt/ndi-streamer` | Only the app dir is writable |
+| `ProtectHome=true` | `/home`, `/root`, `/run/user` are inaccessible |
+| `PrivateTmp=true` | Service sees its own private `/tmp` |
+| `ProtectKernelTunables=true` | `/proc/sys`, `/sys` are read-only |
+| `ProtectKernelModules=true` | Can't load kernel modules |
+| `ProtectKernelLogs=true` | `dmesg` is hidden |
+| `ProtectControlGroups=true` | Cgroup hierarchy is read-only |
+| `ProtectClock=true` | Can't change the system clock |
+| `ProtectHostname=true` | Can't change the hostname |
+| `RestrictNamespaces=true` | No new user/mount/network/pid namespaces |
+| `RestrictSUIDSGID=true` | Can't create setuid/setgid binaries |
+| `LockPersonality=true` | `personality()` locked |
+| `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` | Only the socket families the app needs (NDI mDNS needs AF_NETLINK on Linux) |
+| `UMask=0077` | New files default to owner-only perms |
+| `LimitNOFILE=65536` | Plenty of fds for many instances |
+| `MemoryMax=4G` | Cgroup-enforced cap; raise for big multi-instance setups |
+| `TasksMax=4096` | Caps total threads/processes |
+
+Advanced hardening not enabled by default (enable cautiously — Playwright and
+Chromium use a wide syscall surface):
+
+- `SystemCallFilter=@system-service` — can break Chromium's sandboxed renderer
+  launch. Test on a staging box first.
+- `IPAddressAllow=`/`IPAddressDeny=` — works but you'd need to whitelist NDI
+  multicast + every NDI receiver.
+
+### Log retention
+
+systemd journal auto-rotates, but on a long-running box the defaults can grow
+large. Cap the journal at 500 MB and keep two weeks of history:
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/ndi-streamer.conf <<'EOF'
+[Journal]
+SystemMaxUse=500M
+MaxRetentionSec=2week
+EOF
+sudo systemctl restart systemd-journald
+```
+
+---
+
+## Firewall
+
+The app has no authentication. Your firewall is the first line of defense.
+
+### Required ports
+
+| Port | Proto | Purpose | Required |
+|------|-------|---------|----------|
+| 5000 | TCP | Web UI + REST API | Only if you access it from another machine. **Do not expose to the internet.** |
+| 5353 | UDP | mDNS — NDI source discovery | Required on any subnet where NDI receivers live |
+| 5960–5969 | TCP | NDI video streams (per-source, range grows with sender count) | Required for all NDI receivers |
+
+### ufw example
+
+Allow only a trusted admin subnet (`10.0.0.0/24`) to hit the web UI, and
+allow NDI traffic anywhere on the LAN:
+
+```bash
+sudo apt install -y ufw
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow from 10.0.0.0/24 to any port 5000 proto tcp comment 'NDI Streamer admin UI'
+sudo ufw allow 5353/udp comment 'mDNS for NDI discovery'
+sudo ufw allow 5960:5969/tcp comment 'NDI video streams'
+sudo ufw enable
+sudo ufw status verbose
+```
+
+If clients are on another VLAN, you may need to open additional NDI TCP ports;
+NDI allocates sequentially starting at 5960 per sender. For many instances,
+open `5960:5999/tcp` or a wider range.
+
+---
+
+## Reverse proxy with TLS
+
+Putting nginx in front gives you HTTPS **and** an authentication layer the app
+doesn't provide out of the box. Do this whenever the server is reachable from
+anywhere outside a trusted LAN.
+
+1. Set `FLASK_HOST=127.0.0.1` in `/opt/ndi-streamer/.env` and restart the
+   service — the app will now only listen on loopback.
+
+2. Install nginx and create a basic-auth password file:
+
+   ```bash
+   sudo apt install -y nginx apache2-utils
+   sudo htpasswd -c /etc/nginx/.htpasswd-ndi admin
+   ```
+
+3. Create `/etc/nginx/sites-available/ndi-streamer`:
+
+   ```nginx
+   server {
+       listen 80;
+       server_name ndi.example.com;
+       return 301 https://$host$request_uri;
+   }
+
+   server {
+       listen 443 ssl http2;
+       server_name ndi.example.com;
+
+       # Certs: use certbot (Let's Encrypt) or drop your own in.
+       ssl_certificate     /etc/letsencrypt/live/ndi.example.com/fullchain.pem;
+       ssl_certificate_key /etc/letsencrypt/live/ndi.example.com/privkey.pem;
+
+       client_max_body_size 64M;   # must be >= MAX_UPLOAD_SIZE_MB in .env
+
+       auth_basic           "NDI Streamer";
+       auth_basic_user_file /etc/nginx/.htpasswd-ndi;
+
+       location / {
+           proxy_pass         http://127.0.0.1:5000;
+           proxy_http_version 1.1;
+           proxy_set_header   Host              $host;
+           proxy_set_header   X-Real-IP         $remote_addr;
+           proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+           proxy_set_header   X-Forwarded-Proto $scheme;
+           proxy_read_timeout 120s;
+       }
+   }
+   ```
+
+4. Enable it and issue a certificate:
+
+   ```bash
+   sudo ln -s /etc/nginx/sites-available/ndi-streamer /etc/nginx/sites-enabled/
+   sudo nginx -t && sudo systemctl reload nginx
+   sudo apt install -y certbot python3-certbot-nginx
+   sudo certbot --nginx -d ndi.example.com
+   ```
+
+5. Tighten the firewall so only `443/tcp` (and `80/tcp` for the ACME redirect)
+   is reachable for the web UI — port `5000` should no longer be in your ufw
+   ruleset since Flask is only on loopback now.
+
+---
+
+## Monitoring
+
+```bash
+# Service state + recent logs
+sudo systemctl status ndi-streamer
+sudo journalctl -u ndi-streamer --since "1 hour ago"
+sudo journalctl -u ndi-streamer -f
+
+# See the parent + all worker child processes
+pgrep -af 'run.py|ndi_worker'
+ps --ppid "$(pgrep -f run.py | head -n1)" -o pid,rss,cmd
+
+# Per-instance heartbeat + health from the API
+curl -s http://127.0.0.1:5000/api/health | python3 -m json.tool
+```
+
+A simple periodic memory snapshot (expect RSS to stay flat between 4h browser
+recycles):
+
+```bash
+watch -n 30 'ps -o pid,rss,cmd -p $(pgrep -f ndi_worker | tr "\n" ",") 2>/dev/null'
+```
 
 ---
 
@@ -402,28 +683,69 @@ The setup script checks these paths for `libndi.so`:
 - `/usr/lib`
 - `/opt/ndi/lib`
 
-#### Manual installation
+#### Manual installation (Debian/Ubuntu)
 
-1. **Download** the NDI SDK from [ndi.video/tools/ndi-sdk](https://ndi.video/tools/ndi-sdk/)
+1. **Download** the NDI SDK for Linux from
+   [ndi.video/tools/ndi-sdk](https://ndi.video/tools/ndi-sdk/) (the download
+   is gated by an email signup). You'll get either a `.tar.gz` or a
+   self-extracting `.sh` — both end up as a shell installer.
 
-2. **Run the installer:**
+2. **Run the installer.** It will prompt you to accept the EULA and extract
+   into the current directory:
+
    ```bash
    chmod +x Install_NDI_SDK_v6_Linux.sh
-   sudo ./Install_NDI_SDK_v6_Linux.sh
+   ./Install_NDI_SDK_v6_Linux.sh
    ```
 
-3. **Add the library path:**
+   This extracts a directory like `NDI SDK for Linux/`. The runtime shared
+   library lives at `NDI SDK for Linux/lib/x86_64-linux-gnu/libndi.so.*`.
+
+3. **Install the runtime system-wide.** Copy the library and headers into
+   `/usr/local/`:
+
    ```bash
-   echo 'export LD_LIBRARY_PATH=/usr/share/ndi/lib:$LD_LIBRARY_PATH' | sudo tee /etc/profile.d/ndi.sh
-   source /etc/profile.d/ndi.sh
+   cd "NDI SDK for Linux"
+   sudo mkdir -p /usr/local/ndi/lib /usr/local/ndi/include
+   sudo cp -r lib/x86_64-linux-gnu/* /usr/local/ndi/lib/
+   sudo cp -r include/* /usr/local/ndi/include/
    ```
 
-4. **Verify:**
+4. **Register the library path with the dynamic linker.** This is cleaner
+   than `LD_LIBRARY_PATH` because it works for every process on the machine,
+   including systemd services, without needing to export an env var:
+
    ```bash
-   ls /usr/share/ndi/lib/libndi.so*
+   echo '/usr/local/ndi/lib' | sudo tee /etc/ld.so.conf.d/ndi.conf
+   sudo ldconfig
    ```
 
-If running as a systemd service, the library path is already set in the service file.
+   Verify the linker can find it:
+
+   ```bash
+   ldconfig -p | grep libndi
+   # Should print something like:
+   # libndi.so.6 (libc6,x86-64) => /usr/local/ndi/lib/libndi.so.6
+   ```
+
+5. **Install the Python bindings** into the venv:
+
+   ```bash
+   sudo -u ndi-streamer /opt/ndi-streamer/venv/bin/pip install ndi-python
+   ```
+
+   Verify:
+
+   ```bash
+   sudo -u ndi-streamer /opt/ndi-streamer/venv/bin/python -c \
+     "import NDIlib as n; assert n.initialize(); print('NDI ready'); n.destroy()"
+   ```
+
+**Alternative** — if you prefer `LD_LIBRARY_PATH` (e.g. to keep the SDK in a
+user-writable directory), create `/etc/profile.d/ndi.sh` with
+`export LD_LIBRARY_PATH=/usr/local/ndi/lib:$LD_LIBRARY_PATH` and also set it
+in `ndi-streamer.service` via an `Environment=` line. The `ld.so.conf.d`
+approach above is recommended because it removes the env var from the equation.
 
 ### Windows
 
