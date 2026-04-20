@@ -65,13 +65,8 @@ pip install --upgrade pip -q
 pip install -r "$APP_DIR/requirements.txt" -q
 ok "Core dependencies installed"
 
-# Optional: NDI Python bindings (best-effort)
-info "Installing ndi-python (optional)..."
-if pip install ndi-python -q 2>/dev/null; then
-    ok "ndi-python installed"
-else
-    warn "ndi-python could not be installed — app will run in dummy mode until NDI SDK is available"
-fi
+# ndi-python install is deferred to after NDI SDK detection (section 5)
+# because the build needs NDI_SDK_DIR pointing at the extracted SDK.
 
 # ------------------------------------------------------------------
 # 4. Playwright (headless Chromium)
@@ -81,14 +76,33 @@ playwright install chromium 2>/dev/null || true
 
 # install-deps needs root to apt-install Chromium's shared libraries
 # (libnss3, libatk-bridge2.0-0, libasound2, libxkbcommon0, etc.).
+# On Debian trixie the playwright-supplied ubuntu package list pulls in
+# ttf-ubuntu-font-family / ttf-unifont which no longer exist; fall back
+# to installing the core runtime libs directly.
+install_chromium_libs_fallback() {
+    local runner="$1"
+    $runner apt-get install -y --no-install-recommends \
+        libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
+        libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
+        libxkbcommon0 libpango-1.0-0 libcairo2 libasound2t64 \
+        libatspi2.0-0t64 libx11-6 libxcb1 libxext6 libdrm2 \
+        fonts-liberation fonts-unifont 2>/dev/null
+}
+
 if [ "$EUID" -eq 0 ]; then
-    playwright install-deps chromium 2>/dev/null || \
-        warn "playwright install-deps failed — Chromium may be missing shared libs"
+    if ! playwright install-deps chromium 2>/dev/null; then
+        warn "playwright install-deps failed — trying fallback package list"
+        install_chromium_libs_fallback "" || \
+            warn "Fallback install failed — Chromium may be missing shared libs"
+    fi
 else
     info "Installing Chromium system libraries (requires sudo)..."
     if command -v sudo &>/dev/null; then
-        sudo "$(command -v playwright)" install-deps chromium 2>/dev/null || \
-            warn "playwright install-deps failed — run manually: sudo $(command -v playwright) install-deps chromium"
+        if ! sudo "$(command -v playwright)" install-deps chromium 2>/dev/null; then
+            warn "playwright install-deps failed — trying fallback package list"
+            install_chromium_libs_fallback "sudo" || \
+                warn "Fallback install failed — run manually: sudo $(command -v playwright) install-deps chromium"
+        fi
     else
         warn "sudo not found. Run manually as root: $(command -v playwright) install-deps chromium"
     fi
@@ -96,39 +110,106 @@ fi
 ok "Playwright ready"
 
 # ------------------------------------------------------------------
-# 5. NDI SDK detection
+# 5. NDI SDK detection + system install
 # ------------------------------------------------------------------
 echo ""
-NDI_FOUND=false
-NDI_LIB_PATHS=(
-    "/usr/share/ndi/lib"
-    "/usr/local/lib"
-    "/usr/lib"
-    "/opt/ndi/lib"
-)
 
-for ndi_path in "${NDI_LIB_PATHS[@]}"; do
-    if [ -f "$ndi_path/libndi.so" ] || ls "$ndi_path"/libndi.so.* &>/dev/null 2>&1; then
-        NDI_FOUND=true
-        ok "NDI SDK found at: $ndi_path"
+# Map machine arch -> NDI SDK's lib/<triple> directory
+case "$(uname -m)" in
+    x86_64)  NDI_SDK_ARCH="x86_64-linux-gnu" ;;
+    i?86)    NDI_SDK_ARCH="i686-linux-gnu" ;;
+    aarch64) NDI_SDK_ARCH="aarch64-rpi4-linux-gnueabi" ;;
+    armv7l)  NDI_SDK_ARCH="arm-rpi3-linux-gnueabihf" ;;
+    *)       NDI_SDK_ARCH="x86_64-linux-gnu" ;;
+esac
+
+# Find an extracted NDI SDK (v6 installer drops it at ~/"NDI SDK for Linux").
+NDI_SDK_ROOT=""
+_ndi_roots=(
+    "${NDI_SDK_DIR:-}"
+    "$HOME/NDI SDK for Linux"
+    "/opt/NDI SDK for Linux"
+    "/usr/local/NDI SDK for Linux"
+)
+if [ -n "${SUDO_USER:-}" ]; then
+    _sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+    [ -n "$_sudo_home" ] && _ndi_roots+=("$_sudo_home/NDI SDK for Linux")
+fi
+for root in "${_ndi_roots[@]}"; do
+    [ -z "$root" ] && continue
+    if [ -f "$root/include/Processing.NDI.Lib.h" ] && \
+       [ -f "$root/lib/$NDI_SDK_ARCH/libndi.so" ]; then
+        NDI_SDK_ROOT="$root"
+        ok "NDI SDK found at: $root (arch: $NDI_SDK_ARCH)"
         break
     fi
 done
 
-if [ "$NDI_FOUND" = false ]; then
+# Is the runtime lib already reachable via the linker?
+NDI_RUNTIME_FOUND=false
+if command -v ldconfig &>/dev/null && ldconfig -p | grep -q 'libndi\.so'; then
+    NDI_RUNTIME_FOUND=true
+fi
+for ndi_path in /usr/share/ndi/lib /usr/local/lib /usr/lib /opt/ndi/lib \
+                /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu; do
+    if ls "$ndi_path"/libndi.so* &>/dev/null 2>&1; then
+        NDI_RUNTIME_FOUND=true
+        break
+    fi
+done
+
+# If we found an extracted SDK but no system-installed runtime, copy it
+# into /usr/local so the ndi-streamer service user can load it under
+# ProtectSystem=strict (which leaves /usr/local writable+readable).
+install_ndi_system() {
+    local runner=""
+    [ "$EUID" -ne 0 ] && runner="sudo"
+    info "Installing NDI runtime libs to /usr/local/lib (requires root)..."
+    $runner cp -df "$NDI_SDK_ROOT/lib/$NDI_SDK_ARCH"/libndi.so* /usr/local/lib/ || return 1
+    $runner mkdir -p /usr/local/include/ndi
+    $runner cp -rf "$NDI_SDK_ROOT/include/". /usr/local/include/ndi/ || return 1
+    $runner ldconfig
+    ok "NDI runtime installed to /usr/local/lib"
+    NDI_RUNTIME_FOUND=true
+}
+
+if [ -n "$NDI_SDK_ROOT" ] && [ "$NDI_RUNTIME_FOUND" = false ]; then
+    if [ "$EUID" -eq 0 ] || command -v sudo &>/dev/null; then
+        install_ndi_system || warn "NDI system install failed — continuing in dummy mode"
+    else
+        warn "Run as root (or install sudo) to copy libndi into /usr/local/lib"
+    fi
+fi
+
+if [ "$NDI_RUNTIME_FOUND" = false ] && [ -z "$NDI_SDK_ROOT" ]; then
     warn "NDI SDK runtime NOT detected."
     echo ""
     echo "  The app will run in dummy mode (no NDI output) until the SDK is installed."
     echo ""
     echo "  To install the NDI SDK:"
     echo "    1. Download from: https://ndi.video/tools/ndi-sdk/"
-    echo "    2. Run the installer:"
+    echo "    2. Run the installer (extracts SDK to ~/NDI SDK for Linux):"
     echo "       chmod +x Install_NDI_SDK_v6_Linux.sh"
-    echo "       sudo ./Install_NDI_SDK_v6_Linux.sh"
-    echo "    3. Add the library path to your environment:"
-    echo "       echo 'export LD_LIBRARY_PATH=/usr/share/ndi/lib:\$LD_LIBRARY_PATH' >> ~/.bashrc"
-    echo "       source ~/.bashrc"
+    echo "       ./Install_NDI_SDK_v6_Linux.sh"
+    echo "    3. Re-run ./setup.sh — it will pick up the extracted SDK and"
+    echo "       install the libs to /usr/local/lib automatically."
     echo ""
+fi
+
+# ------------------------------------------------------------------
+# 5b. Optional: NDI Python bindings (now that the SDK is known)
+# ------------------------------------------------------------------
+info "Installing ndi-python (optional)..."
+if [ -n "$NDI_SDK_ROOT" ]; then
+    export NDI_SDK_DIR="$NDI_SDK_ROOT"
+fi
+if pip install ndi-python -q 2>/dev/null; then
+    ok "ndi-python installed"
+else
+    warn "ndi-python could not be installed — app will run in dummy mode"
+    if [ -z "$NDI_SDK_ROOT" ]; then
+        warn "  (no NDI SDK was found for the build to link against)"
+    fi
 fi
 
 # ------------------------------------------------------------------
@@ -192,10 +273,25 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         source "$INSTALL_DIR/venv/bin/activate"
         pip install --upgrade pip -q
         pip install -r "$INSTALL_DIR/requirements.txt" -q
-        playwright install chromium 2>/dev/null || true
+        if [ -n "$NDI_SDK_ROOT" ]; then
+            NDI_SDK_DIR="$NDI_SDK_ROOT" pip install ndi-python -q 2>/dev/null || \
+                warn "ndi-python build failed in service venv — service will run dummy mode"
+        else
+            pip install ndi-python -q 2>/dev/null || true
+        fi
     fi
 
-    # Set ownership
+    # Install Playwright browsers into a shared path the service user can read.
+    # The service user has --no-create-home and ProtectHome=true, so the
+    # default ~/.cache/ms-playwright location is unreachable.
+    info "Installing Playwright Chromium into ${INSTALL_DIR}/ms-playwright..."
+    export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/ms-playwright"
+    mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+    "$INSTALL_DIR/venv/bin/playwright" install chromium 2>/dev/null || \
+        warn "Failed to install Chromium into $PLAYWRIGHT_BROWSERS_PATH"
+    unset PLAYWRIGHT_BROWSERS_PATH
+
+    # Set ownership (includes the freshly-installed browsers)
     chown -R "$SERVICE_NAME:$SERVICE_NAME" "$INSTALL_DIR"
 
     # Verify service user can execute the venv Python

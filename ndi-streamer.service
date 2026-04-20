@@ -3,6 +3,8 @@ Description=NDI Streamer Service
 Documentation=https://github.com/YOUR_ORG/ndi-streamer
 After=network.target
 Wants=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -11,14 +13,16 @@ Group=ndi-streamer
 WorkingDirectory=/opt/ndi-streamer
 Environment=PATH=/opt/ndi-streamer/venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=LD_LIBRARY_PATH=/usr/share/ndi/lib
+# ndi-streamer runs with --no-create-home and ProtectHome=true, so $HOME is
+# unwritable. Pin Playwright's browser cache to a path the service can reach.
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/ndi-streamer/ms-playwright
+Environment=HOME=/opt/ndi-streamer
 EnvironmentFile=/opt/ndi-streamer/.env
 
 ExecStart=/opt/ndi-streamer/venv/bin/python run.py
 
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 # Logging
 StandardOutput=journal
