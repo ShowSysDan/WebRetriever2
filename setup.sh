@@ -283,15 +283,21 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         ok "Created system user: $SERVICE_NAME"
     fi
 
-    # Copy to install directory
+    # Copy to install directory. Exclude venv/ so the dev venv's pip
+    # wrapper (with its APP_DIR-rooted shebang) doesn't shadow the
+    # service venv we're about to build.
     info "Copying to ${INSTALL_DIR}..."
     mkdir -p "$INSTALL_DIR"
-    rsync -a --exclude='.git' --exclude='__pycache__' "$APP_DIR/" "$INSTALL_DIR/"
+    rsync -a --exclude='.git' --exclude='__pycache__' --exclude='venv' \
+          "$APP_DIR/" "$INSTALL_DIR/"
 
     # Recreate venv in install dir if different
     if [ "$APP_DIR" != "$INSTALL_DIR" ]; then
         info "Setting up venv in ${INSTALL_DIR}..."
-        $PYTHON -m venv "$INSTALL_DIR/venv"
+        # --clear nukes any prior venv so pip wrappers get fresh shebangs
+        # pointing at this venv's python (not a previously-copied one).
+        rm -rf "$INSTALL_DIR/venv"
+        $PYTHON -m venv --clear "$INSTALL_DIR/venv"
         source "$INSTALL_DIR/venv/bin/activate"
         pip install --upgrade pip -q
         pip install -r "$INSTALL_DIR/requirements.txt" -q
