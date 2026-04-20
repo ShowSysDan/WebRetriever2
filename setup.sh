@@ -89,6 +89,19 @@ install_chromium_libs_fallback() {
         fonts-liberation fonts-unifont 2>/dev/null
 }
 
+# NDI discovery on Linux rides on Avahi (mDNS / DNS-SD). Without it
+# libndi can't register sources, so receivers won't see them on the
+# network. Install and enable unconditionally.
+ensure_avahi() {
+    local runner="$1"
+    command -v systemctl &>/dev/null || return 0
+    if ! systemctl list-unit-files 2>/dev/null | grep -q '^avahi-daemon\.service'; then
+        $runner apt-get install -y --no-install-recommends \
+            avahi-daemon avahi-utils libnss-mdns 2>/dev/null || return 1
+    fi
+    $runner systemctl enable --now avahi-daemon 2>/dev/null || true
+}
+
 if [ "$EUID" -eq 0 ]; then
     if ! playwright install-deps chromium 2>/dev/null; then
         warn "playwright install-deps failed — trying fallback package list"
@@ -108,6 +121,15 @@ else
     fi
 fi
 ok "Playwright ready"
+
+# Install Avahi so NDI sources can advertise via mDNS.
+if [ "$EUID" -eq 0 ]; then
+    ensure_avahi "" && ok "Avahi (mDNS) ready" || warn "Avahi install/enable failed — NDI sources may not advertise"
+elif command -v sudo &>/dev/null; then
+    ensure_avahi "sudo" && ok "Avahi (mDNS) ready" || warn "Avahi install/enable failed — NDI sources may not advertise"
+else
+    warn "Install avahi-daemon for NDI discovery: sudo apt install avahi-daemon avahi-utils libnss-mdns"
+fi
 
 # ------------------------------------------------------------------
 # 5. NDI SDK detection + system install
