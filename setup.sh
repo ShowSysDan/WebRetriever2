@@ -89,6 +89,19 @@ install_chromium_libs_fallback() {
         fonts-liberation fonts-unifont 2>/dev/null
 }
 
+# NDI discovery on Linux rides on Avahi (mDNS / DNS-SD). Without it
+# libndi can't register sources, so receivers won't see them on the
+# network. Install and enable unconditionally.
+ensure_avahi() {
+    local runner="$1"
+    command -v systemctl &>/dev/null || return 0
+    if ! systemctl list-unit-files 2>/dev/null | grep -q '^avahi-daemon\.service'; then
+        $runner apt-get install -y --no-install-recommends \
+            avahi-daemon avahi-utils libnss-mdns 2>/dev/null || return 1
+    fi
+    $runner systemctl enable --now avahi-daemon 2>/dev/null || true
+}
+
 if [ "$EUID" -eq 0 ]; then
     if ! playwright install-deps chromium 2>/dev/null; then
         warn "playwright install-deps failed — trying fallback package list"
@@ -108,6 +121,15 @@ else
     fi
 fi
 ok "Playwright ready"
+
+# Install Avahi so NDI sources can advertise via mDNS.
+if [ "$EUID" -eq 0 ]; then
+    ensure_avahi "" && ok "Avahi (mDNS) ready" || warn "Avahi install/enable failed — NDI sources may not advertise"
+elif command -v sudo &>/dev/null; then
+    ensure_avahi "sudo" && ok "Avahi (mDNS) ready" || warn "Avahi install/enable failed — NDI sources may not advertise"
+else
+    warn "Install avahi-daemon for NDI discovery: sudo apt install avahi-daemon avahi-utils libnss-mdns"
+fi
 
 # ------------------------------------------------------------------
 # 5. NDI SDK detection + system install
@@ -199,14 +221,36 @@ fi
 # ------------------------------------------------------------------
 # 5b. Optional: NDI Python bindings (now that the SDK is known)
 # ------------------------------------------------------------------
+# ndi-python has no 3.13 wheels yet and must be compiled from source.
+# The build needs cmake + a C++ toolchain; install them on-demand.
+if [ -n "$NDI_SDK_ROOT" ]; then
+    if ! command -v cmake &>/dev/null || ! command -v c++ &>/dev/null; then
+        info "Installing build tools for ndi-python (cmake, gcc, ninja)..."
+        if [ "$EUID" -eq 0 ]; then
+            apt-get install -y --no-install-recommends \
+                build-essential cmake ninja-build python3-dev 2>/dev/null || \
+                warn "apt install of build tools failed — ndi-python may not build"
+        elif command -v sudo &>/dev/null; then
+            sudo apt-get install -y --no-install-recommends \
+                build-essential cmake ninja-build python3-dev 2>/dev/null || \
+                warn "apt install of build tools failed — ndi-python may not build"
+        else
+            warn "cmake is required to build ndi-python — install build-essential cmake ninja-build"
+        fi
+    fi
+fi
+
 info "Installing ndi-python (optional)..."
 if [ -n "$NDI_SDK_ROOT" ]; then
     export NDI_SDK_DIR="$NDI_SDK_ROOT"
 fi
-if pip install ndi-python -q 2>/dev/null; then
+if pip install ndi-python 2>&1 | tee /tmp/ndi-python-install.log | tail -3 | grep -q "Successfully installed"; then
     ok "ndi-python installed"
+elif pip show ndi-python &>/dev/null; then
+    ok "ndi-python already installed"
 else
     warn "ndi-python could not be installed — app will run in dummy mode"
+    warn "  See /tmp/ndi-python-install.log for the build error"
     if [ -z "$NDI_SDK_ROOT" ]; then
         warn "  (no NDI SDK was found for the build to link against)"
     fi
@@ -261,15 +305,21 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         ok "Created system user: $SERVICE_NAME"
     fi
 
-    # Copy to install directory
+    # Copy to install directory. Exclude venv/ so the dev venv's pip
+    # wrapper (with its APP_DIR-rooted shebang) doesn't shadow the
+    # service venv we're about to build.
     info "Copying to ${INSTALL_DIR}..."
     mkdir -p "$INSTALL_DIR"
-    rsync -a --exclude='.git' --exclude='__pycache__' "$APP_DIR/" "$INSTALL_DIR/"
+    rsync -a --exclude='.git' --exclude='__pycache__' --exclude='venv' \
+          "$APP_DIR/" "$INSTALL_DIR/"
 
     # Recreate venv in install dir if different
     if [ "$APP_DIR" != "$INSTALL_DIR" ]; then
         info "Setting up venv in ${INSTALL_DIR}..."
-        $PYTHON -m venv "$INSTALL_DIR/venv"
+        # --clear nukes any prior venv so pip wrappers get fresh shebangs
+        # pointing at this venv's python (not a previously-copied one).
+        rm -rf "$INSTALL_DIR/venv"
+        $PYTHON -m venv --clear "$INSTALL_DIR/venv"
         source "$INSTALL_DIR/venv/bin/activate"
         pip install --upgrade pip -q
         pip install -r "$INSTALL_DIR/requirements.txt" -q

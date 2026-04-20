@@ -49,9 +49,14 @@ ProtectHostname=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 # Resource limits
+# Each Dock runs: 1 python worker + 1 Playwright node driver + ~5-8 Chromium
+# processes (parent, zygote, GPU, network, renderer, utilities). At 1080p a
+# single Dock's RSS footprint is ~300-500MB; refresh/recycle transients can
+# briefly double it. 4G was not enough for 5+ Docks — pin higher or tune
+# per-host (a simple override: systemctl edit ndi-streamer -> MemoryMax=...).
 LimitNOFILE=65536
-MemoryMax=4G
-TasksMax=4096
+MemoryMax=12G
+TasksMax=16384
 
 [Install]
 WantedBy=multi-user.target
