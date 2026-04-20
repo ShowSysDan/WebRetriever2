@@ -81,14 +81,33 @@ playwright install chromium 2>/dev/null || true
 
 # install-deps needs root to apt-install Chromium's shared libraries
 # (libnss3, libatk-bridge2.0-0, libasound2, libxkbcommon0, etc.).
+# On Debian trixie the playwright-supplied ubuntu package list pulls in
+# ttf-ubuntu-font-family / ttf-unifont which no longer exist; fall back
+# to installing the core runtime libs directly.
+install_chromium_libs_fallback() {
+    local runner="$1"
+    $runner apt-get install -y --no-install-recommends \
+        libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
+        libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
+        libxkbcommon0 libpango-1.0-0 libcairo2 libasound2t64 \
+        libatspi2.0-0t64 libx11-6 libxcb1 libxext6 libdrm2 \
+        fonts-liberation fonts-unifont 2>/dev/null
+}
+
 if [ "$EUID" -eq 0 ]; then
-    playwright install-deps chromium 2>/dev/null || \
-        warn "playwright install-deps failed — Chromium may be missing shared libs"
+    if ! playwright install-deps chromium 2>/dev/null; then
+        warn "playwright install-deps failed — trying fallback package list"
+        install_chromium_libs_fallback "" || \
+            warn "Fallback install failed — Chromium may be missing shared libs"
+    fi
 else
     info "Installing Chromium system libraries (requires sudo)..."
     if command -v sudo &>/dev/null; then
-        sudo "$(command -v playwright)" install-deps chromium 2>/dev/null || \
-            warn "playwright install-deps failed — run manually: sudo $(command -v playwright) install-deps chromium"
+        if ! sudo "$(command -v playwright)" install-deps chromium 2>/dev/null; then
+            warn "playwright install-deps failed — trying fallback package list"
+            install_chromium_libs_fallback "sudo" || \
+                warn "Fallback install failed — run manually: sudo $(command -v playwright) install-deps chromium"
+        fi
     else
         warn "sudo not found. Run manually as root: $(command -v playwright) install-deps chromium"
     fi
@@ -192,10 +211,20 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         source "$INSTALL_DIR/venv/bin/activate"
         pip install --upgrade pip -q
         pip install -r "$INSTALL_DIR/requirements.txt" -q
-        playwright install chromium 2>/dev/null || true
+        pip install ndi-python -q 2>/dev/null || true
     fi
 
-    # Set ownership
+    # Install Playwright browsers into a shared path the service user can read.
+    # The service user has --no-create-home and ProtectHome=true, so the
+    # default ~/.cache/ms-playwright location is unreachable.
+    info "Installing Playwright Chromium into ${INSTALL_DIR}/ms-playwright..."
+    export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/ms-playwright"
+    mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+    "$INSTALL_DIR/venv/bin/playwright" install chromium 2>/dev/null || \
+        warn "Failed to install Chromium into $PLAYWRIGHT_BROWSERS_PATH"
+    unset PLAYWRIGHT_BROWSERS_PATH
+
+    # Set ownership (includes the freshly-installed browsers)
     chown -R "$SERVICE_NAME:$SERVICE_NAME" "$INSTALL_DIR"
 
     # Verify service user can execute the venv Python
