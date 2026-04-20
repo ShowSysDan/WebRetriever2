@@ -199,14 +199,36 @@ fi
 # ------------------------------------------------------------------
 # 5b. Optional: NDI Python bindings (now that the SDK is known)
 # ------------------------------------------------------------------
+# ndi-python has no 3.13 wheels yet and must be compiled from source.
+# The build needs cmake + a C++ toolchain; install them on-demand.
+if [ -n "$NDI_SDK_ROOT" ]; then
+    if ! command -v cmake &>/dev/null || ! command -v c++ &>/dev/null; then
+        info "Installing build tools for ndi-python (cmake, gcc, ninja)..."
+        if [ "$EUID" -eq 0 ]; then
+            apt-get install -y --no-install-recommends \
+                build-essential cmake ninja-build python3-dev 2>/dev/null || \
+                warn "apt install of build tools failed — ndi-python may not build"
+        elif command -v sudo &>/dev/null; then
+            sudo apt-get install -y --no-install-recommends \
+                build-essential cmake ninja-build python3-dev 2>/dev/null || \
+                warn "apt install of build tools failed — ndi-python may not build"
+        else
+            warn "cmake is required to build ndi-python — install build-essential cmake ninja-build"
+        fi
+    fi
+fi
+
 info "Installing ndi-python (optional)..."
 if [ -n "$NDI_SDK_ROOT" ]; then
     export NDI_SDK_DIR="$NDI_SDK_ROOT"
 fi
-if pip install ndi-python -q 2>/dev/null; then
+if pip install ndi-python 2>&1 | tee /tmp/ndi-python-install.log | tail -3 | grep -q "Successfully installed"; then
     ok "ndi-python installed"
+elif pip show ndi-python &>/dev/null; then
+    ok "ndi-python already installed"
 else
     warn "ndi-python could not be installed — app will run in dummy mode"
+    warn "  See /tmp/ndi-python-install.log for the build error"
     if [ -z "$NDI_SDK_ROOT" ]; then
         warn "  (no NDI SDK was found for the build to link against)"
     fi
