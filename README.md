@@ -13,6 +13,7 @@ A self-hosted Flask application that captures webpages, images, or text via head
 - **Multiple NDI output instances** — each with its own stream name, resolution, and capture rate
 - **Four source types** — webpage URL, uploaded image, custom styled text, or a connected webcam
 - **Webcam detection** — auto-detects all connected V4L2 cameras (Linux) and streams them as NDI, bypassing the browser entirely for full camera-native frame rates (30–60fps)
+- **Stable camera identity** — webcams are bound by udev stable ID (USB serial via `/dev/v4l/by-id`, physical port via `/dev/v4l/by-path` as fallback), so each camera keeps its correct NDI output across unplugs, replugs, and reboots even when `/dev/videoN` numbers shuffle
 - **Custom NDI naming** — fully configurable hostname + per-instance stream name (e.g. `PRODUCTION (Lower Third)`)
 - **Decoupled FPS** — capture at any rate (e.g. 15fps for a weather radar), NDI always outputs at the global rate (60fps) by duplicating frames
 - **Auto-refresh** — per-instance configurable interval to reload content (e.g. refresh a weather page every 30 minutes)
@@ -1092,6 +1093,9 @@ Current version is tracked in the `VERSION` file at the project root.
   streams them as NDI outputs at camera-native frame rates, bypassing the browser
 - Webcam device picker in the instance editor
 - Automatic camera reconnect if a webcam stalls or is unplugged (last frame keeps streaming)
+- Stable camera identity: instances store the udev stable ID (`/dev/v4l/by-id`, serial-based;
+  `/dev/v4l/by-path`, port-based fallback) and resolve it on every reconnect, so the right
+  camera reattaches to the right output even if it re-enumerates as a different `/dev/videoN`
 - Memory/cleanup audit: preview thumbnails are now deleted with their instance;
   webcam resize path reuses a pre-allocated buffer instead of allocating per frame
 - Code deduplication: browser recycle/refresh, Playwright teardown, NDI cleanup, and

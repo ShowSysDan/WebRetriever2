@@ -241,7 +241,7 @@ function renderInstanceCard(inst) {
     webpage:'🌐 '+(inst.source_value||'—'),
     image: inst.media_file ? '🖼 '+inst.media_file.original_name : '🖼 '+(inst.source_value||'—'),
     text:'📝 '+(inst.text_content||'—').substring(0,30),
-    webcam:'📷 '+(inst.source_value||'—'),
+    webcam:'📷 '+((inst.source_value||'—').split('/').pop()),
   }[inst.source_type]||inst.source_value;
 
   const refreshLabel = inst.refresh_interval > 0
@@ -410,7 +410,7 @@ function renderModal() {
 
   // Webcam device picker
   const webcamSelect = h('select',null,h('option',{value:''},'Detecting webcams…'));
-  const webcamHint = h('div',{className:'form-hint'},'V4L2 devices detected on this machine');
+  const webcamHint = h('div',{className:'form-hint'},'Detected V4L2 devices — bound by stable ID, so each camera keeps its output across replugs and reboots');
   const webcamSection = h('div',{className:'form-group'},
     h('label',null,'Webcam Device'), webcamSelect, webcamHint,
   );
@@ -430,13 +430,24 @@ function renderModal() {
       webcamSelect.appendChild(h('option',{value:''},'No webcams detected'));
       webcamHint.textContent = 'No V4L2 capture devices found — check connections and permissions';
     }
-    cams.forEach(c=>webcamSelect.appendChild(h('option',{value:c.device},`${c.name} (${c.device})`)));
+    // Store the stable udev ID (survives replug/reboot) when available,
+    // falling back to the raw device node
+    cams.forEach(c=>{
+      const val = c.stable_id || c.device;
+      const label = `${c.name}${c.serial ? ' · SN '+c.serial : ''} (${c.device})`;
+      webcamSelect.appendChild(h('option',{value:val},label));
+    });
     const cur = field('source_value','');
     if(isEdit && inst.source_type==='webcam' && cur) {
-      if(!cams.some(c=>c.device===cur)) {
+      // Match stored value against either identifier so instances saved with
+      // a raw device path upgrade to the stable ID on their next save
+      const m = cams.find(c=>c.device===cur || c.stable_id===cur);
+      if(m) {
+        webcamSelect.value = m.stable_id || m.device;
+      } else {
         webcamSelect.appendChild(h('option',{value:cur},`${cur} (not detected)`));
+        webcamSelect.value = cur;
       }
-      webcamSelect.value = cur;
     }
   }
 

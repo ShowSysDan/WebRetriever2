@@ -11,7 +11,10 @@ Each instance runs in its own process:
   6. Updates a shared heartbeat timestamp so the watchdog can detect hangs
 
 Webcam sources:
-  - source_value is the V4L2 device path (e.g. /dev/video0).
+  - source_value is the V4L2 device path — preferably a stable udev symlink
+    (/dev/v4l/by-id/... or by-path/...) so the instance stays bound to the
+    correct physical camera across replugs and reboots; a raw /dev/videoN
+    path also works but those numbers shuffle with enumeration order.
   - A background grabber thread reads frames continuously at the camera's
     native rate; the send loop samples the latest frame at capture_fps and
     sends at output_fps, so capture/output stay decoupled exactly like the
@@ -102,18 +105,27 @@ class WebcamGrabber(threading.Thread):
         import cv2
 
         backend = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_ANY
+
+        # Resolve stable udev symlinks (/dev/v4l/by-id/..., by-path/...) to the
+        # current /dev/videoN. Resolved fresh on every open attempt: after a
+        # replug the camera may come back as a different videoN, and udev
+        # re-points the symlink — this is what keeps an instance bound to the
+        # correct physical camera. A dangling/missing link just fails the open
+        # and we retry.
+        device = os.path.realpath(str(self.device))
+
         # Prefer opening by index: /dev/videoN → N. Some OpenCV builds ship a
         # V4L2 backend that can't open by filename, but index-based open maps
         # to the same /dev/videoN node and is always supported.
         cap = None
-        digits = "".join(ch for ch in os.path.basename(str(self.device)) if ch.isdigit())
-        if digits and str(self.device).startswith("/dev/video"):
+        digits = "".join(ch for ch in os.path.basename(device) if ch.isdigit())
+        if digits and device.startswith("/dev/video"):
             cap = cv2.VideoCapture(int(digits), backend)
             if not cap.isOpened():
                 cap.release()
                 cap = None
         if cap is None:
-            cap = cv2.VideoCapture(self.device, backend)
+            cap = cv2.VideoCapture(device, backend)
         if not cap.isOpened():
             cap.release()
             return None
@@ -129,8 +141,9 @@ class WebcamGrabber(threading.Thread):
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        resolved = f" → {device}" if device != str(self.device) else ""
         logger.info(
-            f"Webcam opened: {self.device} — negotiated "
+            f"Webcam opened: {self.device}{resolved} — negotiated "
             f"{actual_w}x{actual_h} @ {actual_fps:.0f}fps "
             f"(requested {self.width}x{self.height} @ {self.fps}fps)"
         )
