@@ -12,7 +12,6 @@ Events tracked:
 
 import logging
 import logging.handlers
-import os
 
 FACILITY_MAP = {
     "kern": logging.handlers.SysLogHandler.LOG_KERN,
@@ -66,10 +65,8 @@ def setup_logging(app):
         if ":" in syslog_addr and not syslog_addr.startswith("/"):
             host, port = syslog_addr.rsplit(":", 1)
             address = (host, int(port))
-            socktype = None  # let it auto-detect
         else:
             address = syslog_addr
-            socktype = None
 
         try:
             syslog_handler = logging.handlers.SysLogHandler(

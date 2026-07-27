@@ -1,6 +1,6 @@
 # NDI Streamer
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
@@ -11,7 +11,8 @@ A self-hosted Flask application that captures webpages, images, or text via head
 ## Features
 
 - **Multiple NDI output instances** — each with its own stream name, resolution, and capture rate
-- **Three source types** — webpage URL, uploaded image, or custom styled text
+- **Four source types** — webpage URL, uploaded image, custom styled text, or a connected webcam
+- **Webcam detection** — auto-detects all connected V4L2 cameras (Linux) and streams them as NDI, bypassing the browser entirely for full camera-native frame rates (30–60fps)
 - **Custom NDI naming** — fully configurable hostname + per-instance stream name (e.g. `PRODUCTION (Lower Third)`)
 - **Decoupled FPS** — capture at any rate (e.g. 15fps for a weather radar), NDI always outputs at the global rate (60fps) by duplicating frames
 - **Auto-refresh** — per-instance configurable interval to reload content (e.g. refresh a weather page every 30 minutes)
@@ -1035,6 +1036,12 @@ print(f'OK: {len([d for d in data if d.get(\"running\")])} instances healthy')
 | `GET` | `/api/media/:id/file` | Serve the actual file |
 | `DELETE` | `/api/media/:id` | Delete file (unlinks from instances) |
 
+### Webcams
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/webcams` | Detect connected V4L2 capture devices (Linux) |
+
 ### System
 
 | Method | Endpoint | Description |
@@ -1052,11 +1059,18 @@ print(f'OK: {len([d for d in data if d.get(\"running\")])} instances healthy')
 | 720p @ 60fps capture | Light | Complex pages still fast |
 | 1080p static content, 5fps capture | Very light | NDI still outputs 60fps |
 | Text overlay, 15fps capture | Minimal | Simple HTML rendering |
+| Webcam 1080p @ 30fps | Light | No browser — MJPEG decode + copy only |
+| Webcam 1080p/720p @ 60fps | Light–Moderate | Requires a camera that offers 60fps modes |
 
 - Each instance is an isolated process — scales across CPU cores
 - For mostly-static content (images, text), set capture FPS low (5–15) to save CPU
 - Auto-refresh causes a brief content reload; the last frame continues sending during reload
 - The NDI SDK's `clock_video` option paces output to real-time
+- Webcam sources bypass Chromium entirely, so they run at the camera's native rate — the
+  limit is the camera hardware and USB bandwidth, not the app. The camera is opened in
+  MJPEG mode; uncompressed YUYV would cap out at ~5–10fps at 1080p on USB 2.0
+- Multiple simultaneous cameras: spread them across USB controllers/ports if you hit
+  bandwidth limits, and budget ~125 Mbps of network per 1080p60 NDI stream
 
 ---
 
@@ -1071,6 +1085,19 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 0.2.0
+
+- Webcam source type: auto-detects connected V4L2 cameras (`GET /api/webcams`) and
+  streams them as NDI outputs at camera-native frame rates, bypassing the browser
+- Webcam device picker in the instance editor
+- Automatic camera reconnect if a webcam stalls or is unplugged (last frame keeps streaming)
+- Memory/cleanup audit: preview thumbnails are now deleted with their instance;
+  webcam resize path reuses a pre-allocated buffer instead of allocating per frame
+- Code deduplication: browser recycle/refresh, Playwright teardown, NDI cleanup, and
+  worker process spawning are now shared functions between the main, dummy, and
+  watchdog-restart paths (dummy-mode auto-refresh now also uses the cheaper
+  `page.reload()` instead of a full navigation, matching the main loop)
 
 #### 0.1.0 (Initial Release)
 

@@ -208,7 +208,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v0.1.0'),
+      h('span',{className:'version'},'v0.2.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
@@ -241,6 +241,7 @@ function renderInstanceCard(inst) {
     webpage:'🌐 '+(inst.source_value||'—'),
     image: inst.media_file ? '🖼 '+inst.media_file.original_name : '🖼 '+(inst.source_value||'—'),
     text:'📝 '+(inst.text_content||'—').substring(0,30),
+    webcam:'📷 '+(inst.source_value||'—'),
   }[inst.source_type]||inst.source_value;
 
   const refreshLabel = inst.refresh_interval > 0
@@ -346,6 +347,7 @@ function renderModal() {
     h('option',{value:'webpage'},'Webpage URL'),
     h('option',{value:'image'},'Image'),
     h('option',{value:'text'},'Text'),
+    h('option',{value:'webcam'},'Webcam'),
   );
   if(isEdit) sourceTypeSelect.value = inst.source_type;
 
@@ -404,10 +406,47 @@ function renderModal() {
   mediaPicker.appendChild(pickerGrid);
   mediaPicker.appendChild(h('div',{className:'form-hint'},'Or enter a URL above'));
 
+  const sourceGroup = h('div',{className:'form-group'},h('label',null,'Source URL'),sourceInput);
+
+  // Webcam device picker
+  const webcamSelect = h('select',null,h('option',{value:''},'Detecting webcams…'));
+  const webcamHint = h('div',{className:'form-hint'},'V4L2 devices detected on this machine');
+  const webcamSection = h('div',{className:'form-group'},
+    h('label',null,'Webcam Device'), webcamSelect, webcamHint,
+  );
+  let webcamsLoaded = false;
+  async function loadWebcams() {
+    if(webcamsLoaded) return;
+    webcamsLoaded = true;
+    let cams;
+    try { cams = await api('/webcams'); }
+    catch(e) {
+      webcamsLoaded = false; // allow retry on next selection
+      webcamHint.textContent = 'Failed to detect webcams — try re-selecting the source type';
+      return;
+    }
+    webcamSelect.innerHTML = '';
+    if(!cams.length) {
+      webcamSelect.appendChild(h('option',{value:''},'No webcams detected'));
+      webcamHint.textContent = 'No V4L2 capture devices found — check connections and permissions';
+    }
+    cams.forEach(c=>webcamSelect.appendChild(h('option',{value:c.device},`${c.name} (${c.device})`)));
+    const cur = field('source_value','');
+    if(isEdit && inst.source_type==='webcam' && cur) {
+      if(!cams.some(c=>c.device===cur)) {
+        webcamSelect.appendChild(h('option',{value:cur},`${cur} (not detected)`));
+      }
+      webcamSelect.value = cur;
+    }
+  }
+
   function updateVisibility() {
     const st = sourceTypeSelect.value;
     textSection.style.display = st==='text'?'block':'none';
     mediaPicker.style.display = st==='image'?'block':'none';
+    sourceGroup.style.display = st==='webcam'?'none':'block';
+    webcamSection.style.display = st==='webcam'?'block':'none';
+    if(st==='webcam') loadWebcams();
   }
   sourceTypeSelect.addEventListener('change', updateVisibility);
 
@@ -415,7 +454,7 @@ function renderModal() {
     const data = {
       name: nameInput.value,
       source_type: sourceTypeSelect.value,
-      source_value: sourceInput.value,
+      source_value: sourceTypeSelect.value==='webcam' ? webcamSelect.value : sourceInput.value,
       media_file_id: sourceTypeSelect.value==='image' ? selectedMediaId : null,
       width: parseInt(widthInput.value)||1920,
       height: parseInt(heightInput.value)||1080,
@@ -438,7 +477,8 @@ function renderModal() {
       h('h2',null,isEdit?'Edit Instance':'New Instance'),
       h('div',{className:'form-group'},h('label',null,'Instance Name (NDI Source Name)'),nameInput),
       h('div',{className:'form-group'},h('label',null,'Source Type'),sourceTypeSelect),
-      h('div',{className:'form-group'},h('label',null,'Source URL'),sourceInput),
+      sourceGroup,
+      webcamSection,
       mediaPicker,
       h('div',{className:'form-row'},
         h('div',{className:'form-group'},h('label',null,'Width'),widthInput),
