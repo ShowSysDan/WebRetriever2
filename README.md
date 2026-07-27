@@ -1218,6 +1218,26 @@ ndi-streamer/
 - Check `MAX_UPLOAD_SIZE_MB` isn't too low
 - Ensure the service user owns the uploads directory
 
+**New features missing after `git pull` (running as a service)**
+- The systemd service runs from `/opt/ndi-streamer` with its own venv — pulling
+  in your clone directory does not update it. Sync and reinstall dependencies:
+  ```bash
+  sudo rsync -a --exclude='.git' --exclude='__pycache__' --exclude='venv' \
+      ./ /opt/ndi-streamer/
+  sudo /opt/ndi-streamer/venv/bin/pip install -r /opt/ndi-streamer/requirements.txt
+  sudo chown -R ndi-streamer:ndi-streamer /opt/ndi-streamer
+  sudo cp /opt/ndi-streamer/ndi-streamer.service /etc/systemd/system/
+  sudo systemctl daemon-reload && sudo systemctl restart ndi-streamer
+  ```
+- Hard-refresh the browser afterwards (Ctrl+Shift+R) — the UI is a single
+  cached `index.html`
+
+**Webcams detected but won't open (running as a service)**
+- The service user needs `/dev/video*` access. The shipped unit grants it via
+  `SupplementaryGroups=video`; if you installed the service before this line
+  existed, copy the updated unit (see above) or add the user to the group:
+  `sudo usermod -aG video ndi-streamer && sudo systemctl restart ndi-streamer`
+
 ### Windows
 
 **`ModuleNotFoundError: No module named 'NDIlib'`**

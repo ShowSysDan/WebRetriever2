@@ -10,6 +10,8 @@ StartLimitBurst=5
 Type=simple
 User=ndi-streamer
 Group=ndi-streamer
+# 'video' grants access to /dev/video* so webcam sources can open cameras
+SupplementaryGroups=video
 WorkingDirectory=/opt/ndi-streamer
 Environment=PATH=/opt/ndi-streamer/venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=LD_LIBRARY_PATH=/usr/share/ndi/lib
