@@ -37,6 +37,22 @@ class WorkerManager:
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
 
+    def _spawn(self, instance_id: int, config: dict) -> mp.Process:
+        """Create a fresh heartbeat + worker + process from a stored config
+        and register them. Shared by initial start and watchdog restart."""
+        heartbeat = mp.Value(ctypes.c_double, time.monotonic())
+        worker = NDIWorker(**config, heartbeat=heartbeat)
+        process = mp.Process(
+            target=worker_entry, args=(worker,),
+            name=f"ndi-worker-{instance_id}", daemon=True,
+        )
+        process.start()
+
+        self._workers[instance_id] = worker
+        self._processes[instance_id] = process
+        self._heartbeats[instance_id] = heartbeat
+        return process
+
     def start_instance(
         self,
         instance_id: int,
@@ -57,9 +73,6 @@ class WorkerManager:
             logger.warning(f"Instance {instance_id} already running")
             return False
 
-        # Create shared heartbeat value (double precision monotonic timestamp)
-        heartbeat = mp.Value(ctypes.c_double, time.monotonic())
-
         config = dict(
             instance_id=instance_id, ndi_name=ndi_name,
             source_type=source_type, source_value=source_value,
@@ -73,16 +86,7 @@ class WorkerManager:
         )
         self._configs[instance_id] = config
 
-        worker = NDIWorker(**config, heartbeat=heartbeat)
-        process = mp.Process(
-            target=worker_entry, args=(worker,),
-            name=f"ndi-worker-{instance_id}", daemon=True,
-        )
-        process.start()
-
-        self._workers[instance_id] = worker
-        self._processes[instance_id] = process
-        self._heartbeats[instance_id] = heartbeat
+        process = self._spawn(instance_id, config)
         log_event("INSTANCE_STARTED", f"id={instance_id} name='{ndi_name}' pid={process.pid}")
 
         self._ensure_watchdog()
@@ -178,21 +182,9 @@ class WorkerManager:
         # Clean up old refs
         self._workers.pop(iid, None)
         self._processes.pop(iid, None)
-        old_hb = self._heartbeats.pop(iid, None)
+        self._heartbeats.pop(iid, None)
 
-        # Fresh heartbeat
-        heartbeat = mp.Value(ctypes.c_double, time.monotonic())
-
-        worker = NDIWorker(**config, heartbeat=heartbeat)
-        process = mp.Process(
-            target=worker_entry, args=(worker,),
-            name=f"ndi-worker-{iid}", daemon=True,
-        )
-        process.start()
-
-        self._workers[iid] = worker
-        self._processes[iid] = process
-        self._heartbeats[iid] = heartbeat
+        process = self._spawn(iid, config)
         log_event("INSTANCE_RESTARTED", f"id={iid} reason={reason} new_pid={process.pid}")
 
     def _watchdog_loop(self):

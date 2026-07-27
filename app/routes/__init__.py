@@ -237,6 +237,16 @@ def delete_instance(instance_id):
         manager.stop_instance(inst.id)
     db.session.delete(inst)
     db.session.commit()
+
+    # Remove the stale preview thumbnail so deleted instances don't
+    # accumulate orphaned files in the previews directory
+    preview_dir = current_app.config.get("PREVIEW_FOLDER")
+    if preview_dir:
+        try:
+            os.remove(os.path.join(preview_dir, f"{instance_id}.jpg"))
+        except OSError:
+            pass
+
     log_event("INSTANCE_DELETED", f"id={instance_id} name='{name}'")
     return jsonify({"message": f"Instance '{name}' deleted"})
 
@@ -396,6 +406,17 @@ def delete_media(media_id):
 
     log_event("MEDIA_DELETED", f"id={media_id} name='{original_name}'")
     return jsonify({"message": "Deleted", "unlinked_instances": [i.id for i in instances]})
+
+
+# =========================================================================
+# Webcams
+# =========================================================================
+
+@api.route("/webcams", methods=["GET"])
+def list_webcams():
+    """Detect V4L2 video capture devices connected to this machine."""
+    from app.workers.webcam_utils import detect_webcams
+    return jsonify(detect_webcams())
 
 
 # =========================================================================
