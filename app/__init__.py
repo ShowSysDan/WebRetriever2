@@ -2,10 +2,34 @@ import os
 import logging
 from flask import Flask, send_from_directory
 from flask_migrate import Migrate
+from sqlalchemy import inspect as sa_inspect, text
 from app.config import Config
 from app.models import db, GlobalSettings, OutputInstance
 from app.routes import api
 from app.logging_config import setup_logging
+
+
+def _add_missing_columns():
+    """Lightweight auto-migration: add columns that exist in the models but
+    not yet in the database (create_all only creates missing tables, it never
+    alters existing ones). New columns are declared nullable so a plain
+    ADD COLUMN works on SQLite and PostgreSQL alike; code treats NULL as the
+    field's default."""
+    logger = logging.getLogger(__name__)
+    inspector = sa_inspect(db.engine)
+    for table in db.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue  # create_all handles brand-new tables
+        existing = {c["name"] for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing:
+                continue
+            col_type = column.type.compile(db.engine.dialect)
+            db.session.execute(text(
+                f'ALTER TABLE {table.name} ADD COLUMN {column.name} {col_type}'
+            ))
+            logger.info(f"DB migrated: added {table.name}.{column.name} ({col_type})")
+    db.session.commit()
 
 
 def create_app(config_class=Config):
@@ -41,6 +65,7 @@ def create_app(config_class=Config):
     # Initialize DB + default settings
     with app.app_context():
         db.create_all()
+        _add_missing_columns()
         if not GlobalSettings.query.first():
             settings = GlobalSettings(
                 ndi_hostname=app.config.get("NDI_HOSTNAME", "NDI-STREAMER"),

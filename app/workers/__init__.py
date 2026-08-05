@@ -16,7 +16,11 @@ import threading
 import multiprocessing as mp
 from typing import Dict, Optional
 
-from app.workers.ndi_worker import NDIWorker, worker_entry, HEARTBEAT_TIMEOUT
+from app.workers.ndi_worker import (
+    NDIWorker, worker_entry, HEARTBEAT_TIMEOUT,
+    VIDEO_CMD_NONE, VIDEO_CMD_PLAY, VIDEO_CMD_STOP,
+    VIDEO_STATE_PLAYING,
+)
 from app.logging_config import log_event
 
 logger = logging.getLogger(__name__)
@@ -33,6 +37,8 @@ class WorkerManager:
         self._workers: Dict[int, NDIWorker] = {}
         self._processes: Dict[int, mp.Process] = {}
         self._heartbeats: Dict[int, mp.Value] = {}
+        self._video_cmds: Dict[int, mp.Value] = {}
+        self._video_states: Dict[int, mp.Value] = {}
         self._configs: Dict[int, dict] = {}
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
@@ -41,7 +47,15 @@ class WorkerManager:
         """Create a fresh heartbeat + worker + process from a stored config
         and register them. Shared by initial start and watchdog restart."""
         heartbeat = mp.Value(ctypes.c_double, time.monotonic())
-        worker = NDIWorker(**config, heartbeat=heartbeat)
+        extra = {}
+        if config.get("source_type") == "video":
+            # Shared control channel for play/stop commands and playback state
+            video_cmd = mp.Value(ctypes.c_int, VIDEO_CMD_NONE)
+            video_state = mp.Value(ctypes.c_int, 0)
+            self._video_cmds[instance_id] = video_cmd
+            self._video_states[instance_id] = video_state
+            extra = {"video_cmd": video_cmd, "video_state": video_state}
+        worker = NDIWorker(**config, heartbeat=heartbeat, **extra)
         process = mp.Process(
             target=worker_entry, args=(worker,),
             name=f"ndi-worker-{instance_id}", daemon=True,
@@ -66,6 +80,7 @@ class WorkerManager:
         refresh_interval: int = 0,
         browser_recycle_hours: float = DEFAULT_RECYCLE_HOURS,
         text_settings: Optional[dict] = None,
+        video_settings: Optional[dict] = None,
         preview_dir: Optional[str] = None,
         preview_interval: float = 2.0,
     ) -> bool:
@@ -81,6 +96,7 @@ class WorkerManager:
             refresh_interval=refresh_interval,
             browser_recycle_hours=browser_recycle_hours,
             text_settings=text_settings,
+            video_settings=video_settings,
             preview_dir=preview_dir,
             preview_interval=preview_interval,
         )
@@ -112,6 +128,8 @@ class WorkerManager:
         self._workers.pop(instance_id, None)
         self._processes.pop(instance_id, None)
         self._heartbeats.pop(instance_id, None)
+        self._video_cmds.pop(instance_id, None)
+        self._video_states.pop(instance_id, None)
         self._configs.pop(instance_id, None)
         log_event("INSTANCE_STOPPED", f"id={instance_id}")
         return True
@@ -149,6 +167,28 @@ class WorkerManager:
         }
 
     # ------------------------------------------------------------------
+    # Video playback control
+    # ------------------------------------------------------------------
+
+    def video_command(self, instance_id: int, command: str) -> bool:
+        """Send a play/stop command to a running video worker.
+        Returns False if the instance isn't a running video source."""
+        cmd_value = self._video_cmds.get(instance_id)
+        if cmd_value is None or not self.is_running(instance_id):
+            return False
+        with cmd_value.get_lock():
+            cmd_value.value = VIDEO_CMD_PLAY if command == "play" else VIDEO_CMD_STOP
+        log_event("VIDEO_COMMAND", f"id={instance_id} cmd={command}")
+        return True
+
+    def get_video_state(self, instance_id: int) -> Optional[str]:
+        """Playback state of a running video worker, or None if not applicable."""
+        state_value = self._video_states.get(instance_id)
+        if state_value is None or not self.is_running(instance_id):
+            return None
+        return "playing" if state_value.value == VIDEO_STATE_PLAYING else "stopped"
+
+    # ------------------------------------------------------------------
     # Watchdog
     # ------------------------------------------------------------------
 
@@ -179,10 +219,12 @@ class WorkerManager:
                 proc.kill()
                 proc.join(timeout=3)
 
-        # Clean up old refs
+        # Clean up old refs (_spawn recreates video control values as needed)
         self._workers.pop(iid, None)
         self._processes.pop(iid, None)
         self._heartbeats.pop(iid, None)
+        self._video_cmds.pop(iid, None)
+        self._video_states.pop(iid, None)
 
         process = self._spawn(iid, config)
         log_event("INSTANCE_RESTARTED", f"id={iid} reason={reason} new_pid={process.pid}")
@@ -232,6 +274,8 @@ class WorkerManager:
             self._workers.pop(iid, None)
             self._processes.pop(iid, None)
             self._heartbeats.pop(iid, None)
+            self._video_cmds.pop(iid, None)
+            self._video_states.pop(iid, None)
         return dead
 
 

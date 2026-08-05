@@ -100,7 +100,7 @@
   .media-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; cursor:pointer; transition:border-color .15s; position:relative; }
   .media-card:hover { border-color:var(--border-hover); }
   .media-card.selected { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
-  .media-card img { width:100%; height:120px; object-fit:cover; display:block; background:#000; }
+  .media-card img, .media-card video { width:100%; height:120px; object-fit:cover; display:block; background:#000; }
   .media-card-info { padding:8px 10px; }
   .media-card-name { font-size:12px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .media-card-meta { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; margin-top:2px; }
@@ -120,7 +120,7 @@
   .media-picker-item { border:2px solid transparent; border-radius:4px; overflow:hidden; cursor:pointer; }
   .media-picker-item:hover { border-color:var(--border-hover); }
   .media-picker-item.selected { border-color:var(--accent); }
-  .media-picker-item img { width:100%; height:60px; object-fit:cover; display:block; }
+  .media-picker-item img, .media-picker-item video { width:100%; height:60px; object-fit:cover; display:block; background:#000; }
 </style>
 </head>
 <body>
@@ -148,8 +148,9 @@ async function api(path, opts={}) {
 }
 
 let settingsEditing = false;
+let lastDataSig = '';
 
-async function loadData() {
+async function loadData(force=false) {
   const [settings, instances, media] = await Promise.all([
     api('/settings'), api('/instances'), api('/media'),
   ]);
@@ -159,7 +160,51 @@ async function loadData() {
   if (!settingsEditing) {
     state.fpsInput = String(settings.output_fps);
   }
-  render();
+  // Drop cached previews for instances that are no longer running
+  for (const id of Object.keys(previewCache)) {
+    if (!instances.some(i => String(i.id) === id && i.running)) {
+      URL.revokeObjectURL(previewCache[id]);
+      delete previewCache[id];
+    }
+  }
+  // Only rebuild the DOM when the data actually changed — a full re-render
+  // every poll recreates every element and makes images flash
+  const sig = JSON.stringify([settings, instances, media]);
+  if (force || sig !== lastDataSig) {
+    lastDataSig = sig;
+    render();
+  }
+}
+
+// --- Flicker-free preview refresh -------------------------------------
+// Previews are fetched as blobs, fully decoded off-screen, then swapped
+// into the existing <img> in place. The old frame stays visible until the
+// new one is ready, so there's no flash of empty/loading image.
+const previewCache = {}; // instance id -> object URL of last decoded frame
+
+async function updatePreviews() {
+  for (const inst of state.instances) {
+    if (!inst.running || state.modal) continue;
+    try {
+      const res = await fetch(`${API}/instances/${inst.id}/preview?t=${Date.now()}`);
+      if (res.status !== 200) continue;
+      const blob = await res.blob();
+      if (!blob.size) continue;
+      const url = URL.createObjectURL(blob);
+      const tmp = new Image();
+      tmp.src = url;
+      try { await tmp.decode(); } catch(e) {}
+      const old = previewCache[inst.id];
+      previewCache[inst.id] = url;
+      // Swap into live cards (decoded → paints instantly, no flash)
+      document.querySelectorAll(`img[data-preview="${inst.id}"]`).forEach(img => { img.src = url; });
+      // First frame after start: upgrade the placeholder to an image
+      document.querySelectorAll(`[data-preview-slot="${inst.id}"]`).forEach(ph => {
+        ph.replaceWith(h('img',{className:'instance-preview','data-preview':inst.id,src:url,alt:'Preview'}));
+      });
+      if (old && old !== url) URL.revokeObjectURL(old);
+    } catch(e) {}
+  }
 }
 
 // Actions
@@ -177,7 +222,7 @@ async function toggleEnabled(inst) { await api(`/instances/${inst.id}`,{method:'
 async function saveInstance(data, id) {
   if(id) await api(`/instances/${id}`,{method:'PUT',body:data});
   else await api('/instances',{method:'POST',body:data});
-  state.modal=null; await loadData();
+  state.modal=null; await loadData(true);
 }
 async function uploadFile(file) {
   const fd = new FormData(); fd.append('file', file);
@@ -189,6 +234,8 @@ async function deleteMedia(id) {
   await api(`/media/${id}`,{method:'DELETE'});
   await loadData();
 }
+async function videoPlay(id) { await api(`/instances/${id}/video/play`,{method:'POST'}); await loadData(); }
+async function videoStop(id) { await api(`/instances/${id}/video/stop`,{method:'POST'}); await loadData(); }
 
 // DOM helper
 function h(tag, attrs, ...children) {
@@ -208,7 +255,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v0.2.0'),
+      h('span',{className:'version'},'v0.3.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
@@ -242,6 +289,7 @@ function renderInstanceCard(inst) {
     image: inst.media_file ? '🖼 '+inst.media_file.original_name : '🖼 '+(inst.source_value||'—'),
     text:'📝 '+(inst.text_content||'—').substring(0,30),
     webcam:'📷 '+((inst.source_value||'—').split('/').pop()),
+    video:'🎞 '+(inst.media_file ? inst.media_file.original_name : '—')+(inst.video_loop?' ⟳':''),
   }[inst.source_type]||inst.source_value;
 
   const refreshLabel = inst.refresh_interval > 0
@@ -249,7 +297,9 @@ function renderInstanceCard(inst) {
     : '';
 
   const preview = inst.running
-    ? h('img',{className:'instance-preview',src:`/api/instances/${inst.id}/preview?t=${Math.floor(Date.now()/2000)}`,alt:'Preview',loading:'lazy'})
+    ? (previewCache[inst.id]
+        ? h('img',{className:'instance-preview','data-preview':inst.id,src:previewCache[inst.id],alt:'Preview'})
+        : h('div',{className:'instance-preview-empty','data-preview-slot':inst.id},'Loading…'))
     : h('div',{className:'instance-preview-empty'},'No preview');
 
   return h('div',{className:`instance-card ${inst.running?'running':'stopped'}`},
@@ -258,12 +308,21 @@ function renderInstanceCard(inst) {
     h('div',{className:'instance-info'},
       h('h3',null,inst.name),
       h('div',{className:'meta'},`NDI Source: ${inst.name}`),
+      inst.source_type==='video' && inst.running
+        ? h('div',{className:'meta',style:{color:inst.video_state==='playing'?'var(--accent)':'var(--text-dim)'}},
+            inst.video_state==='playing'?'▶ PLAYING':'⏸ HOLDING')
+        : null,
     ),
     h('div',{className:'instance-res'},`${inst.width}×${inst.height}`),
     h('div',{className:'instance-source'},srcLabel),
     h('div',{className:'instance-fps'},`⚡ ${inst.capture_fps}fps`),
     h('div',{className:'instance-refresh'},refreshLabel),
     h('div',{className:'instance-actions'},
+      inst.source_type==='video'
+        ? (inst.running && inst.video_state==='playing'
+            ? h('button',{className:'sm',onClick:()=>videoStop(inst.id),title:'Stop video playback'},'⏹')
+            : h('button',{className:'sm',onClick:()=>videoPlay(inst.id),title:'Play video from start'},'⏵'))
+        : null,
       h('div',{className:`toggle ${inst.enabled?'on':''}`,onClick:()=>toggleEnabled(inst),title:inst.enabled?'Enabled':'Disabled'}),
       inst.running
         ? h('button',{className:'sm danger',onClick:()=>stopInstance(inst.id)},'■')
@@ -296,8 +355,8 @@ function renderMediaPage() {
   const main = h('div',{className:'main'});
 
   // Upload zone
-  const zone = h('div',{className:'upload-zone'},'Drop files here or click to upload');
-  const fileInput = h('input',{type:'file',accept:'image/*',multiple:'true',style:{display:'none'}});
+  const zone = h('div',{className:'upload-zone'},'Drop images or videos here, or click to upload');
+  const fileInput = h('input',{type:'file',accept:'image/*,video/*',multiple:'true',style:{display:'none'}});
   fileInput.addEventListener('change',e=>{Array.from(e.target.files).forEach(uploadFile);});
   zone.addEventListener('click',()=>fileInput.click());
   zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('dragover');});
@@ -318,12 +377,16 @@ function renderMediaPage() {
     const grid = h('div',{className:'media-grid'});
     state.media.forEach(m=>{
       const usedBy = state.instances.filter(i=>i.media_file_id===m.id);
+      const dur = m.duration_s ? ` · ${Math.floor(m.duration_s/60)}:${String(Math.round(m.duration_s%60)).padStart(2,'0')}` : '';
+      const size = m.file_size > 1048576 ? `${(m.file_size/1048576).toFixed(1)}MB` : `${(m.file_size/1024).toFixed(0)}KB`;
       const card = h('div',{className:'media-card'},
-        h('img',{src:m.url,alt:m.original_name,loading:'lazy'}),
+        m.is_video
+          ? h('video',{src:m.url+'#t=0.1',muted:'true',preload:'metadata',title:m.original_name})
+          : h('img',{src:m.url,alt:m.original_name,loading:'lazy'}),
         h('div',{className:'media-card-info'},
-          h('div',{className:'media-card-name'},m.original_name),
+          h('div',{className:'media-card-name'},(m.is_video?'🎞 ':'')+m.original_name),
           h('div',{className:'media-card-meta'},
-            `${m.width_px||'?'}×${m.height_px||'?'} · ${(m.file_size/1024).toFixed(0)}KB`),
+            `${m.width_px||'?'}×${m.height_px||'?'}${dur} · ${size}`),
           usedBy.length ? h('div',{className:'media-usage'},`Used by: ${usedBy.map(i=>i.name).join(', ')}`) : null,
         ),
         h('div',{className:'media-card-actions'},
@@ -348,6 +411,7 @@ function renderModal() {
     h('option',{value:'image'},'Image'),
     h('option',{value:'text'},'Text'),
     h('option',{value:'webcam'},'Webcam'),
+    h('option',{value:'video'},'Video File'),
   );
   if(isEdit) sourceTypeSelect.value = inst.source_type;
 
@@ -380,31 +444,70 @@ function renderModal() {
     ),
   );
 
-  // Media picker for image type
+  // Media pickers (images for image type, videos for video type)
   let selectedMediaId = field('media_file_id', null);
+  function buildPicker(items, {allowNone, onPick}) {
+    const grid = h('div',{className:'media-picker'});
+    if(allowNone) {
+      const noneItem = h('div',{className:`media-picker-item ${!selectedMediaId?'selected':''}`,onClick:()=>{
+        selectedMediaId=null;
+        grid.querySelectorAll('.media-picker-item').forEach(el=>el.classList.remove('selected'));
+        noneItem.classList.add('selected');
+      }},h('div',{style:{width:'100%',height:'60px',background:'var(--surface2)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',color:'var(--text-dim)'}},'None'));
+      grid.appendChild(noneItem);
+    }
+    items.forEach(m=>{
+      const thumb = m.is_video
+        ? h('video',{src:m.url+'#t=0.1',title:m.original_name,muted:'true',preload:'metadata'})
+        : h('img',{src:m.url,alt:m.original_name,title:m.original_name});
+      const item = h('div',{className:`media-picker-item ${selectedMediaId===m.id?'selected':''}`,onClick:()=>{
+        selectedMediaId=m.id;
+        grid.querySelectorAll('.media-picker-item').forEach(el=>el.classList.remove('selected'));
+        item.classList.add('selected');
+        if(onPick) onPick(m);
+      }},thumb);
+      grid.appendChild(item);
+    });
+    return grid;
+  }
+
   const mediaPicker = h('div',{className:'form-group',id:'media-picker-group'},
     h('label',null,'Select from Library'),
+    buildPicker(state.media.filter(m=>!m.is_video), {allowNone:true, onPick:m=>{sourceInput.value=m.url;}}),
+    h('div',{className:'form-hint'},'Or enter a URL above'),
   );
-  const pickerGrid = h('div',{className:'media-picker'});
-  // "None" option
-  const noneItem = h('div',{className:`media-picker-item ${!selectedMediaId?'selected':''}`,onClick:()=>{
-    selectedMediaId=null;
-    pickerGrid.querySelectorAll('.media-picker-item').forEach(el=>el.classList.remove('selected'));
-    noneItem.classList.add('selected');
-  }},h('div',{style:{width:'100%',height:'60px',background:'var(--surface2)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',color:'var(--text-dim)'}},'None'));
-  pickerGrid.appendChild(noneItem);
 
-  state.media.forEach(m=>{
-    const item = h('div',{className:`media-picker-item ${selectedMediaId===m.id?'selected':''}`,onClick:()=>{
-      selectedMediaId=m.id;
-      pickerGrid.querySelectorAll('.media-picker-item').forEach(el=>el.classList.remove('selected'));
-      item.classList.add('selected');
-      sourceInput.value = m.url;
-    }},h('img',{src:m.url,alt:m.original_name,title:m.original_name}));
-    pickerGrid.appendChild(item);
-  });
-  mediaPicker.appendChild(pickerGrid);
-  mediaPicker.appendChild(h('div',{className:'form-hint'},'Or enter a URL above'));
+  // Video source settings
+  const videoLoopSel = h('select',null,
+    h('option',{value:'once'},'Play once'),
+    h('option',{value:'loop'},'Loop'),
+  );
+  videoLoopSel.value = field('video_loop',false) ? 'loop' : 'once';
+  const videoHoldSel = h('select',null,
+    h('option',{value:'last'},'Hold last frame'),
+    h('option',{value:'first'},'Hold first frame'),
+  );
+  videoHoldSel.value = field('video_hold','last');
+  const videoAutoplayCheck = h('input',{type:'checkbox',style:{width:'auto'}});
+  videoAutoplayCheck.checked = !!field('video_autoplay',false);
+  const videoApiName = isEdit ? encodeURIComponent(inst.name) : '<name>';
+  const videoSection = h('div',{className:'text-settings',id:'video-settings'},
+    h('div',{className:'form-group'},
+      h('label',null,'Video from Library'),
+      buildPicker(state.media.filter(m=>m.is_video), {allowNone:false}),
+      h('div',{className:'form-hint'},'Upload videos in the Media Library tab (mp4, mov, mkv, webm…)'),
+    ),
+    h('div',{className:'form-row'},
+      h('div',{className:'form-group'},h('label',null,'Playback Mode'),videoLoopSel),
+      h('div',{className:'form-group'},h('label',null,'While Stopped'),videoHoldSel),
+    ),
+    h('div',{className:'form-group'},
+      h('label',{style:{display:'flex',alignItems:'center',gap:'8px',textTransform:'none',fontSize:'13px',color:'var(--text)'}},
+        videoAutoplayCheck,'Start playing automatically when the instance starts'),
+    ),
+    h('div',{className:'form-hint'},
+      `Remote control (same port as this page): GET or POST /api/instances/${videoApiName}/video/play · /video/stop · /video/status — works with the instance id too`),
+  );
 
   const sourceGroup = h('div',{className:'form-group'},h('label',null,'Source URL'),sourceInput);
 
@@ -455,18 +558,23 @@ function renderModal() {
     const st = sourceTypeSelect.value;
     textSection.style.display = st==='text'?'block':'none';
     mediaPicker.style.display = st==='image'?'block':'none';
-    sourceGroup.style.display = st==='webcam'?'none':'block';
+    videoSection.style.display = st==='video'?'block':'none';
+    sourceGroup.style.display = (st==='webcam'||st==='video')?'none':'block';
     webcamSection.style.display = st==='webcam'?'block':'none';
     if(st==='webcam') loadWebcams();
   }
   sourceTypeSelect.addEventListener('change', updateVisibility);
 
   function handleSave() {
+    const st = sourceTypeSelect.value;
     const data = {
       name: nameInput.value,
-      source_type: sourceTypeSelect.value,
-      source_value: sourceTypeSelect.value==='webcam' ? webcamSelect.value : sourceInput.value,
-      media_file_id: sourceTypeSelect.value==='image' ? selectedMediaId : null,
+      source_type: st,
+      source_value: st==='webcam' ? webcamSelect.value : (st==='video' ? '' : sourceInput.value),
+      media_file_id: (st==='image'||st==='video') ? selectedMediaId : null,
+      video_loop: videoLoopSel.value==='loop',
+      video_hold: videoHoldSel.value,
+      video_autoplay: videoAutoplayCheck.checked,
       width: parseInt(widthInput.value)||1920,
       height: parseInt(heightInput.value)||1080,
       capture_fps: parseInt(fpsInput.value)||30,
@@ -491,6 +599,7 @@ function renderModal() {
       sourceGroup,
       webcamSection,
       mediaPicker,
+      videoSection,
       h('div',{className:'form-row'},
         h('div',{className:'form-group'},h('label',null,'Width'),widthInput),
         h('div',{className:'form-group'},h('label',null,'Height'),heightInput),
@@ -531,6 +640,7 @@ function render() {
 
 loadData();
 setInterval(() => { if (!state.modal) loadData(); }, 5000);
+setInterval(updatePreviews, 2000);
 </script>
 </body>
 </html>

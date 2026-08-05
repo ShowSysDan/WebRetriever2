@@ -1,17 +1,19 @@
 # NDI Streamer
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
-A self-hosted Flask application that captures webpages, images, or text via headless Chromium and outputs them as NDI video streams on your network.
+A self-hosted Flask application that captures webpages, images, or text via headless Chromium — plus webcams and video files decoded natively — and outputs them as NDI video streams on your network.
 
 ---
 
 ## Features
 
 - **Multiple NDI output instances** — each with its own stream name, resolution, and capture rate
-- **Four source types** — webpage URL, uploaded image, custom styled text, or a connected webcam
+- **Five source types** — webpage URL, uploaded image, custom styled text, a connected webcam, or an uploaded video file
+- **Video playback as NDI** — upload a video (mp4, mov, mkv, webm…) and play it out as an NDI source: play once or loop, hold the last or first frame while stopped, optional autoplay on start
+- **Show-control friendly playback API** — trigger video play/stop with a plain GET or POST URL on the same port as the web UI (works from Companion, Crestron, QLab, or a browser bookmark), addressing instances by id or by name
 - **Webcam detection** — auto-detects all connected V4L2 cameras (Linux) and streams them as NDI, bypassing the browser entirely for full camera-native frame rates (30–60fps)
 - **Stable camera identity** — webcams are bound by udev stable ID (USB serial via `/dev/v4l/by-id`, physical port via `/dev/v4l/by-path` as fallback), so each camera keeps its correct NDI output across unplugs, replugs, and reboots even when `/dev/videoN` numbers shuffle
 - **Custom NDI naming** — fully configurable hostname + per-instance stream name (e.g. `PRODUCTION (Lower Third)`)
@@ -384,8 +386,12 @@ FLASK_PORT=5000
 
 ```env
 UPLOAD_FOLDER=app/uploads
-MAX_UPLOAD_SIZE_MB=50
+MAX_UPLOAD_SIZE_MB=500
 ```
+
+The media library accepts images (`png jpg jpeg gif bmp webp svg tiff`) and
+videos (`mp4 mov m4v mkv webm avi mpg mpeg`). The default size cap is 500 MB
+to leave room for video files; tune `MAX_UPLOAD_SIZE_MB` to taste.
 
 ### Syslog
 
@@ -1043,6 +1049,52 @@ print(f'OK: {len([d for d in data if d.get(\"running\")])} instances healthy')
 |--------|----------|-------------|
 | `GET` | `/api/webcams` | Detect connected V4L2 capture devices (Linux) |
 
+### Video Playback Control
+
+Video-file instances expose playback control on the same port as the web UI,
+designed for show controllers (Companion, Crestron, QLab network cues) and
+plain browser bookmarks. `:ref` is the instance **id or name** (URL-encode
+spaces in names), and both `GET` and `POST` are accepted on play/stop so any
+device that can fire a URL can drive playback:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`/`POST` | `/api/instances/:ref/video/play` | Play from the first frame (auto-starts the NDI output if needed) |
+| `GET`/`POST` | `/api/instances/:ref/video/stop` | Stop playback and hold the configured frame |
+| `GET` | `/api/instances/:ref/video/status` | Playback state + configured loop/hold/autoplay |
+
+```bash
+# Fire the walk-in video from anything that can hit a URL
+curl "http://10.0.0.5:5000/api/instances/Walk-In%20Video/video/play"
+
+# ...or by instance id
+curl -X POST http://10.0.0.5:5000/api/instances/3/video/play
+
+# Stop it (the frame configured under "While Stopped" stays on air)
+curl "http://10.0.0.5:5000/api/instances/3/video/stop"
+
+# Check state
+curl "http://10.0.0.5:5000/api/instances/3/video/status"
+# → {"id":3,"name":"Walk-In Video","running":true,"video_state":"playing",
+#    "video_loop":false,"video_hold":"last","video_autoplay":false}
+```
+
+Behavior notes:
+
+- **`play` always restarts from the first frame** — it doubles as a restart button.
+- **`play` on a stopped instance auto-starts the NDI output first**, so one URL
+  is all a controller needs.
+- **The NDI stream never goes blank**: before playback and while stopped the
+  held frame keeps streaming at the global output FPS.
+- Per-instance settings (in the instance editor or via `PUT /api/instances/:id`):
+  - `video_loop` — `false` = play once then stop, `true` = loop forever
+  - `video_hold` — `"last"` or `"first"`: which frame stays on air when stopped
+    or after a play-once video ends
+  - `video_autoplay` — start playing as soon as the instance starts
+- Frames advance at the file's native frame rate (letterboxed to the instance
+  resolution); NDI output stays at the global output FPS. Audio is not output —
+  playback is video-only.
+
 ### System
 
 | Method | Endpoint | Description |
@@ -1062,6 +1114,7 @@ print(f'OK: {len([d for d in data if d.get(\"running\")])} instances healthy')
 | Text overlay, 15fps capture | Minimal | Simple HTML rendering |
 | Webcam 1080p @ 30fps | Light | No browser — MJPEG decode + copy only |
 | Webcam 1080p/720p @ 60fps | Light–Moderate | Requires a camera that offers 60fps modes |
+| Video file 1080p @ 30fps | Light | No browser — FFmpeg decode via OpenCV; while stopped/holding it's a single frame resend |
 
 - Each instance is an isolated process — scales across CPU cores
 - For mostly-static content (images, text), set capture FPS low (5–15) to save CPU
@@ -1086,6 +1139,29 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 0.3.0
+
+- Video file source type: upload a video to the media library and stream it as an
+  NDI output, decoded natively with OpenCV/FFmpeg (no browser)
+- Playback modes: play once or loop; configurable hold frame (last or first) stays
+  on air while stopped or after a play-once video ends, so the stream never goes blank
+- Optional autoplay when the instance starts
+- HTTP playback control on the same port as the web UI:
+  `GET`/`POST` `/api/instances/:ref/video/play`, `/video/stop`, and
+  `GET` `/video/status` — instances addressable by id or name, `play` auto-starts
+  the NDI output, built for show controllers (Companion, Crestron, QLab)
+- Media library accepts video uploads (mp4, mov, m4v, mkv, webm, avi, mpg, mpeg),
+  probes duration/resolution, and shows video thumbnails; default upload cap raised
+  to 500 MB (`MAX_UPLOAD_SIZE_MB`)
+- Web UI: video settings in the instance editor (library picker, playback mode,
+  hold frame, autoplay, ready-to-copy control URLs), play/stop buttons and live
+  PLAYING/HOLDING state on instance cards
+- Web UI flicker fix: preview thumbnails are now fetched and fully decoded in the
+  background, then swapped in place — the page also only re-renders when data
+  actually changes, so images no longer flash on the 5-second poll
+- Automatic lightweight DB migration on startup adds the new columns to existing
+  SQLite/PostgreSQL databases — no manual migration needed
 
 #### 0.2.0
 
