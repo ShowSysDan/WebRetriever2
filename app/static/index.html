@@ -182,8 +182,19 @@ async function loadData(force=false) {
 // into the existing <img> in place. The old frame stays visible until the
 // new one is ready, so there's no flash of empty/loading image.
 const previewCache = {}; // instance id -> object URL of last decoded frame
+let previewsBusy = false; // reentrancy guard — slow fetches must not pile up
 
 async function updatePreviews() {
+  if (previewsBusy || document.hidden) return;
+  previewsBusy = true;
+  try {
+    await _updatePreviews();
+  } finally {
+    previewsBusy = false;
+  }
+}
+
+async function _updatePreviews() {
   for (const inst of state.instances) {
     if (!inst.running || state.modal) continue;
     try {
@@ -256,7 +267,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v0.3.1'),
+      h('span',{className:'version'},'v0.3.2'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
@@ -640,8 +651,12 @@ function render() {
 }
 
 loadData();
-setInterval(() => { if (!state.modal) loadData(); }, 5000);
+setInterval(() => { if (!state.modal && !document.hidden) loadData(); }, 5000);
 setInterval(updatePreviews, 2000);
+// Catch up immediately when the tab becomes visible again
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !state.modal) { loadData(); updatePreviews(); }
+});
 </script>
 </body>
 </html>

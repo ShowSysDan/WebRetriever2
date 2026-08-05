@@ -9,8 +9,10 @@ Features:
   - Configurable browser recycling interval passed to each worker
 """
 
+import os
 import time
 import ctypes
+import signal
 import logging
 import threading
 import multiprocessing as mp
@@ -31,6 +33,27 @@ WATCHDOG_INTERVAL = 5
 # Default browser recycle interval (hours)
 DEFAULT_RECYCLE_HOURS = 4
 
+# Restart backoff: doubles per consecutive failure, capped; resets after a
+# stable run. Prevents a permanently-broken instance from respawning (and
+# relaunching Chromium) every watchdog tick forever.
+RESTART_BACKOFF_MAX = 300.0
+RESTART_STABLE_RESET = 120.0
+
+
+def _kill_process_tree(process: mp.Process):
+    """Force-kill a worker AND its descendants (Playwright driver, Chromium).
+
+    Workers call os.setpgrp() on entry, so their pid doubles as their process
+    group id — killpg reaps the whole tree in one shot. Falls back to a plain
+    kill on platforms without process groups (Windows)."""
+    if process.pid and hasattr(os, "killpg"):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    process.kill()
+
 
 class WorkerManager:
     def __init__(self):
@@ -42,6 +65,12 @@ class WorkerManager:
         self._configs: Dict[int, dict] = {}
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
+        # Restart backoff bookkeeping: iid -> (consecutive_failures, last_restart_monotonic)
+        self._restart_meta: Dict[int, tuple] = {}
+        # Flask serves requests on multiple threads and the watchdog runs on
+        # its own — lifecycle ops must not interleave, or a double-clicked
+        # Start button races two spawns and orphans one worker untracked
+        self._lock = threading.RLock()
 
     def _spawn(self, instance_id: int, config: dict) -> mp.Process:
         """Create a fresh heartbeat + worker + process from a stored config
@@ -84,55 +113,61 @@ class WorkerManager:
         preview_dir: Optional[str] = None,
         preview_interval: float = 2.0,
     ) -> bool:
-        if instance_id in self._processes and self._processes[instance_id].is_alive():
-            logger.warning(f"Instance {instance_id} already running")
-            return False
+        with self._lock:
+            if instance_id in self._processes and self._processes[instance_id].is_alive():
+                logger.warning(f"Instance {instance_id} already running")
+                return False
 
-        config = dict(
-            instance_id=instance_id, ndi_name=ndi_name,
-            source_type=source_type, source_value=source_value,
-            width=width, height=height,
-            capture_fps=capture_fps, output_fps=output_fps,
-            refresh_interval=refresh_interval,
-            browser_recycle_hours=browser_recycle_hours,
-            text_settings=text_settings,
-            video_settings=video_settings,
-            preview_dir=preview_dir,
-            preview_interval=preview_interval,
-        )
-        self._configs[instance_id] = config
+            config = dict(
+                instance_id=instance_id, ndi_name=ndi_name,
+                source_type=source_type, source_value=source_value,
+                width=width, height=height,
+                capture_fps=capture_fps, output_fps=output_fps,
+                refresh_interval=refresh_interval,
+                browser_recycle_hours=browser_recycle_hours,
+                text_settings=text_settings,
+                video_settings=video_settings,
+                preview_dir=preview_dir,
+                preview_interval=preview_interval,
+            )
+            self._configs[instance_id] = config
+            self._restart_meta.pop(instance_id, None)
 
-        process = self._spawn(instance_id, config)
-        log_event("INSTANCE_STARTED", f"id={instance_id} name='{ndi_name}' pid={process.pid}")
+            process = self._spawn(instance_id, config)
+            log_event("INSTANCE_STARTED", f"id={instance_id} name='{ndi_name}' pid={process.pid}")
 
-        self._ensure_watchdog()
-        return True
+            self._ensure_watchdog()
+            return True
 
     def stop_instance(self, instance_id: int) -> bool:
-        worker = self._workers.get(instance_id)
-        process = self._processes.get(instance_id)
-        if not worker or not process:
-            return False
+        with self._lock:
+            worker = self._workers.get(instance_id)
+            process = self._processes.get(instance_id)
+            if not worker or not process:
+                return False
 
-        if process.is_alive():
-            worker.stop()
-            process.join(timeout=10)
             if process.is_alive():
-                logger.warning(f"Force killing instance {instance_id}")
-                process.terminate()
-                process.join(timeout=5)
+                worker.stop()
+                process.join(timeout=10)
                 if process.is_alive():
-                    process.kill()
-                    process.join(timeout=3)
+                    logger.warning(f"Force killing instance {instance_id}")
+                    process.terminate()
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        # Nuke the whole process group so the Playwright
+                        # driver + Chromium tree can't outlive the worker
+                        _kill_process_tree(process)
+                        process.join(timeout=3)
 
-        self._workers.pop(instance_id, None)
-        self._processes.pop(instance_id, None)
-        self._heartbeats.pop(instance_id, None)
-        self._video_cmds.pop(instance_id, None)
-        self._video_states.pop(instance_id, None)
-        self._configs.pop(instance_id, None)
-        log_event("INSTANCE_STOPPED", f"id={instance_id}")
-        return True
+            self._workers.pop(instance_id, None)
+            self._processes.pop(instance_id, None)
+            self._heartbeats.pop(instance_id, None)
+            self._video_cmds.pop(instance_id, None)
+            self._video_states.pop(instance_id, None)
+            self._configs.pop(instance_id, None)
+            self._restart_meta.pop(instance_id, None)
+            log_event("INSTANCE_STOPPED", f"id={instance_id}")
+            return True
 
     def stop_all(self):
         ids = list(self._workers.keys())
@@ -204,36 +239,61 @@ class WorkerManager:
 
     def _restart_instance(self, iid: int, reason: str):
         """Kill (if needed) and restart a worker from stored config."""
-        config = self._configs.get(iid)
-        if not config:
-            return
+        with self._lock:
+            config = self._configs.get(iid)
+            if not config:
+                return  # manually stopped while we were deciding — leave it
 
-        log_event("INSTANCE_UNHEALTHY", f"id={iid} reason={reason}", level="warning")
+            log_event("INSTANCE_UNHEALTHY", f"id={iid} reason={reason}", level="warning")
 
-        # Kill existing process
-        proc = self._processes.get(iid)
-        if proc and proc.is_alive():
-            proc.terminate()
-            proc.join(timeout=5)
-            if proc.is_alive():
-                proc.kill()
-                proc.join(timeout=3)
+            # Kill existing process
+            proc = self._processes.get(iid)
+            if proc and proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    # Hung beyond SIGTERM — kill the whole group so the
+                    # Playwright driver + Chromium tree die with the worker
+                    _kill_process_tree(proc)
+                    proc.join(timeout=3)
 
-        # Clean up old refs (_spawn recreates video control values as needed)
-        self._workers.pop(iid, None)
-        self._processes.pop(iid, None)
-        self._heartbeats.pop(iid, None)
-        self._video_cmds.pop(iid, None)
-        self._video_states.pop(iid, None)
+            # Clean up old refs (_spawn recreates video control values as needed)
+            self._workers.pop(iid, None)
+            self._processes.pop(iid, None)
+            self._heartbeats.pop(iid, None)
+            self._video_cmds.pop(iid, None)
+            self._video_states.pop(iid, None)
 
-        process = self._spawn(iid, config)
-        log_event("INSTANCE_RESTARTED", f"id={iid} reason={reason} new_pid={process.pid}")
+            process = self._spawn(iid, config)
+            log_event("INSTANCE_RESTARTED", f"id={iid} reason={reason} new_pid={process.pid}")
+
+    def _next_restart_allowed(self, iid: int, now: float) -> bool:
+        """Exponential backoff gate for watchdog restarts. A worker that
+        keeps dying immediately (bad config, missing NDI, corrupt file)
+        must not respawn — and relaunch Chromium — every 5s forever."""
+        failures, last_restart = self._restart_meta.get(iid, (0, 0.0))
+        if failures and now - last_restart >= RESTART_STABLE_RESET:
+            # Survived long enough since the last restart — treat as recovered
+            failures = 0
+            self._restart_meta[iid] = (0, last_restart)
+        delay = min(WATCHDOG_INTERVAL * (2 ** failures), RESTART_BACKOFF_MAX)
+        if now - last_restart < delay:
+            return False
+        self._restart_meta[iid] = (failures + 1, now)
+        if failures >= 3:
+            log_event(
+                "INSTANCE_RESTART_BACKOFF",
+                f"id={iid} consecutive_failures={failures} next_delay={min(delay * 2, RESTART_BACKOFF_MAX):.0f}s",
+                level="warning",
+            )
+        return True
 
     def _watchdog_loop(self):
         """
         Runs every WATCHDOG_INTERVAL seconds. Detects:
           1. Dead processes (crashed)
           2. Hung processes (alive but heartbeat stale)
+        Restarts are rate-limited per instance with exponential backoff.
         """
         while not self._watchdog_stop.is_set():
             time.sleep(WATCHDOG_INTERVAL)
@@ -257,7 +317,8 @@ class WorkerManager:
                         issues.append((iid, f"hung (heartbeat stale {stale:.0f}s)"))
 
             for iid, reason in issues:
-                self._restart_instance(iid, reason)
+                if self._next_restart_allowed(iid, now):
+                    self._restart_instance(iid, reason)
 
             # If nothing tracked, stop watching
             if not self._configs:

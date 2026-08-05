@@ -503,12 +503,22 @@ def serve_media_file(media_id):
 def delete_media(media_id):
     media = MediaFile.query.get_or_404(media_id)
 
-    # Unlink from any instances using this media
+    # Unlink from any instances using this media. Running instances are
+    # stopped first — otherwise a video worker keeps an open handle to the
+    # deleted file and plays a ghost copy forever (the disk space isn't
+    # reclaimed until that handle closes)
     instances = OutputInstance.query.filter_by(media_file_id=media_id).all()
+    stopped = []
     for inst in instances:
+        if manager.is_running(inst.id):
+            manager.stop_instance(inst.id)
+            inst.running = False
+            stopped.append(inst.id)
         inst.media_file_id = None
         inst.source_value = ""
     db.session.commit()
+    if stopped:
+        log_event("MEDIA_IN_USE_STOPPED", f"media_id={media_id} stopped_instances={stopped}")
 
     # Delete DB record first, then file (avoids orphaned DB records if file delete fails)
     original_name = media.original_name

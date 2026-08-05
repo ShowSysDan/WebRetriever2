@@ -362,11 +362,21 @@ class NDIWorker:
                 f"--window-size={self.width},{self.height}",
             ],
         )
-        context = browser.new_context(
-            viewport={"width": self.width, "height": self.height},
-            device_scale_factor=1,
-        )
-        page = context.new_page()
+        try:
+            context = browser.new_context(
+                viewport={"width": self.width, "height": self.height},
+                device_scale_factor=1,
+            )
+            page = context.new_page()
+        except Exception:
+            # Don't leak a live Chromium if context/page creation fails —
+            # close it before propagating so the caller's error path never
+            # leaves a browser without an owner
+            try:
+                browser.close()
+            except Exception:
+                pass
+            raise
 
         try:
             self._load_content(page)
@@ -648,11 +658,15 @@ class NDIWorker:
         # BGRX buffer starts zeroed (black) with X=255, so the letterbox bars
         # are already in place — only the fitted region is ever written.
 
+        frame_dirty = True  # first frame needs an initial preview save
+
         def blit(bgr):
+            nonlocal frame_dirty
             if needs_resize:
                 cv2.resize(bgr, (fit_w, fit_h), dst=resize_buf)
                 bgr = resize_buf
             frame_buffer[off_y:off_y + fit_h, off_x:off_x + fit_w, :3] = bgr
+            frame_dirty = True
 
         def read_first_frame():
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -726,7 +740,16 @@ class NDIWorker:
                                     )
                                     cap.release()
                                     cap = cv2.VideoCapture(path)
-                                    read_first_frame()
+                                    if not read_first_frame():
+                                        # File vanished or became undecodable —
+                                        # stop and hold the last good frame
+                                        # instead of spinning reopen attempts
+                                        logger.error(
+                                            f"Video file unreadable, stopping "
+                                            f"playback: {path}"
+                                        )
+                                        playing = False
+                                        self._report_video_state(playing)
                                 latest = None  # read_first_frame already blitted
                                 next_frame_time = now + frame_interval
                             else:
@@ -746,9 +769,13 @@ class NDIWorker:
                     video_frame.data = frame_buffer
                     ndi.send_send_video_v2(ndi_send, video_frame)
 
-                if now - last_preview_time >= self._preview_interval:
+                # Only write a preview when the frame actually changed —
+                # while holding, rewriting an identical JPEG every 2s just
+                # wears the disk for nothing
+                if frame_dirty and now - last_preview_time >= self._preview_interval:
                     self._save_preview(frame_buffer)
                     last_preview_time = now
+                    frame_dirty = False
 
                 self._update_heartbeat()
 
@@ -975,5 +1002,16 @@ class NDIWorker:
 
 
 def worker_entry(worker: NDIWorker):
-    """Multiprocessing entry point."""
+    """Multiprocessing entry point.
+
+    The worker becomes its own process-group leader so the manager can kill
+    the ENTIRE tree (Playwright driver, Chromium and its helpers) with one
+    killpg if the worker hangs and has to be force-killed. Without this, a
+    SIGKILL to a hung worker orphans the Chromium tree — hundreds of MB per
+    occurrence that never get reclaimed."""
+    if hasattr(os, "setpgrp"):
+        try:
+            os.setpgrp()
+        except OSError:
+            pass
     worker.run()

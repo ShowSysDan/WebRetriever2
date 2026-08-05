@@ -1,6 +1,6 @@
 # NDI Streamer
 
-[![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
@@ -941,14 +941,28 @@ A crashed worker is easy to detect (process is dead). A **hung** worker is harde
 
 Each worker writes `time.monotonic()` into a shared `multiprocessing.Value` after every successful frame send. The parent watchdog checks this value every 5 seconds. If it hasn't updated in 30 seconds, the worker is considered hung:
 
-1. The process is terminated (SIGTERM → SIGKILL if needed)
-2. A new worker is launched with the same configuration
-3. `INSTANCE_UNHEALTHY` and `INSTANCE_RESTARTED` events are logged to syslog
+1. The process is asked to stop gracefully (SIGTERM), which closes the browser and NDI sender cleanly
+2. If it doesn't die, its **entire process group** is force-killed — each worker
+   is its own process-group leader, so the kill takes the Playwright driver and
+   the whole Chromium process tree with it. Nothing gets orphaned, even when the
+   worker is wedged hard enough to ignore SIGTERM
+3. A new worker is launched with the same configuration
+4. `INSTANCE_UNHEALTHY` and `INSTANCE_RESTARTED` events are logged to syslog
 
 ```
 Apr 10 03:42:15 prod ndi-streamer: [WARNING] [INSTANCE_UNHEALTHY] id=3 reason=hung (heartbeat stale 34s)
 Apr 10 03:42:17 prod ndi-streamer: [INFO] [INSTANCE_RESTARTED] id=3 reason=hung new_pid=51203
 ```
+
+### Restart Backoff
+
+A worker that dies instantly every time it starts (missing NDI runtime, corrupt
+media file, a page Chromium can't load) would otherwise respawn — and relaunch
+Chromium — every 5 seconds forever. The watchdog rate-limits restarts per
+instance with exponential backoff: 5s → 10s → 20s → 40s … capped at 5 minutes.
+A worker that then stays up for 2+ minutes is considered recovered and the
+backoff resets. Repeated failures log `INSTANCE_RESTART_BACKOFF` warnings to
+syslog so external monitoring can catch chronic flappers.
 
 ### Sizing Guide
 
@@ -1139,6 +1153,36 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 0.3.2
+
+Memory/process-leak audit of the whole app. Verified: no external ffmpeg
+processes exist (video decodes in-process via OpenCV/libavcodec and is released
+on worker exit), NDI senders are destroyed on every exit path, frame buffers
+stay pre-allocated, and repeated `/video/play` calls cannot double-spawn
+workers. Fixed what the audit found:
+
+- **Orphaned Chromium fix:** workers are now process-group leaders and force-kill
+  escalation kills the whole group — a hung worker can no longer leave its
+  Playwright driver + Chromium tree running forever (previously leaked
+  ~200–500 MB per hard-killed worker)
+- **Restart backoff:** the watchdog now rate-limits per-instance restarts with
+  exponential backoff (5s doubling to a 5-minute cap, reset after a 2-minute
+  stable run) instead of respawning a permanently-broken instance every 5s;
+  chronic flappers log `INSTANCE_RESTART_BACKOFF`
+- **Lifecycle race fix:** start/stop/restart are now serialized with a lock —
+  concurrent start requests (e.g. a double-clicked button) could previously
+  spawn two workers and orphan one untracked
+- Deleting a media file now stops any running instance playing it, so no worker
+  keeps an open handle to a deleted file (which kept the disk space claimed)
+- Video worker stops playback cleanly if the file becomes unreadable mid-loop
+  instead of spinning on reopen attempts
+- A browser that fails partway through launch (context/page creation) is closed
+  instead of lingering until process exit
+- Preview thumbnails are only written when the frame actually changed — a video
+  holding a still frame no longer rewrites an identical JPEG every 2 seconds
+- Web UI polling pauses in hidden tabs (resumes instantly on focus) and preview
+  fetches can no longer pile up on slow networks
 
 #### 0.3.1
 
