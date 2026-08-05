@@ -1,6 +1,6 @@
 # NDI Streamer
 
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
@@ -1139,6 +1139,13 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 0.3.1
+
+- Web UI: instance cards now show the instance ID as a badge next to the name,
+  so the id used in API URLs (`/api/instances/:id/...`) is visible at a glance
+- The remote-control hint in the instance editor now shows the id-based URL
+  (ids avoid URL-encoding names with spaces; names still work if preferred)
 
 #### 0.3.0
 

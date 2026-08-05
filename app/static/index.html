@@ -67,6 +67,7 @@
   .instance-status { width:9px; height:9px; border-radius:50%; background:var(--border); }
   .instance-status.on { background:var(--accent); box-shadow:0 0 8px var(--accent); }
   .instance-info h3 { font-size:13px; font-weight:600; margin-bottom:1px; }
+  .instance-id { font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:400; color:var(--text-dim); background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:1px 5px; margin-right:6px; vertical-align:1px; }
   .instance-info .meta { font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
   .instance-res { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text-dim); }
   .instance-source { font-size:11px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -255,7 +256,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v0.3.0'),
+      h('span',{className:'version'},'v0.3.1'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
@@ -306,7 +307,7 @@ function renderInstanceCard(inst) {
     h('div',{className:`instance-status ${inst.running?'on':''}`}),
     preview,
     h('div',{className:'instance-info'},
-      h('h3',null,inst.name),
+      h('h3',null,h('span',{className:'instance-id',title:'Instance ID — use in API URLs'},`#${inst.id}`),inst.name),
       h('div',{className:'meta'},`NDI Source: ${inst.name}`),
       inst.source_type==='video' && inst.running
         ? h('div',{className:'meta',style:{color:inst.video_state==='playing'?'var(--accent)':'var(--text-dim)'}},
@@ -490,7 +491,7 @@ function renderModal() {
   videoHoldSel.value = field('video_hold','last');
   const videoAutoplayCheck = h('input',{type:'checkbox',style:{width:'auto'}});
   videoAutoplayCheck.checked = !!field('video_autoplay',false);
-  const videoApiName = isEdit ? encodeURIComponent(inst.name) : '<name>';
+  const videoApiName = isEdit ? inst.id : '<id>';
   const videoSection = h('div',{className:'text-settings',id:'video-settings'},
     h('div',{className:'form-group'},
       h('label',null,'Video from Library'),
@@ -506,7 +507,7 @@ function renderModal() {
         videoAutoplayCheck,'Start playing automatically when the instance starts'),
     ),
     h('div',{className:'form-hint'},
-      `Remote control (same port as this page): GET or POST /api/instances/${videoApiName}/video/play · /video/stop · /video/status — works with the instance id too`),
+      `Remote control (same port as this page): GET or POST /api/instances/${videoApiName}/video/play · /video/stop · /video/status — the URL-encoded instance name works too`),
   );
 
   const sourceGroup = h('div',{className:'form-group'},h('label',null,'Source URL'),sourceInput);
