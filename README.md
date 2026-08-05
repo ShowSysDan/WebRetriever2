@@ -1,17 +1,19 @@
 # NDI Streamer
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
-A self-hosted Flask application that captures webpages, images, or text via headless Chromium and outputs them as NDI video streams on your network.
+A self-hosted Flask application that captures webpages, images, or text via headless Chromium — plus webcams and video files decoded natively — and outputs them as NDI video streams on your network.
 
 ---
 
 ## Features
 
 - **Multiple NDI output instances** — each with its own stream name, resolution, and capture rate
-- **Four source types** — webpage URL, uploaded image, custom styled text, or a connected webcam
+- **Five source types** — webpage URL, uploaded image, custom styled text, a connected webcam, or an uploaded video file
+- **Video playback as NDI** — upload a video (mp4, mov, mkv, webm…) and play it out as an NDI source: play once or loop, hold the last or first frame while stopped, optional autoplay on start
+- **Show-control friendly playback API** — trigger video play/stop with a plain GET or POST URL on the same port as the web UI (works from Companion, Crestron, QLab, or a browser bookmark), addressing instances by id or by name
 - **Webcam detection** — auto-detects all connected V4L2 cameras (Linux) and streams them as NDI, bypassing the browser entirely for full camera-native frame rates (30–60fps)
 - **Stable camera identity** — webcams are bound by udev stable ID (USB serial via `/dev/v4l/by-id`, physical port via `/dev/v4l/by-path` as fallback), so each camera keeps its correct NDI output across unplugs, replugs, and reboots even when `/dev/videoN` numbers shuffle
 - **Custom NDI naming** — fully configurable hostname + per-instance stream name (e.g. `PRODUCTION (Lower Third)`)
@@ -384,8 +386,12 @@ FLASK_PORT=5000
 
 ```env
 UPLOAD_FOLDER=app/uploads
-MAX_UPLOAD_SIZE_MB=50
+MAX_UPLOAD_SIZE_MB=500
 ```
+
+The media library accepts images (`png jpg jpeg gif bmp webp svg tiff`) and
+videos (`mp4 mov m4v mkv webm avi mpg mpeg`). The default size cap is 500 MB
+to leave room for video files; tune `MAX_UPLOAD_SIZE_MB` to taste.
 
 ### Syslog
 
@@ -935,14 +941,28 @@ A crashed worker is easy to detect (process is dead). A **hung** worker is harde
 
 Each worker writes `time.monotonic()` into a shared `multiprocessing.Value` after every successful frame send. The parent watchdog checks this value every 5 seconds. If it hasn't updated in 30 seconds, the worker is considered hung:
 
-1. The process is terminated (SIGTERM → SIGKILL if needed)
-2. A new worker is launched with the same configuration
-3. `INSTANCE_UNHEALTHY` and `INSTANCE_RESTARTED` events are logged to syslog
+1. The process is asked to stop gracefully (SIGTERM), which closes the browser and NDI sender cleanly
+2. If it doesn't die, its **entire process group** is force-killed — each worker
+   is its own process-group leader, so the kill takes the Playwright driver and
+   the whole Chromium process tree with it. Nothing gets orphaned, even when the
+   worker is wedged hard enough to ignore SIGTERM
+3. A new worker is launched with the same configuration
+4. `INSTANCE_UNHEALTHY` and `INSTANCE_RESTARTED` events are logged to syslog
 
 ```
 Apr 10 03:42:15 prod ndi-streamer: [WARNING] [INSTANCE_UNHEALTHY] id=3 reason=hung (heartbeat stale 34s)
 Apr 10 03:42:17 prod ndi-streamer: [INFO] [INSTANCE_RESTARTED] id=3 reason=hung new_pid=51203
 ```
+
+### Restart Backoff
+
+A worker that dies instantly every time it starts (missing NDI runtime, corrupt
+media file, a page Chromium can't load) would otherwise respawn — and relaunch
+Chromium — every 5 seconds forever. The watchdog rate-limits restarts per
+instance with exponential backoff: 5s → 10s → 20s → 40s … capped at 5 minutes.
+A worker that then stays up for 2+ minutes is considered recovered and the
+backoff resets. Repeated failures log `INSTANCE_RESTART_BACKOFF` warnings to
+syslog so external monitoring can catch chronic flappers.
 
 ### Sizing Guide
 
@@ -1043,6 +1063,52 @@ print(f'OK: {len([d for d in data if d.get(\"running\")])} instances healthy')
 |--------|----------|-------------|
 | `GET` | `/api/webcams` | Detect connected V4L2 capture devices (Linux) |
 
+### Video Playback Control
+
+Video-file instances expose playback control on the same port as the web UI,
+designed for show controllers (Companion, Crestron, QLab network cues) and
+plain browser bookmarks. `:ref` is the instance **id or name** (URL-encode
+spaces in names), and both `GET` and `POST` are accepted on play/stop so any
+device that can fire a URL can drive playback:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`/`POST` | `/api/instances/:ref/video/play` | Play from the first frame (auto-starts the NDI output if needed) |
+| `GET`/`POST` | `/api/instances/:ref/video/stop` | Stop playback and hold the configured frame |
+| `GET` | `/api/instances/:ref/video/status` | Playback state + configured loop/hold/autoplay |
+
+```bash
+# Fire the walk-in video from anything that can hit a URL
+curl "http://10.0.0.5:5000/api/instances/Walk-In%20Video/video/play"
+
+# ...or by instance id
+curl -X POST http://10.0.0.5:5000/api/instances/3/video/play
+
+# Stop it (the frame configured under "While Stopped" stays on air)
+curl "http://10.0.0.5:5000/api/instances/3/video/stop"
+
+# Check state
+curl "http://10.0.0.5:5000/api/instances/3/video/status"
+# → {"id":3,"name":"Walk-In Video","running":true,"video_state":"playing",
+#    "video_loop":false,"video_hold":"last","video_autoplay":false}
+```
+
+Behavior notes:
+
+- **`play` always restarts from the first frame** — it doubles as a restart button.
+- **`play` on a stopped instance auto-starts the NDI output first**, so one URL
+  is all a controller needs.
+- **The NDI stream never goes blank**: before playback and while stopped the
+  held frame keeps streaming at the global output FPS.
+- Per-instance settings (in the instance editor or via `PUT /api/instances/:id`):
+  - `video_loop` — `false` = play once then stop, `true` = loop forever
+  - `video_hold` — `"last"` or `"first"`: which frame stays on air when stopped
+    or after a play-once video ends
+  - `video_autoplay` — start playing as soon as the instance starts
+- Frames advance at the file's native frame rate (letterboxed to the instance
+  resolution); NDI output stays at the global output FPS. Audio is not output —
+  playback is video-only.
+
 ### System
 
 | Method | Endpoint | Description |
@@ -1062,6 +1128,7 @@ print(f'OK: {len([d for d in data if d.get(\"running\")])} instances healthy')
 | Text overlay, 15fps capture | Minimal | Simple HTML rendering |
 | Webcam 1080p @ 30fps | Light | No browser — MJPEG decode + copy only |
 | Webcam 1080p/720p @ 60fps | Light–Moderate | Requires a camera that offers 60fps modes |
+| Video file 1080p @ 30fps | Light | No browser — FFmpeg decode via OpenCV; while stopped/holding it's a single frame resend |
 
 - Each instance is an isolated process — scales across CPU cores
 - For mostly-static content (images, text), set capture FPS low (5–15) to save CPU
@@ -1086,6 +1153,66 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 0.3.2
+
+Memory/process-leak audit of the whole app. Verified: no external ffmpeg
+processes exist (video decodes in-process via OpenCV/libavcodec and is released
+on worker exit), NDI senders are destroyed on every exit path, frame buffers
+stay pre-allocated, and repeated `/video/play` calls cannot double-spawn
+workers. Fixed what the audit found:
+
+- **Orphaned Chromium fix:** workers are now process-group leaders and force-kill
+  escalation kills the whole group — a hung worker can no longer leave its
+  Playwright driver + Chromium tree running forever (previously leaked
+  ~200–500 MB per hard-killed worker)
+- **Restart backoff:** the watchdog now rate-limits per-instance restarts with
+  exponential backoff (5s doubling to a 5-minute cap, reset after a 2-minute
+  stable run) instead of respawning a permanently-broken instance every 5s;
+  chronic flappers log `INSTANCE_RESTART_BACKOFF`
+- **Lifecycle race fix:** start/stop/restart are now serialized with a lock —
+  concurrent start requests (e.g. a double-clicked button) could previously
+  spawn two workers and orphan one untracked
+- Deleting a media file now stops any running instance playing it, so no worker
+  keeps an open handle to a deleted file (which kept the disk space claimed)
+- Video worker stops playback cleanly if the file becomes unreadable mid-loop
+  instead of spinning on reopen attempts
+- A browser that fails partway through launch (context/page creation) is closed
+  instead of lingering until process exit
+- Preview thumbnails are only written when the frame actually changed — a video
+  holding a still frame no longer rewrites an identical JPEG every 2 seconds
+- Web UI polling pauses in hidden tabs (resumes instantly on focus) and preview
+  fetches can no longer pile up on slow networks
+
+#### 0.3.1
+
+- Web UI: instance cards now show the instance ID as a badge next to the name,
+  so the id used in API URLs (`/api/instances/:id/...`) is visible at a glance
+- The remote-control hint in the instance editor now shows the id-based URL
+  (ids avoid URL-encoding names with spaces; names still work if preferred)
+
+#### 0.3.0
+
+- Video file source type: upload a video to the media library and stream it as an
+  NDI output, decoded natively with OpenCV/FFmpeg (no browser)
+- Playback modes: play once or loop; configurable hold frame (last or first) stays
+  on air while stopped or after a play-once video ends, so the stream never goes blank
+- Optional autoplay when the instance starts
+- HTTP playback control on the same port as the web UI:
+  `GET`/`POST` `/api/instances/:ref/video/play`, `/video/stop`, and
+  `GET` `/video/status` — instances addressable by id or name, `play` auto-starts
+  the NDI output, built for show controllers (Companion, Crestron, QLab)
+- Media library accepts video uploads (mp4, mov, m4v, mkv, webm, avi, mpg, mpeg),
+  probes duration/resolution, and shows video thumbnails; default upload cap raised
+  to 500 MB (`MAX_UPLOAD_SIZE_MB`)
+- Web UI: video settings in the instance editor (library picker, playback mode,
+  hold frame, autoplay, ready-to-copy control URLs), play/stop buttons and live
+  PLAYING/HOLDING state on instance cards
+- Web UI flicker fix: preview thumbnails are now fetched and fully decoded in the
+  background, then swapped in place — the page also only re-renders when data
+  actually changes, so images no longer flash on the 5-second poll
+- Automatic lightweight DB migration on startup adds the new columns to existing
+  SQLite/PostgreSQL databases — no manual migration needed
 
 #### 0.2.0
 

@@ -5,7 +5,7 @@ REST API routes for NDI output instances, global settings, and media library.
 import os
 import uuid
 import logging
-from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
+from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file, abort
 from werkzeug.utils import secure_filename
 from PIL import Image as PILImage
 
@@ -30,15 +30,30 @@ def _build_text_settings(inst):
     }
 
 
+def _build_video_settings(inst):
+    return {
+        "loop": bool(inst.video_loop),
+        "hold": inst.video_hold or "last",
+        "autoplay": bool(inst.video_autoplay),
+    }
+
+
 def _start_worker(inst, settings=None):
     if not settings:
         settings = GlobalSettings.query.first()
     text_settings = _build_text_settings(inst) if inst.source_type == "text" else None
+    video_settings = _build_video_settings(inst) if inst.source_type == "video" else None
 
     # Resolve source value for media-backed images
     source_value = inst.source_value
     if inst.source_type == "image" and inst.media_file:
         source_value = f"http://127.0.0.1:{current_app.config.get('FLASK_PORT', 5000)}/api/media/{inst.media_file_id}/file"
+    elif inst.source_type == "video" and inst.media_file:
+        # Video is decoded directly by the worker (OpenCV/FFmpeg) — hand it
+        # the local file path, not an HTTP URL
+        source_value = os.path.join(
+            current_app.config["UPLOAD_FOLDER"], inst.media_file.filename
+        )
 
     return manager.start_instance(
         instance_id=inst.id,
@@ -51,6 +66,7 @@ def _start_worker(inst, settings=None):
         refresh_interval=inst.refresh_interval,
         browser_recycle_hours=current_app.config.get("BROWSER_RECYCLE_HOURS", 4),
         text_settings=text_settings,
+        video_settings=video_settings,
         preview_dir=current_app.config.get("PREVIEW_FOLDER"),
         preview_interval=current_app.config.get("PREVIEW_INTERVAL", 2.0),
     )
@@ -138,6 +154,13 @@ def stop_all():
 # Output Instances CRUD
 # =========================================================================
 
+def _instance_dict(inst):
+    """Instance dict augmented with live playback state (video sources)."""
+    d = inst.to_dict()
+    d["video_state"] = manager.get_video_state(inst.id)
+    return d
+
+
 @api.route("/instances", methods=["GET"])
 def list_instances():
     instances = OutputInstance.query.order_by(OutputInstance.created_at).all()
@@ -146,7 +169,7 @@ def list_instances():
         if inst.running != actual:
             inst.running = actual
     db.session.commit()
-    return jsonify([i.to_dict() for i in instances])
+    return jsonify([_instance_dict(i) for i in instances])
 
 
 @api.route("/instances", methods=["POST"])
@@ -171,6 +194,9 @@ def create_instance():
         text_color=data.get("text_color", "#FFFFFF"),
         text_bg_color=data.get("text_bg_color", "#000000"),
         text_align=data.get("text_align", "center"),
+        video_loop=data.get("video_loop", False),
+        video_hold=data.get("video_hold", "last"),
+        video_autoplay=data.get("video_autoplay", False),
         width=data.get("width", 1920),
         height=data.get("height", 1080),
         capture_fps=data.get("capture_fps", 30),
@@ -188,7 +214,7 @@ def get_instance(instance_id):
     inst = OutputInstance.query.get_or_404(instance_id)
     inst.running = manager.is_running(inst.id)
     db.session.commit()
-    return jsonify(inst.to_dict())
+    return jsonify(_instance_dict(inst))
 
 
 @api.route("/instances/<int:instance_id>", methods=["PUT"])
@@ -204,6 +230,7 @@ def update_instance(instance_id):
         "name", "source_type", "source_value", "media_file_id",
         "text_content", "text_font", "text_size", "text_color",
         "text_bg_color", "text_align",
+        "video_loop", "video_hold", "video_autoplay",
         "width", "height", "capture_fps", "refresh_interval", "enabled",
     ]:
         if field in data:
@@ -288,6 +315,76 @@ def refresh_instance(instance_id):
     return jsonify(inst.to_dict())
 
 
+# =========================================================================
+# Video playback control (play/stop over plain HTTP for show controllers)
+#
+# Instances can be addressed by numeric id or by name, and GET is accepted
+# alongside POST so simple controllers (Companion, Crestron, a browser
+# bookmark) can fire commands with a bare URL:
+#   http://<host>:5000/api/instances/Walk-In%20Video/video/play
+# =========================================================================
+
+def _resolve_instance(ref):
+    """Look up an instance by numeric id or by (URL-decoded) name."""
+    if ref.isdigit():
+        inst = db.session.get(OutputInstance, int(ref))
+    else:
+        inst = OutputInstance.query.filter_by(name=ref).first()
+    if not inst:
+        abort(404, description=f"No instance '{ref}'")
+    return inst
+
+
+@api.route("/instances/<ref>/video/play", methods=["GET", "POST"])
+def video_play(ref):
+    inst = _resolve_instance(ref)
+    if inst.source_type != "video":
+        return jsonify({"error": f"Instance '{inst.name}' is not a video source"}), 400
+
+    # Auto-start the NDI output if it isn't running yet, so a single
+    # play URL is all a controller needs
+    if not manager.is_running(inst.id):
+        _start_worker(inst)
+        inst.running = True
+        db.session.commit()
+
+    if not manager.video_command(inst.id, "play"):
+        return jsonify({"error": "Worker not ready, try again"}), 503
+    log_event("VIDEO_PLAY", f"id={inst.id} name='{inst.name}'")
+    return jsonify({"id": inst.id, "name": inst.name, "video_state": "playing"})
+
+
+@api.route("/instances/<ref>/video/stop", methods=["GET", "POST"])
+def video_stop(ref):
+    inst = _resolve_instance(ref)
+    if inst.source_type != "video":
+        return jsonify({"error": f"Instance '{inst.name}' is not a video source"}), 400
+
+    if not manager.is_running(inst.id):
+        return jsonify({"id": inst.id, "name": inst.name, "video_state": None,
+                        "message": "Instance not running"})
+
+    manager.video_command(inst.id, "stop")
+    log_event("VIDEO_STOP", f"id={inst.id} name='{inst.name}'")
+    return jsonify({"id": inst.id, "name": inst.name, "video_state": "stopped"})
+
+
+@api.route("/instances/<ref>/video/status", methods=["GET"])
+def video_status(ref):
+    inst = _resolve_instance(ref)
+    if inst.source_type != "video":
+        return jsonify({"error": f"Instance '{inst.name}' is not a video source"}), 400
+    return jsonify({
+        "id": inst.id,
+        "name": inst.name,
+        "running": manager.is_running(inst.id),
+        "video_state": manager.get_video_state(inst.id),
+        "video_loop": bool(inst.video_loop),
+        "video_hold": inst.video_hold or "last",
+        "video_autoplay": bool(inst.video_autoplay),
+    })
+
+
 @api.route("/instances/<int:instance_id>/preview", methods=["GET"])
 def instance_preview(instance_id):
     """Serve the latest preview thumbnail for an instance."""
@@ -336,13 +433,34 @@ def upload_media():
     file_size = os.path.getsize(filepath)
     width_px = None
     height_px = None
+    duration_s = None
     mime_type = file.content_type
+    if not mime_type or mime_type == "application/octet-stream":
+        # Some clients don't send a useful content type — guess from the
+        # extension so browsers can play videos served back to them
+        import mimetypes
+        mime_type = mimetypes.guess_type(original_name)[0] or mime_type
 
-    try:
-        with PILImage.open(filepath) as img:
-            width_px, height_px = img.size
-    except Exception:
-        pass
+    if ext in current_app.config.get("VIDEO_EXTENSIONS", set()):
+        try:
+            import cv2
+            cap = cv2.VideoCapture(filepath)
+            if cap.isOpened():
+                width_px = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or None
+                height_px = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or None
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                if fps and fps > 0 and frames and frames > 0:
+                    duration_s = round(frames / fps, 2)
+            cap.release()
+        except Exception:
+            pass
+    else:
+        try:
+            with PILImage.open(filepath) as img:
+                width_px, height_px = img.size
+        except Exception:
+            pass
 
     media = MediaFile(
         filename=unique_name,
@@ -351,6 +469,7 @@ def upload_media():
         file_size=file_size,
         width_px=width_px,
         height_px=height_px,
+        duration_s=duration_s,
     )
     db.session.add(media)
     try:
@@ -384,12 +503,22 @@ def serve_media_file(media_id):
 def delete_media(media_id):
     media = MediaFile.query.get_or_404(media_id)
 
-    # Unlink from any instances using this media
+    # Unlink from any instances using this media. Running instances are
+    # stopped first — otherwise a video worker keeps an open handle to the
+    # deleted file and plays a ghost copy forever (the disk space isn't
+    # reclaimed until that handle closes)
     instances = OutputInstance.query.filter_by(media_file_id=media_id).all()
+    stopped = []
     for inst in instances:
+        if manager.is_running(inst.id):
+            manager.stop_instance(inst.id)
+            inst.running = False
+            stopped.append(inst.id)
         inst.media_file_id = None
         inst.source_value = ""
     db.session.commit()
+    if stopped:
+        log_event("MEDIA_IN_USE_STOPPED", f"media_id={media_id} stopped_instances={stopped}")
 
     # Delete DB record first, then file (avoids orphaned DB records if file delete fails)
     original_name = media.original_name

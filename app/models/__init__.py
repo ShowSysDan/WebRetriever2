@@ -37,7 +37,17 @@ class MediaFile(db.Model):
     file_size = db.Column(db.Integer, nullable=True)  # bytes
     width_px = db.Column(db.Integer, nullable=True)
     height_px = db.Column(db.Integer, nullable=True)
+    # Video files only — probed with OpenCV on upload (nullable: added after
+    # 0.2.0, and images have no duration)
+    duration_s = db.Column(db.Float, nullable=True)
     uploaded_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    @property
+    def is_video(self):
+        if self.mime_type and self.mime_type.startswith("video/"):
+            return True
+        ext = self.filename.rsplit(".", 1)[-1].lower() if "." in self.filename else ""
+        return ext in {"mp4", "mov", "m4v", "mkv", "webm", "avi", "mpg", "mpeg"}
 
     def to_dict(self):
         return {
@@ -48,6 +58,8 @@ class MediaFile(db.Model):
             "file_size": self.file_size,
             "width_px": self.width_px,
             "height_px": self.height_px,
+            "duration_s": self.duration_s,
+            "is_video": self.is_video,
             "url": f"/api/media/{self.id}/file",
             "uploaded_at": self.uploaded_at.isoformat() if self.uploaded_at else None,
         }
@@ -72,6 +84,12 @@ class OutputInstance(db.Model):
     text_color = db.Column(db.String(16), nullable=True, default="#FFFFFF")
     text_bg_color = db.Column(db.String(16), nullable=True, default="#000000")
     text_align = db.Column(db.String(16), nullable=True, default="center")
+
+    # Video source settings (nullable so existing DBs can be auto-migrated
+    # with a simple ADD COLUMN — code treats NULL as the default)
+    video_loop = db.Column(db.Boolean, nullable=True, default=False)      # loop vs play once
+    video_hold = db.Column(db.String(8), nullable=True, default="last")   # "last" | "first" frame while stopped
+    video_autoplay = db.Column(db.Boolean, nullable=True, default=False)  # start playing when instance starts
 
     # Resolution
     width = db.Column(db.Integer, nullable=False, default=1920)
@@ -108,6 +126,9 @@ class OutputInstance(db.Model):
             "text_color": self.text_color,
             "text_bg_color": self.text_bg_color,
             "text_align": self.text_align,
+            "video_loop": bool(self.video_loop),
+            "video_hold": self.video_hold or "last",
+            "video_autoplay": bool(self.video_autoplay),
             "width": self.width,
             "height": self.height,
             "capture_fps": self.capture_fps,
