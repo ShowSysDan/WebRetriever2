@@ -399,6 +399,8 @@ function renderMediaPage() {
           h('div',{className:'media-card-name'},(m.is_video?'🎞 ':'')+m.original_name),
           h('div',{className:'media-card-meta'},
             `${m.width_px||'?'}×${m.height_px||'?'}${dur} · ${size}`),
+          h('div',{className:'media-card-meta',title:'Permanent ID for API playback URLs — never reused, even after deletes'},
+            `id ${m.id}${m.uid?` · uid ${m.uid}`:''}`),
           usedBy.length ? h('div',{className:'media-usage'},`Used by: ${usedBy.map(i=>i.name).join(', ')}`) : null,
         ),
         h('div',{className:'media-card-actions'},
@@ -518,7 +520,7 @@ function renderModal() {
         videoAutoplayCheck,'Start playing automatically when the instance starts'),
     ),
     h('div',{className:'form-hint'},
-      `Remote control (same port as this page): GET or POST /api/instances/${videoApiName}/video/play · /video/stop · /video/status — the URL-encoded instance name works too`),
+      `Remote control (same port as this page): GET or POST /api/instances/${videoApiName}/video/play · /video/play/<media> (switch & play) · /video/load/<media> (cue first frame) · /video/stop?hold=first|last · /video/status — instance by id or name, media by id, uid, or filename`),
   );
 
   const sourceGroup = h('div',{className:'form-group'},h('label',null,'Source URL'),sourceInput);

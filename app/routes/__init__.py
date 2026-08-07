@@ -9,7 +9,7 @@ from flask import Blueprint, request, jsonify, current_app, send_from_directory,
 from werkzeug.utils import secure_filename
 from PIL import Image as PILImage
 
-from app.models import db, OutputInstance, GlobalSettings, MediaFile
+from app.models import db, OutputInstance, GlobalSettings, MediaFile, generate_media_uid
 from app.workers import manager
 from app.logging_config import log_event
 
@@ -316,12 +316,22 @@ def refresh_instance(instance_id):
 
 
 # =========================================================================
-# Video playback control (play/stop over plain HTTP for show controllers)
+# Video playback control (play/stop/load over plain HTTP for show controllers)
 #
-# Instances can be addressed by numeric id or by name, and GET is accepted
+# Instances can be addressed by numeric id or by name, media files by
+# numeric id, permanent uid, or original filename — and GET is accepted
 # alongside POST so simple controllers (Companion, Crestron, a browser
 # bookmark) can fire commands with a bare URL:
 #   http://<host>:5000/api/instances/Walk-In%20Video/video/play
+#   http://<host>:5000/api/instances/3/video/play/intro.mp4
+#   http://<host>:5000/api/instances/3/video/load/9f3c21ab
+#   http://<host>:5000/api/instances/3/video/stop?hold=first
+#
+# Switching media on a running instance is a hot-swap inside the worker
+# process (no restart, no NDI sender teardown): the new file is opened and
+# verified before it replaces the old one, so the stream never drops and
+# the switch is near-instant. `load` cues a video on its first frame so a
+# later `play` starts with zero load latency.
 # =========================================================================
 
 def _resolve_instance(ref):
@@ -335,38 +345,150 @@ def _resolve_instance(ref):
     return inst
 
 
+def _resolve_media(ref):
+    """Look up a media file by numeric id, permanent uid, or original filename."""
+    media = None
+    if ref.isdigit():
+        media = db.session.get(MediaFile, int(ref))
+    if media is None:
+        media = MediaFile.query.filter_by(uid=ref).first()
+    if media is None:
+        media = MediaFile.query.filter_by(original_name=ref).first()
+    if not media:
+        abort(404, description=f"No media file '{ref}'")
+    return media
+
+
+def _media_path(media):
+    return os.path.join(current_app.config["UPLOAD_FOLDER"], media.filename)
+
+
+def _hold_param():
+    """Validated optional ?hold=first|last query parameter."""
+    hold = request.args.get("hold")
+    if hold is not None:
+        hold = hold.lower()
+        if hold not in ("first", "last"):
+            abort(400, description="hold must be 'first' or 'last'")
+    return hold
+
+
+def _apply_video_selection(inst, media_ref, hold):
+    """Persist a media switch and/or hold change on the instance.
+    Returns the resolved MediaFile (or None if no media_ref given)."""
+    media = None
+    if media_ref:
+        media = _resolve_media(media_ref)
+        if not media.is_video:
+            abort(400, description=f"Media '{media.original_name}' is not a video")
+        if inst.media_file_id != media.id:
+            inst.media_file_id = media.id
+            inst.source_value = ""
+    if hold and inst.video_hold != hold:
+        inst.video_hold = hold
+    db.session.commit()
+    return media
+
+
+def _video_response(inst, media, state, **extra):
+    return jsonify({
+        "id": inst.id, "name": inst.name, "video_state": state,
+        "media": media.to_dict() if media else None,
+        **extra,
+    })
+
+
 @api.route("/instances/<ref>/video/play", methods=["GET", "POST"])
-def video_play(ref):
+@api.route("/instances/<ref>/video/play/<media_ref>", methods=["GET", "POST"])
+def video_play(ref, media_ref=None):
+    """Play from the first frame — optionally switching to a different media
+    file first (`/video/play/<media>` or `?media=`, by id/uid/filename)."""
     inst = _resolve_instance(ref)
     if inst.source_type != "video":
         return jsonify({"error": f"Instance '{inst.name}' is not a video source"}), 400
 
-    # Auto-start the NDI output if it isn't running yet, so a single
-    # play URL is all a controller needs
+    media_ref = media_ref or request.args.get("media")
+    hold = _hold_param()
+    media = _apply_video_selection(inst, media_ref, hold)
+
+    if not manager.is_running(inst.id):
+        # Auto-start the NDI output — the fresh worker already picks up the
+        # (possibly just-switched) file and hold from the DB, so a plain
+        # play command is all it needs
+        _start_worker(inst)
+        inst.running = True
+        db.session.commit()
+        ok = manager.video_command(inst.id, "play")
+    elif media:
+        # Hot-swap inside the running worker and play immediately
+        ok = manager.video_command(inst.id, "load_play",
+                                   path=_media_path(media), hold=hold)
+    else:
+        ok = manager.video_command(inst.id, "play", hold=hold)
+
+    if not ok:
+        return jsonify({"error": "Worker not ready, try again"}), 503
+    log_event("VIDEO_PLAY", f"id={inst.id} name='{inst.name}'"
+              + (f" media={media.id}" if media else ""))
+    return _video_response(inst, media or inst.media_file, "playing")
+
+
+@api.route("/instances/<ref>/video/load", methods=["GET", "POST"])
+@api.route("/instances/<ref>/video/load/<media_ref>", methods=["GET", "POST"])
+def video_load(ref, media_ref=None):
+    """Cue a video without playing it: load the file (hot-swap if the worker
+    is running) and hold on its first frame, so a later `play` is instant."""
+    inst = _resolve_instance(ref)
+    if inst.source_type != "video":
+        return jsonify({"error": f"Instance '{inst.name}' is not a video source"}), 400
+
+    media_ref = media_ref or request.args.get("media")
+    hold = _hold_param()
+    media = _apply_video_selection(inst, media_ref, hold)
+    if media is None:
+        media = inst.media_file
+        if media is None:
+            return jsonify({"error": "No media specified and none assigned to instance"}), 400
+
     if not manager.is_running(inst.id):
         _start_worker(inst)
         inst.running = True
         db.session.commit()
+        if inst.video_autoplay:
+            # Cue means hold, even for autoplay instances — the stop lands
+            # before the first decode, so the first frame stays on air
+            manager.video_command(inst.id, "stop")
+        ok = True
+    else:
+        ok = manager.video_command(inst.id, "load",
+                                   path=_media_path(media), hold=hold)
 
-    if not manager.video_command(inst.id, "play"):
+    if not ok:
         return jsonify({"error": "Worker not ready, try again"}), 503
-    log_event("VIDEO_PLAY", f"id={inst.id} name='{inst.name}'")
-    return jsonify({"id": inst.id, "name": inst.name, "video_state": "playing"})
+    log_event("VIDEO_LOAD", f"id={inst.id} name='{inst.name}' media={media.id}")
+    return _video_response(inst, media, "stopped", cued=True)
 
 
 @api.route("/instances/<ref>/video/stop", methods=["GET", "POST"])
 def video_stop(ref):
+    """Stop playback and hold — `?hold=first|last` overrides the hold frame."""
     inst = _resolve_instance(ref)
     if inst.source_type != "video":
         return jsonify({"error": f"Instance '{inst.name}' is not a video source"}), 400
+
+    hold = _hold_param()
+    if hold and inst.video_hold != hold:
+        inst.video_hold = hold
+        db.session.commit()
 
     if not manager.is_running(inst.id):
         return jsonify({"id": inst.id, "name": inst.name, "video_state": None,
                         "message": "Instance not running"})
 
-    manager.video_command(inst.id, "stop")
-    log_event("VIDEO_STOP", f"id={inst.id} name='{inst.name}'")
-    return jsonify({"id": inst.id, "name": inst.name, "video_state": "stopped"})
+    manager.video_command(inst.id, "stop", hold=hold)
+    log_event("VIDEO_STOP", f"id={inst.id} name='{inst.name}'"
+              + (f" hold={hold}" if hold else ""))
+    return _video_response(inst, inst.media_file, "stopped")
 
 
 @api.route("/instances/<ref>/video/status", methods=["GET"])
@@ -382,6 +504,7 @@ def video_status(ref):
         "video_loop": bool(inst.video_loop),
         "video_hold": inst.video_hold or "last",
         "video_autoplay": bool(inst.video_autoplay),
+        "media": inst.media_file.to_dict() if inst.media_file else None,
     })
 
 
@@ -463,6 +586,7 @@ def upload_media():
             pass
 
     media = MediaFile(
+        uid=generate_media_uid(),
         filename=unique_name,
         original_name=original_name,
         mime_type=mime_type,
