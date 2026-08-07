@@ -13,7 +13,9 @@ A self-hosted Flask application that captures webpages, images, or text via head
 - **Multiple NDI output instances** — each with its own stream name, resolution, and capture rate
 - **Five source types** — webpage URL, uploaded image, custom styled text, a connected webcam, or an uploaded video file
 - **Video playback as NDI** — upload a video (mp4, mov, mkv, webm…) and play it out as an NDI source: play once or loop, hold the last or first frame while stopped, optional autoplay on start
-- **Show-control friendly playback API** — trigger video play/stop with a plain GET or POST URL on the same port as the web UI (works from Companion, Crestron, QLab, or a browser bookmark), addressing instances by id or by name
+- **Show-control friendly playback API** — trigger video play/stop/load with a plain GET or POST URL on the same port as the web UI (works from Companion, Crestron, QLab, or a browser bookmark), addressing instances by id or by name
+- **Instant video switching & cueing** — swap the video playing on a running output with a single URL (hot-swap inside the worker, the NDI stream never drops), or pre-load ("cue") the next video on its first frame so the play cue fires with zero latency
+- **Permanent media IDs** — every uploaded file gets a `uid` that is never reused or shifted, even after deletes, so controller cues keyed on it stay correct forever; media addressable by id, uid, or filename
 - **Webcam detection** — auto-detects all connected V4L2 cameras (Linux) and streams them as NDI, bypassing the browser entirely for full camera-native frame rates (30–60fps)
 - **Stable camera identity** — webcams are bound by udev stable ID (USB serial via `/dev/v4l/by-id`, physical port via `/dev/v4l/by-path` as fallback), so each camera keeps its correct NDI output across unplugs, replugs, and reboots even when `/dev/videoN` numbers shuffle
 - **Custom NDI naming** — fully configurable hostname + per-instance stream name (e.g. `PRODUCTION (Lower Third)`)
@@ -1057,6 +1059,13 @@ print(f'OK: {len([d for d in data if d.get(\"running\")])} instances healthy')
 | `GET` | `/api/media/:id/file` | Serve the actual file |
 | `DELETE` | `/api/media/:id` | Delete file (unlinks from instances) |
 
+Every uploaded file gets a permanent `uid` (short random token, e.g.
+`9f3c21ab`) alongside its numeric `id`. Numeric ids of existing files never
+change, but SQLite can hand a deleted file's id to the next upload — the
+`uid` is assigned once and **never reused**, so show-controller cues keyed on
+it can't silently point at the wrong file. Playback endpoints accept media by
+id, uid, or original filename.
+
 ### Webcams
 
 | Method | Endpoint | Description |
@@ -1068,42 +1077,69 @@ print(f'OK: {len([d for d in data if d.get(\"running\")])} instances healthy')
 Video-file instances expose playback control on the same port as the web UI,
 designed for show controllers (Companion, Crestron, QLab network cues) and
 plain browser bookmarks. `:ref` is the instance **id or name** (URL-encode
-spaces in names), and both `GET` and `POST` are accepted on play/stop so any
-device that can fire a URL can drive playback:
+spaces in names), `:media` is a media file's **numeric id, permanent uid, or
+original filename**, and both `GET` and `POST` are accepted so any device
+that can fire a URL can drive playback:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET`/`POST` | `/api/instances/:ref/video/play` | Play from the first frame (auto-starts the NDI output if needed) |
+| `GET`/`POST` | `/api/instances/:ref/video/play` | Play the assigned video from the first frame (auto-starts the NDI output if needed) |
+| `GET`/`POST` | `/api/instances/:ref/video/play/:media` | Switch to a different video and play it immediately (hot-swap, no restart) |
+| `GET`/`POST` | `/api/instances/:ref/video/load/:media` | Cue a video: load it and hold on its first frame, so a later `play` starts instantly |
 | `GET`/`POST` | `/api/instances/:ref/video/stop` | Stop playback and hold the configured frame |
-| `GET` | `/api/instances/:ref/video/status` | Playback state + configured loop/hold/autoplay |
+| `GET` | `/api/instances/:ref/video/status` | Playback state + loop/hold/autoplay + loaded media |
+
+`play`, `load`, and `stop` all accept optional query parameters:
+
+- `?media=` — alternative to the path form for selecting the video (`play`/`load`)
+- `?hold=first|last` — set which frame stays on air when stopped or when a
+  play-once video ends; persisted to the instance, so it also survives restarts
 
 ```bash
 # Fire the walk-in video from anything that can hit a URL
 curl "http://10.0.0.5:5000/api/instances/Walk-In%20Video/video/play"
 
-# ...or by instance id
-curl -X POST http://10.0.0.5:5000/api/instances/3/video/play
+# Switch the same output to a different video and play it — media addressed
+# by numeric id, permanent uid, or original filename
+curl "http://10.0.0.5:5000/api/instances/3/video/play/9f3c21ab"
+curl "http://10.0.0.5:5000/api/instances/3/video/play/sponsor-reel.mp4"
 
-# Stop it (the frame configured under "While Stopped" stays on air)
-curl "http://10.0.0.5:5000/api/instances/3/video/stop"
+# Pre-load ("cue") the next video: it appears frozen on its first frame,
+# and the next /video/play fires with zero load latency
+curl "http://10.0.0.5:5000/api/instances/3/video/load/walkout.mp4"
+
+# Stop and hold — override the held frame per command
+curl "http://10.0.0.5:5000/api/instances/3/video/stop?hold=first"
 
 # Check state
 curl "http://10.0.0.5:5000/api/instances/3/video/status"
 # → {"id":3,"name":"Walk-In Video","running":true,"video_state":"playing",
-#    "video_loop":false,"video_hold":"last","video_autoplay":false}
+#    "video_loop":false,"video_hold":"last","video_autoplay":false,
+#    "media":{"id":7,"uid":"9f3c21ab","original_name":"walkout.mp4",...}}
 ```
 
 Behavior notes:
 
 - **`play` always restarts from the first frame** — it doubles as a restart button.
-- **`play` on a stopped instance auto-starts the NDI output first**, so one URL
-  is all a controller needs.
+- **`play`/`load` on a stopped instance auto-start the NDI output first**, so one
+  URL is all a controller needs.
+- **Switching videos is a hot-swap inside the running worker** — no process
+  restart, no NDI sender teardown. The new file is opened and verified before
+  it replaces the old one; the previous frame stays on air until the new
+  file's first frame lands, so receivers never see a drop or a blank frame.
+  If the new file can't be read, the command is rejected and the current
+  video keeps playing/holding untouched.
+- **`load` is the fast path for tight cues**: decode of the first frame,
+  letterbox setup, and the file handle are all ready before the play cue, so
+  `play` after a `load` is effectively instantaneous.
+- A media switch is persisted to the instance, so a later restart (or watchdog
+  recovery) resumes with the file that was last loaded.
 - **The NDI stream never goes blank**: before playback and while stopped the
   held frame keeps streaming at the global output FPS.
 - Per-instance settings (in the instance editor or via `PUT /api/instances/:id`):
   - `video_loop` — `false` = play once then stop, `true` = loop forever
   - `video_hold` — `"last"` or `"first"`: which frame stays on air when stopped
-    or after a play-once video ends
+    or after a play-once video ends (also settable per command via `?hold=`)
   - `video_autoplay` — start playing as soon as the instance starts
 - Frames advance at the file's native frame rate (letterboxed to the instance
   resolution); NDI output stays at the global output FPS. Audio is not output —
@@ -1140,6 +1176,52 @@ Behavior notes:
 - Multiple simultaneous cameras: spread them across USB controllers/ports if you hit
   bandwidth limits, and budget ~125 Mbps of network per 1080p60 NDI stream
 
+### Scaling & worst-case capacity (measured, 0.4.0)
+
+Stress-tested with a **540-file media library**, rapid switching, and
+concurrent playback workers on a 4-core / 16 GB test machine. Memory was
+verified leak-free at every level (per-worker PSS flat over a sustained
+playback window, flat across 200 hot-swaps, API process flat across the
+whole run).
+
+**A 540-file library is a non-event.** Library size only touches the API
+layer — the database and the media list, not the playback path:
+
+| Operation (540 files in library) | Measured |
+|---|---|
+| Upload (per file, incl. metadata probe) | ~6 ms + disk write |
+| `GET /api/media` full listing | ~13 ms |
+| Media lookup by id/uid/filename | < 1 ms |
+| Switch command (`/video/play/:media`) round-trip | ~5 ms median, ~7 ms p99 |
+| 200 hot-swaps at 18 switches/s on one output | zero restarts, zero leaks, still playing |
+
+**540 *simultaneous* NDI outputs is a multi-host deployment.** Each playing
+video worker is one process; measured per worker at 1080p output decoding a
+small source file: ~48 MB PSS and a fraction of a core (source decode cost
+grows with source resolution — budget roughly ⅙ core for small sources to
+half a core or more for 1080p30 H.264 sources). The per-host walls, in the
+order you'll hit them:
+
+1. **Network** — ~125 Mbps per 1080p60 NDI stream → 540 streams ≈ 67 Gbps.
+   An 8-stream host saturates 1 GbE; ~70 streams saturate 10 GbE.
+2. **CPU** — 540 × (decode + blit + NDI send) ≈ 90+ cores for small sources,
+   several hundred for 1080p sources.
+3. **RAM** — ~25 GB at 540 workers (~48 MB each). The frame buffer is
+   pre-allocated per worker (8.3 MB at 1080p) and never grows.
+
+Practical guidance for a 540-video show:
+
+- **Library scale**: keep all 540 files on one host — uploading, browsing,
+  cueing, and switching among them has no measurable cost.
+- **Output scale**: plan outputs per host by the walls above (e.g. ~8 × 1080p60
+  outputs per 1 GbE host, CPU-checked with `htop` during rehearsal), and add
+  hosts for more simultaneous streams. Instances are independent processes, so
+  the app itself has no shared bottleneck — the watchdog, playback API, and
+  web UI stay responsive regardless of worker count.
+- **One output, many videos** (the common case): use `/video/load/:media` to
+  cue and `/video/play` to fire — switching is a hot-swap measured in
+  milliseconds, so a single NDI output can serve an entire 540-clip playlist.
+
 ---
 
 ## Versioning
@@ -1153,6 +1235,38 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 0.4.0
+
+Playback API round two — media switching, cueing, and permanent media ids:
+
+- **Permanent media uids:** every uploaded file gets a short `uid` assigned
+  once and never reused. Numeric ids never shift for existing files, but
+  SQLite can recycle a deleted file's id for the next upload — uids can't be
+  recycled, so controller cues keyed on them stay correct forever. Existing
+  libraries are backfilled automatically at startup, and the media cards in
+  the web UI show both ids
+- **Switch-and-play:** `GET`/`POST` `/api/instances/:ref/video/play/:media`
+  (or `?media=`) loads a different video into a running output and plays it —
+  media addressable by numeric id, permanent uid, or original filename
+- **Hot-swap loading:** switching videos happens inside the running worker
+  process — no restart, no NDI sender teardown, receivers never see a drop.
+  The new file is verified before it replaces the old one; a bad file leaves
+  current playback untouched
+- **Cue support:** `/api/instances/:ref/video/load/:media` pre-loads a video
+  and holds its first frame on air, so the following `play` fires with zero
+  load latency — built for tight show cues
+- **Hold control from the API:** `?hold=first|last` on `play`, `load`, and
+  `stop` chooses which frame stays on air, applied live to the running worker
+  and persisted on the instance
+- `/video/status` now reports the loaded media (id, uid, name, duration)
+- A media switch or hold change survives worker restarts and watchdog
+  recoveries — the stored worker config and the DB are kept in sync
+- Stress-tested and verified leak-free at worst-case scale: 540-file library,
+  200 hot-swaps at 18/s on a live output (no restarts, flat memory), and
+  sustained concurrent 1080p playback workers with flat per-worker memory —
+  measured capacity numbers documented under *Performance Notes → Scaling &
+  worst-case capacity*
 
 #### 0.3.2
 

@@ -5,7 +5,9 @@ Each instance runs in its own process:
   1. Launches headless Playwright browser (webpage/image/text sources)
      — or opens a V4L2 webcam via OpenCV (webcam source, no browser at all)
      — or decodes an uploaded video file via OpenCV/FFmpeg (video source,
-       with play/stop control over shared mp.Values from the API process)
+       with play/stop/load control over shared mp.Values from the API
+       process; `load` hot-swaps to a different file without restarting
+       the worker or dropping the NDI stream)
   2. Captures frames at the configured capture_fps into a pre-allocated frame buffer
   3. Sends frames to NDI at the global output_fps (duplicating frames as needed)
   4. Optionally auto-refreshes content at a configurable interval
@@ -75,10 +77,20 @@ WEBCAM_RECONNECT_DELAY = 2.0
 VIDEO_CMD_NONE = 0
 VIDEO_CMD_PLAY = 1
 VIDEO_CMD_STOP = 2
+VIDEO_CMD_LOAD = 3       # hot-swap to a new file, cue on its first frame
+VIDEO_CMD_LOAD_PLAY = 4  # hot-swap to a new file and start playing it
 
 # Video playback states (worker reports back through shared mp.Value)
 VIDEO_STATE_STOPPED = 0
 VIDEO_STATE_PLAYING = 1
+
+# Hold-frame overrides (shared mp.Value; UNSET = keep current behavior)
+VIDEO_HOLD_UNSET = 0
+VIDEO_HOLD_FIRST = 1
+VIDEO_HOLD_LAST = 2
+
+# Size of the shared char buffer carrying file paths for load commands
+VIDEO_PATH_MAX = 4096
 
 
 class WebcamGrabber(threading.Thread):
@@ -203,6 +215,82 @@ class WebcamGrabber(threading.Thread):
         self._stop_event.set()
 
 
+class _VideoFile:
+    """An open video file plus its letterbox geometry for a fixed output size.
+
+    Bundling the capture handle with its per-file state (native fps, fit
+    rectangle, resize buffer) is what makes hot-swapping files cheap: a
+    `load` command just constructs a new _VideoFile and releases the old
+    one — no worker restart, no NDI sender teardown.
+
+    Letterbox: scale to fit inside the output resolution while preserving
+    aspect ratio, centered on black. Computed once per file — the frame size
+    never changes mid-stream.
+    """
+
+    def __init__(self, path: str, out_w: int, out_h: int):
+        import cv2
+        self._cv2 = cv2
+        self.path = path
+        # Inert defaults so a failed open still leaves a usable (no-op)
+        # object — read() returns None and the timing attributes exist
+        self.fps = 30.0
+        self.frame_interval = 1.0 / 30.0
+        self.src_w, self.src_h = out_w, out_h
+        self.fit_w, self.fit_h = out_w, out_h
+        self.off_x = self.off_y = 0
+        self._needs_resize = False
+        self._resize_buf = None
+
+        self.cap = cv2.VideoCapture(path)
+        self.ok = self.cap.isOpened()
+        if not self.ok:
+            self.cap.release()
+            return
+
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if not fps or fps < 1 or fps > 240:
+            fps = 30.0
+        self.fps = fps
+        self.frame_interval = 1.0 / fps
+
+        src_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or out_w
+        src_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or out_h
+        self.src_w, self.src_h = src_w, src_h
+        scale = min(out_w / src_w, out_h / src_h)
+        self.fit_w = max(1, int(round(src_w * scale)))
+        self.fit_h = max(1, int(round(src_h * scale)))
+        self.off_x = (out_w - self.fit_w) // 2
+        self.off_y = (out_h - self.fit_h) // 2
+        self._needs_resize = (self.fit_w, self.fit_h) != (src_w, src_h)
+        self._resize_buf = (
+            np.empty((self.fit_h, self.fit_w, 3), dtype=np.uint8)
+            if self._needs_resize else None
+        )
+
+    def read(self):
+        """Next decoded BGR frame, or None at end-of-file/decode error."""
+        ok, frame = self.cap.read()
+        return frame if ok and frame is not None else None
+
+    def rewind(self):
+        self.cap.set(self._cv2.CAP_PROP_POS_FRAMES, 0)
+
+    def blit(self, bgr, frame_buffer: np.ndarray):
+        """Write a decoded frame into the fitted region of the BGRX buffer."""
+        if self._needs_resize:
+            self._cv2.resize(bgr, (self.fit_w, self.fit_h), dst=self._resize_buf)
+            bgr = self._resize_buf
+        frame_buffer[self.off_y:self.off_y + self.fit_h,
+                     self.off_x:self.off_x + self.fit_w, :3] = bgr
+
+    def release(self):
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+
+
 class NDIWorker:
     """Manages capture + NDI send for a single output instance."""
 
@@ -223,6 +311,8 @@ class NDIWorker:
         heartbeat: Optional[mp.Value] = None,
         video_cmd: Optional[mp.Value] = None,
         video_state: Optional[mp.Value] = None,
+        video_path: Optional[mp.Array] = None,
+        video_hold: Optional[mp.Value] = None,
         preview_dir: Optional[str] = None,
         preview_interval: float = 2.0,
     ):
@@ -240,8 +330,10 @@ class NDIWorker:
         self.video_settings = video_settings or {}
         self._stop_event = mp.Event()
         self._heartbeat = heartbeat  # shared with parent process
-        self._video_cmd = video_cmd  # play/stop commands from the API process
+        self._video_cmd = video_cmd  # play/stop/load commands from the API process
         self._video_state = video_state  # playback state reported to the API process
+        self._video_path = video_path  # file path payload for load commands
+        self._video_hold = video_hold  # per-command hold-frame override
         self._preview_dir = preview_dir
         self._preview_interval = preview_interval
 
@@ -594,14 +686,28 @@ class NDIWorker:
     # Video file playback loop
     # ------------------------------------------------------------------
 
-    def _poll_video_cmd(self) -> int:
-        """Read and clear the pending playback command (edge-triggered)."""
+    def _poll_video_cmd(self):
+        """Read and clear the pending playback command (edge-triggered).
+
+        Returns (cmd, path, hold): `path` is only set for load commands,
+        `hold` is "first"/"last" when the command carried an override, else
+        None. The cmd Value's lock serializes the whole channel — the
+        manager writes path/hold before setting cmd under the same lock.
+        """
         if self._video_cmd is None:
-            return VIDEO_CMD_NONE
+            return VIDEO_CMD_NONE, None, None
         with self._video_cmd.get_lock():
             cmd = self._video_cmd.value
             self._video_cmd.value = VIDEO_CMD_NONE
-        return cmd
+            path = None
+            if cmd in (VIDEO_CMD_LOAD, VIDEO_CMD_LOAD_PLAY) and self._video_path is not None:
+                path = self._video_path.get_obj().value.decode("utf-8", "replace") or None
+            hold = None
+            if self._video_hold is not None:
+                hv = self._video_hold.value
+                self._video_hold.value = VIDEO_HOLD_UNSET
+                hold = {VIDEO_HOLD_FIRST: "first", VIDEO_HOLD_LAST: "last"}.get(hv)
+        return cmd, path, hold
 
     def _report_video_state(self, playing: bool):
         if self._video_state is not None:
@@ -619,77 +725,84 @@ class NDIWorker:
           - `play` always restarts from the first frame. `stop` freezes on
             the frame chosen by video_hold ("last" = current frame stays on
             air, "first" = jump back to the opening frame).
+          - `load` / `load_play` hot-swap to a different file without
+            restarting the worker: the new file is opened and verified
+            first, then swapped in atomically — the old frame stays on air
+            until the new file's first frame replaces it, so switching is
+            near-instant and the NDI stream never drops. `load` cues the
+            new file on its first frame (pre-loaded for an instant later
+            `play`); `load_play` starts it immediately.
+          - Commands may carry a hold override ("first"/"last") which
+            replaces the configured hold for the rest of the run.
           - When a play-once video reaches the end it stops and holds per
             video_hold; in loop mode it seeks back to frame 0 and continues.
           - While stopped, the held frame keeps streaming so receivers never
             lose the source.
         """
-        import cv2
-
-        path = self.source_value
-        cap = cv2.VideoCapture(path)
-        if not cap.isOpened():
-            logger.error(f"Cannot open video file for '{self.ndi_name}': {path}")
+        vid = _VideoFile(self.source_value, self.width, self.height)
+        if not vid.ok:
+            logger.error(f"Cannot open video file for '{self.ndi_name}': {self.source_value}")
             self._idle_until_stopped()
             return
 
-        src_fps = cap.get(cv2.CAP_PROP_FPS)
-        if not src_fps or src_fps < 1 or src_fps > 240:
-            src_fps = 30.0
-        frame_interval = 1.0 / src_fps
         output_interval = 1.0 / self.output_fps
 
         loop_playback = bool(self.video_settings.get("loop", False))
         hold = self.video_settings.get("hold", "last")
         playing = bool(self.video_settings.get("autoplay", False))
 
-        # Letterbox geometry: scale to fit inside the output resolution while
-        # preserving aspect ratio, centered on black. Computed once — the
-        # file's frame size never changes mid-stream.
-        src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or self.width
-        src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or self.height
-        scale = min(self.width / src_w, self.height / src_h)
-        fit_w = max(1, int(round(src_w * scale)))
-        fit_h = max(1, int(round(src_h * scale)))
-        off_x = (self.width - fit_w) // 2
-        off_y = (self.height - fit_h) // 2
-        needs_resize = (fit_w, fit_h) != (src_w, src_h)
-        resize_buf = np.empty((fit_h, fit_w, 3), dtype=np.uint8) if needs_resize else None
         # BGRX buffer starts zeroed (black) with X=255, so the letterbox bars
         # are already in place — only the fitted region is ever written.
-
         frame_dirty = True  # first frame needs an initial preview save
 
-        def blit(bgr):
+        def show_first_frame():
+            """Seek to frame 0 and put it on the buffer. Position is left at
+            frame 1, so a subsequent decode continues without re-reading."""
             nonlocal frame_dirty
-            if needs_resize:
-                cv2.resize(bgr, (fit_w, fit_h), dst=resize_buf)
-                bgr = resize_buf
-            frame_buffer[off_y:off_y + fit_h, off_x:off_x + fit_w, :3] = bgr
+            vid.rewind()
+            frame = vid.read()
+            if frame is None:
+                return False
+            vid.blit(frame, frame_buffer)
             frame_dirty = True
+            return True
 
-        def read_first_frame():
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ok, frame = cap.read()
-            if ok and frame is not None:
-                blit(frame)
-            return ok
+        def swap_file(new_path):
+            """Open a new file and swap it in; on any failure the current
+            file keeps playing/holding untouched."""
+            nonlocal vid, frame_dirty
+            new = _VideoFile(new_path, self.width, self.height)
+            first = new.read() if new.ok else None
+            if first is None:
+                new.release()
+                logger.warning(
+                    f"Load rejected (unreadable file) for '{self.ndi_name}': {new_path}"
+                )
+                return False
+            old = vid
+            vid = new
+            old.release()
+            # The new file's letterbox geometry may differ — blank the buffer
+            # so stale pixels outside the new fit region can't linger
+            frame_buffer[:, :, :3] = 0
+            vid.blit(first, frame_buffer)
+            frame_dirty = True
+            logger.info(f"Video loaded: {self.ndi_name} | file={new_path} | "
+                        f"{vid.src_w}x{vid.src_h}@{vid.fps:.2f}fps")
+            return True
 
         # Show the first frame immediately so the NDI source is never blank
-        if not read_first_frame():
-            logger.error(f"Cannot decode video file for '{self.ndi_name}': {path}")
-            cap.release()
+        if not show_first_frame():
+            logger.error(f"Cannot decode video file for '{self.ndi_name}': {vid.path}")
+            vid.release()
             self._idle_until_stopped()
             return
-        if playing:
-            # Frame 0 is already on the buffer; keep decoding from frame 1
-            pass
-        else:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        if not playing:
+            vid.rewind()
 
         logger.info(
-            f"Video worker started: {self.ndi_name} | file={path} | "
-            f"{src_w}x{src_h}@{src_fps:.2f}fps → {self.width}x{self.height} | "
+            f"Video worker started: {self.ndi_name} | file={vid.path} | "
+            f"{vid.src_w}x{vid.src_h}@{vid.fps:.2f}fps → {self.width}x{self.height} | "
             f"loop={loop_playback}, hold={hold}, autoplay={playing}, "
             f"output={self.output_fps}fps"
         )
@@ -703,17 +816,24 @@ class NDIWorker:
             while not self._stop_event.is_set():
                 now = time.monotonic()
 
-                # --- Apply pending play/stop command ---
-                cmd = self._poll_video_cmd()
-                if cmd == VIDEO_CMD_PLAY:
-                    if read_first_frame():
+                # --- Apply pending play/stop/load command ---
+                cmd, new_path, hold_override = self._poll_video_cmd()
+                if hold_override:
+                    hold = hold_override
+                if cmd in (VIDEO_CMD_LOAD, VIDEO_CMD_LOAD_PLAY) and new_path:
+                    if swap_file(new_path):
+                        playing = (cmd == VIDEO_CMD_LOAD_PLAY)
+                        next_frame_time = now + vid.frame_interval
+                    self._report_video_state(playing)
+                elif cmd == VIDEO_CMD_PLAY:
+                    if show_first_frame():
                         playing = True
-                        next_frame_time = now + frame_interval
+                        next_frame_time = now + vid.frame_interval
                     self._report_video_state(playing)
                 elif cmd == VIDEO_CMD_STOP:
                     playing = False
                     if hold == "first":
-                        read_first_frame()
+                        show_first_frame()
                     self._report_video_state(playing)
 
                 # --- Advance playback at the file's native FPS ---
@@ -727,42 +847,44 @@ class NDIWorker:
                     decode_budget = 8
                     while playing and now >= next_frame_time and decode_budget > 0:
                         decode_budget -= 1
-                        ok, frame = cap.read()
-                        if ok and frame is not None:
+                        frame = vid.read()
+                        if frame is not None:
                             latest = frame
-                            next_frame_time += frame_interval
+                            next_frame_time += vid.frame_interval
                         else:
                             # End of file (or decode error mid-file)
                             if loop_playback:
-                                if not read_first_frame():
+                                if not show_first_frame():
                                     logger.warning(
-                                        f"Video loop restart failed, reopening: {path}"
+                                        f"Video loop restart failed, reopening: {vid.path}"
                                     )
-                                    cap.release()
-                                    cap = cv2.VideoCapture(path)
-                                    if not read_first_frame():
+                                    reopen_path = vid.path
+                                    vid.release()
+                                    vid = _VideoFile(reopen_path, self.width, self.height)
+                                    if not (vid.ok and show_first_frame()):
                                         # File vanished or became undecodable —
                                         # stop and hold the last good frame
                                         # instead of spinning reopen attempts
                                         logger.error(
                                             f"Video file unreadable, stopping "
-                                            f"playback: {path}"
+                                            f"playback: {reopen_path}"
                                         )
                                         playing = False
                                         self._report_video_state(playing)
-                                latest = None  # read_first_frame already blitted
-                                next_frame_time = now + frame_interval
+                                latest = None  # show_first_frame already blitted
+                                next_frame_time = now + vid.frame_interval
                             else:
                                 playing = False
                                 if hold == "first":
-                                    read_first_frame()
+                                    show_first_frame()
                                     latest = None
                                 self._report_video_state(playing)
                                 logger.info(f"Video finished (hold={hold}): {self.ndi_name}")
                     if latest is not None:
-                        blit(latest)
+                        vid.blit(latest, frame_buffer)
+                        frame_dirty = True
                     if playing and next_frame_time < now:
-                        next_frame_time = now + frame_interval
+                        next_frame_time = now + vid.frame_interval
 
                 # --- Send to NDI (held frame keeps streaming while stopped) ---
                 if ndi is not None:
@@ -784,7 +906,7 @@ class NDIWorker:
                 if sleep_time > 0.001:
                     time.sleep(sleep_time)
         finally:
-            cap.release()
+            vid.release()
             self._report_video_state(False)
 
     def _run_video_source(self, frame_buffer, ndi=None, ndi_send=None, video_frame=None):

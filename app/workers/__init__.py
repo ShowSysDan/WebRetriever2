@@ -21,7 +21,10 @@ from typing import Dict, Optional
 from app.workers.ndi_worker import (
     NDIWorker, worker_entry, HEARTBEAT_TIMEOUT,
     VIDEO_CMD_NONE, VIDEO_CMD_PLAY, VIDEO_CMD_STOP,
+    VIDEO_CMD_LOAD, VIDEO_CMD_LOAD_PLAY,
     VIDEO_STATE_PLAYING,
+    VIDEO_HOLD_UNSET, VIDEO_HOLD_FIRST, VIDEO_HOLD_LAST,
+    VIDEO_PATH_MAX,
 )
 from app.logging_config import log_event
 
@@ -62,6 +65,8 @@ class WorkerManager:
         self._heartbeats: Dict[int, mp.Value] = {}
         self._video_cmds: Dict[int, mp.Value] = {}
         self._video_states: Dict[int, mp.Value] = {}
+        self._video_paths: Dict[int, mp.Array] = {}
+        self._video_holds: Dict[int, mp.Value] = {}
         self._configs: Dict[int, dict] = {}
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
@@ -78,12 +83,18 @@ class WorkerManager:
         heartbeat = mp.Value(ctypes.c_double, time.monotonic())
         extra = {}
         if config.get("source_type") == "video":
-            # Shared control channel for play/stop commands and playback state
+            # Shared control channel for play/stop/load commands, the file
+            # path payload for loads, hold-frame overrides, and playback state
             video_cmd = mp.Value(ctypes.c_int, VIDEO_CMD_NONE)
             video_state = mp.Value(ctypes.c_int, 0)
+            video_path = mp.Array(ctypes.c_char, VIDEO_PATH_MAX)
+            video_hold = mp.Value(ctypes.c_int, VIDEO_HOLD_UNSET)
             self._video_cmds[instance_id] = video_cmd
             self._video_states[instance_id] = video_state
-            extra = {"video_cmd": video_cmd, "video_state": video_state}
+            self._video_paths[instance_id] = video_path
+            self._video_holds[instance_id] = video_hold
+            extra = {"video_cmd": video_cmd, "video_state": video_state,
+                     "video_path": video_path, "video_hold": video_hold}
         worker = NDIWorker(**config, heartbeat=heartbeat, **extra)
         process = mp.Process(
             target=worker_entry, args=(worker,),
@@ -164,6 +175,8 @@ class WorkerManager:
             self._heartbeats.pop(instance_id, None)
             self._video_cmds.pop(instance_id, None)
             self._video_states.pop(instance_id, None)
+            self._video_paths.pop(instance_id, None)
+            self._video_holds.pop(instance_id, None)
             self._configs.pop(instance_id, None)
             self._restart_meta.pop(instance_id, None)
             log_event("INSTANCE_STOPPED", f"id={instance_id}")
@@ -205,15 +218,60 @@ class WorkerManager:
     # Video playback control
     # ------------------------------------------------------------------
 
-    def video_command(self, instance_id: int, command: str) -> bool:
-        """Send a play/stop command to a running video worker.
-        Returns False if the instance isn't a running video source."""
+    _VIDEO_COMMANDS = {
+        "play": VIDEO_CMD_PLAY,
+        "stop": VIDEO_CMD_STOP,
+        "load": VIDEO_CMD_LOAD,
+        "load_play": VIDEO_CMD_LOAD_PLAY,
+    }
+
+    def video_command(self, instance_id: int, command: str,
+                      path: Optional[str] = None,
+                      hold: Optional[str] = None) -> bool:
+        """Send a playback command to a running video worker.
+
+        `path` (required for load/load_play) is the file to hot-swap to;
+        `hold` ("first"/"last") optionally overrides the hold frame from
+        this command onward. Returns False if the instance isn't a running
+        video source or the command is malformed.
+
+        The cmd Value's lock serializes the whole channel: path and hold are
+        written before cmd under the same lock the worker reads them under.
+        """
+        cmd = self._VIDEO_COMMANDS.get(command)
         cmd_value = self._video_cmds.get(instance_id)
-        if cmd_value is None or not self.is_running(instance_id):
+        if cmd is None or cmd_value is None or not self.is_running(instance_id):
             return False
+
+        encoded = None
+        if cmd in (VIDEO_CMD_LOAD, VIDEO_CMD_LOAD_PLAY):
+            encoded = (path or "").encode("utf-8")
+            # ctypes .value needs room for its NUL terminator
+            if not encoded or len(encoded) >= VIDEO_PATH_MAX:
+                logger.error(f"video_command: bad load path for instance {instance_id}")
+                return False
+
         with cmd_value.get_lock():
-            cmd_value.value = VIDEO_CMD_PLAY if command == "play" else VIDEO_CMD_STOP
-        log_event("VIDEO_COMMAND", f"id={instance_id} cmd={command}")
+            if encoded is not None:
+                self._video_paths[instance_id].get_obj().value = encoded
+            if hold in ("first", "last"):
+                hold_value = self._video_holds.get(instance_id)
+                if hold_value is not None:
+                    hold_value.value = VIDEO_HOLD_FIRST if hold == "first" else VIDEO_HOLD_LAST
+            cmd_value.value = cmd
+
+        # Keep the stored config in sync so a watchdog restart resumes with
+        # the swapped file / new hold instead of reverting to the original
+        with self._lock:
+            config = self._configs.get(instance_id)
+            if config is not None:
+                if encoded is not None:
+                    config["source_value"] = path
+                if hold in ("first", "last") and config.get("video_settings"):
+                    config["video_settings"]["hold"] = hold
+        log_event("VIDEO_COMMAND", f"id={instance_id} cmd={command}"
+                  + (f" path={path}" if path else "")
+                  + (f" hold={hold}" if hold else ""))
         return True
 
     def get_video_state(self, instance_id: int) -> Optional[str]:
@@ -263,6 +321,8 @@ class WorkerManager:
             self._heartbeats.pop(iid, None)
             self._video_cmds.pop(iid, None)
             self._video_states.pop(iid, None)
+            self._video_paths.pop(iid, None)
+            self._video_holds.pop(iid, None)
 
             process = self._spawn(iid, config)
             log_event("INSTANCE_RESTARTED", f"id={iid} reason={reason} new_pid={process.pid}")
@@ -337,6 +397,8 @@ class WorkerManager:
             self._heartbeats.pop(iid, None)
             self._video_cmds.pop(iid, None)
             self._video_states.pop(iid, None)
+            self._video_paths.pop(iid, None)
+            self._video_holds.pop(iid, None)
         return dead
 
 

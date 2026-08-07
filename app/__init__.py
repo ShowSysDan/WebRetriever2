@@ -4,7 +4,7 @@ from flask import Flask, send_from_directory
 from flask_migrate import Migrate
 from sqlalchemy import inspect as sa_inspect, text
 from app.config import Config
-from app.models import db, GlobalSettings, OutputInstance
+from app.models import db, GlobalSettings, OutputInstance, MediaFile, generate_media_uid
 from app.routes import api
 from app.logging_config import setup_logging
 
@@ -66,6 +66,17 @@ def create_app(config_class=Config):
     with app.app_context():
         db.create_all()
         _add_missing_columns()
+        # Backfill permanent uids for media uploaded before the uid column
+        # existed (new uploads get one at upload time)
+        backfilled = 0
+        for media in MediaFile.query.filter(MediaFile.uid.is_(None)).all():
+            media.uid = generate_media_uid()
+            backfilled += 1
+        if backfilled:
+            db.session.commit()
+            logging.getLogger(__name__).info(
+                f"DB migrated: assigned uids to {backfilled} existing media file(s)"
+            )
         if not GlobalSettings.query.first():
             settings = GlobalSettings(
                 ndi_hostname=app.config.get("NDI_HOSTNAME", "NDI-STREAMER"),

@@ -1,7 +1,20 @@
+import uuid
 from datetime import datetime, timezone
 from flask_sqlalchemy import SQLAlchemy
 
 db = SQLAlchemy()
+
+
+def generate_media_uid():
+    """Short random token for MediaFile.uid — unique among existing rows.
+
+    Unlike the integer primary key (which SQLite may reuse after the
+    highest row is deleted), a uid is never reassigned, so external
+    controllers can reference media permanently."""
+    while True:
+        uid = uuid.uuid4().hex[:8]
+        if not MediaFile.query.filter_by(uid=uid).first():
+            return uid
 
 
 class GlobalSettings(db.Model):
@@ -31,6 +44,12 @@ class MediaFile(db.Model):
     __tablename__ = "media_files"
 
     id = db.Column(db.Integer, primary_key=True)
+    # Permanent external identifier: assigned once at upload, never reused.
+    # (SQLite can hand a deleted row's integer id to the next insert when the
+    # highest row is removed — uids can't shift or be recycled that way.)
+    # Nullable so existing DBs auto-migrate with ADD COLUMN; backfilled at
+    # startup in create_app.
+    uid = db.Column(db.String(12), nullable=True, unique=True, index=True)
     filename = db.Column(db.String(256), nullable=False)
     original_name = db.Column(db.String(256), nullable=False)
     mime_type = db.Column(db.String(64), nullable=True)
@@ -52,6 +71,7 @@ class MediaFile(db.Model):
     def to_dict(self):
         return {
             "id": self.id,
+            "uid": self.uid,
             "filename": self.filename,
             "original_name": self.original_name,
             "mime_type": self.mime_type,
