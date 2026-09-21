@@ -1309,6 +1309,7 @@ Behavior notes:
 | `DELETE` | `/api/signage/groups/:id` | Delete group + its items; `?keep_items=1` ungroups instead |
 | `POST` | `/api/instances/:id/signage/reorder` | Persist a full ordering — `{"order":[{"type":"item"\|"group","id":n},..], "group_items":{"<gid>":[item ids]}}` |
 | `POST` | `/api/instances/:id/signage/upload` | Upload straight into the playlist (multipart); ppt/pptx/odp/pdf become a group of slide images |
+| `GET` | `/api/instances/:ref/receivers` | Who is pulling this source: peer IPs + reverse-DNS hostnames of established NDI connections to the worker's sockets, with the SDK's own count (`sdk_receivers`) for cross-checking |
 | `GET`/`POST` | `/api/instances/:ref/signage/status` | Now playing / up next / seconds remaining (`:ref` = id or name) |
 | `GET` | `/api/instances/:ref/signage/events` | Real-time now-playing stream (Server-Sent Events) — pushes the status payload on every change; usable from any `EventSource` client |
 | `GET`/`POST` | `/api/instances/:ref/signage/skip` | Crossfade to the next item now |
@@ -1459,6 +1460,15 @@ multi-user hardening, bigger UI.**
   a reliable control connection open even when video travels over UDP or
   multicast — but the SDK does not expose per-receiver identity or which
   transport each one negotiated.
+- **Receiver identification (hostnames & IPs).** The SDK says how many;
+  the OS knows who. Clicking any `RX` badge (or the Signage live bar's
+  Receivers count) opens a popup listing each receiver's IP address,
+  reverse-DNS hostname, and connection count, read from the worker
+  process's established TCP sockets via `psutil` (new dependency) — this
+  sees every receiver, since the NDI control connection is TCP whatever
+  the video transport. Hostname lookups are cached and run in the
+  background so the API never blocks on slow DNS. Also available as
+  `GET /api/instances/:ref/receivers` for automation.
 - **Full-page upload progress.** Uploads now open a full-screen overlay
   with large per-file progress bars (% sent, then a processing pulse while
   the server probes/converts, then done/error) and an m-of-n summary. A

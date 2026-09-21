@@ -1689,6 +1689,29 @@ def signage_status(ref):
     })
 
 
+@api.route("/instances/<ref>/receivers", methods=["GET"])
+def instance_receivers(ref):
+    """Who is pulling this NDI source: peer IPs (and reverse-DNS hostnames)
+    of established TCP connections to the worker's NDI listening ports.
+
+    Complements the SDK's connection count on /api/instances: the SDK says
+    HOW MANY receivers are connected, the sockets say WHO. Every receiver
+    keeps a reliable TCP control connection open regardless of the video
+    transport (TCP, UDP, multicast), so all of them appear here; hostnames
+    are filled in by a cached background reverse-DNS lookup and may be null
+    on the first request. `sdk_receivers` is the SDK's own count for
+    cross-checking (null when it can't report)."""
+    inst = _resolve_instance(ref)
+    if not manager.is_running(inst.id):
+        return jsonify({"id": inst.id, "name": inst.name, "running": False,
+                        "supported": True, "receivers": [], "sdk_receivers": None})
+    data = manager.get_receiver_endpoints(inst.id) \
+        or {"supported": False, "reason": "Instance not running"}
+    ndi = manager.get_ndi_stats(inst.id) or {}
+    return jsonify({"id": inst.id, "name": inst.name, "running": True,
+                    "sdk_receivers": ndi.get("receivers"), **data})
+
+
 # How the signage event stream is paced. POLL is how often the generator
 # checks the (RAM-resident) status file; the worker force-writes it the
 # frame a transition happens, so item changes reach the browser within
