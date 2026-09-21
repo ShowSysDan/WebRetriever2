@@ -907,9 +907,9 @@ def list_media():
         d = f.to_dict()
         d["signage_usage"] = usage.get(f.id, [])
         # Whether the UI should offer an Optimize action (eligible under the
-        # current mode and not already queued/optimized)
+        # current mode and not already queued/optimized/playback-ready)
         d["can_optimize"] = (
-            f.optimize_status not in ("pending", "processing", "done")
+            f.optimize_status not in ("pending", "processing", "done", "native")
             and _needs_optimize(f)
         )
         out.append(d)

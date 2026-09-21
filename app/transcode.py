@@ -39,6 +39,54 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def probe_video(path):
+    """First video stream's {codec_name, pix_fmt, width, height} via
+    ffprobe, or None when ffprobe is missing or the probe fails."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,pix_fmt,width,height",
+             "-of", "json", path],
+            capture_output=True, timeout=60,
+        )
+        if result.returncode != 0:
+            return None
+        import json
+        streams = json.loads(result.stdout or b"{}").get("streams") or []
+        return streams[0] if streams else None
+    except Exception:
+        return None
+
+
+# The "perfect" playback format: cheapest mainstream decode, sized for the
+# outputs. Files already matching are marked playback-ready, never re-encoded.
+_READY_CONTAINERS = {"mp4", "m4v", "mov"}  # same MP4-family demux path
+_READY_PIX_FMTS = {"yuv420p", "yuvj420p"}
+
+
+def is_playback_ready(media, path, target_w, target_h) -> bool:
+    """Whether a video already matches the ideal playback format:
+    H.264 + 4:2:0 in an MP4-family container, within the target box."""
+    ext = media.filename.rsplit(".", 1)[-1].lower() if "." in media.filename else ""
+    if ext not in _READY_CONTAINERS:
+        return False
+    info = probe_video(path)
+    if info is None:
+        # No ffprobe / unreadable — fall back to a resolution-only check so
+        # a box without ffmpeg still avoids queueing everything as pending
+        return ((media.width_px or 0) <= target_w
+                and (media.height_px or 0) <= target_h)
+    if info.get("codec_name") != "h264":
+        return False
+    if info.get("pix_fmt") not in _READY_PIX_FMTS:
+        return False
+    w, h = info.get("width") or 0, info.get("height") or 0
+    return 0 < w <= target_w and 0 < h <= target_h
+
+
 class Transcoder:
     def __init__(self):
         self._queue: "queue.Queue[int]" = queue.Queue()
@@ -48,7 +96,9 @@ class Transcoder:
         self.active_id = None  # media id currently being transcoded
 
     def init_app(self, app):
-        """Bind to the Flask app and re-queue jobs interrupted by a restart."""
+        """Bind to the Flask app, re-queue jobs interrupted by a restart,
+        and — in "all" mode — sweep the library for videos that were never
+        checked (uploaded before this feature, or while it was off)."""
         self._app = app
         from app.models import db, MediaFile
         with app.app_context():
@@ -64,20 +114,44 @@ class Transcoder:
                     self._queue.put(media.id)
                 self._ensure_thread()
 
+            if app.config.get("VIDEO_OPTIMIZE") == "all":
+                unchecked = [
+                    m for m in MediaFile.query.filter(
+                        MediaFile.optimize_status.is_(None)).all()
+                    if m.is_video
+                ]
+                if unchecked:
+                    logger.info(
+                        f"Video optimize sweep: checking {len(unchecked)} "
+                        f"existing video(s) for playback format"
+                    )
+                    for media in unchecked:
+                        self.enqueue(media.id)
+                    db.session.commit()
+
     def enqueue(self, media_id: int) -> str:
         """Queue a media file for optimization. Returns the resulting status
         ("pending", or "skipped" when ffmpeg isn't installed). The caller
         must be inside an app context and commit the session afterwards."""
+        from flask import current_app
         from app.models import db, MediaFile
         media = db.session.get(MediaFile, media_id)
         if media is None:
             return "skipped"
         if not ffmpeg_available():
+            # No converter available — still classify: a file already within
+            # the box in an MP4-family container plays fine as-is
+            upload_dir = current_app.config["UPLOAD_FOLDER"]
+            tw = current_app.config.get("VIDEO_TARGET_WIDTH", 1920)
+            th = current_app.config.get("VIDEO_TARGET_HEIGHT", 1080)
+            if is_playback_ready(media, os.path.join(upload_dir, media.filename), tw, th):
+                media.optimize_status = "native"
+                return "native"
             media.optimize_status = "skipped"
             logger.warning(
-                "ffmpeg not installed — cannot optimize oversized video "
+                "ffmpeg not installed — cannot optimize video "
                 f"'{media.original_name}'. Install it (apt install ffmpeg) "
-                "for smooth 4K playback."
+                "for smooth playback."
             )
             return "skipped"
         media.optimize_status = "pending"
@@ -139,6 +213,14 @@ class Transcoder:
         th = current_app.config.get("VIDEO_TARGET_HEIGHT", 1080)
         crf = current_app.config.get("VIDEO_CRF", 20)
         preset = current_app.config.get("VIDEO_PRESET", "veryfast")
+
+        # Already the perfect playback format? Mark it ready — no re-encode
+        if is_playback_ready(media, src, tw, th):
+            media.optimize_status = "native"
+            db.session.commit()
+            logger.info(f"Video already playback-ready, not converting: "
+                        f"'{media.original_name}'")
+            return
 
         # Compute the exact even-sized fit in Python when source dims are
         # known (deterministic, no filter-expression pitfalls); otherwise

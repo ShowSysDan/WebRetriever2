@@ -37,16 +37,18 @@ class Config:
     # Video optimization: background one-time transcode (ffmpeg) into the
     # cheapest-to-decode playback format — H.264/yuv420p MP4, tuned
     # fastdecode, sized to the target box, audio stripped. Originals stay on
-    # disk. Modes:
-    #   "oversized" (default) — only videos larger than the target box
-    #                           (the 4K-chokes-playback case)
-    #   "all"                 — normalize every uploaded video to the
-    #                           standard playback format
+    # disk. Videos already in the perfect format are probed and marked
+    # playback-ready without re-encoding. Modes:
+    #   "all" (default)       — check every uploaded video (including ones
+    #                           already in the library at boot) and convert
+    #                           whatever isn't in the ideal playback format
+    #   "oversized"           — only convert videos larger than the target
+    #                           box (the 4K-chokes-playback case)
     #   "off"                 — never transcode
-    _vo = os.getenv("VIDEO_OPTIMIZE", "oversized").lower()
-    VIDEO_OPTIMIZE = {"true": "oversized", "false": "off"}.get(_vo, _vo)
+    _vo = os.getenv("VIDEO_OPTIMIZE", "all").lower()
+    VIDEO_OPTIMIZE = {"true": "all", "false": "off"}.get(_vo, _vo)
     if VIDEO_OPTIMIZE not in ("oversized", "all", "off"):
-        VIDEO_OPTIMIZE = "oversized"
+        VIDEO_OPTIMIZE = "all"
     VIDEO_TARGET_WIDTH = int(os.getenv("VIDEO_TARGET_WIDTH", "1920"))
     VIDEO_TARGET_HEIGHT = int(os.getenv("VIDEO_TARGET_HEIGHT", "1080"))
     VIDEO_CRF = int(os.getenv("VIDEO_CRF", "20"))          # x264 quality (lower = better)

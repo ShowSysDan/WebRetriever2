@@ -19,7 +19,7 @@ A self-hosted Flask application that captures webpages, images, or text via head
 - **Impression counters** — every item counts how many times it went on air
 - **Live signage control** — see what's playing and what's next, and skip ahead with one click or a bare URL (`/api/instances/<id-or-name>/signage/skip`)
 - **Upload progress** — per-file progress readout with % uploaded, server-processing state, and clear error messages
-- **4K-safe video pipeline** — workers decode with all cores (and the box's hardware decoder when present), and oversized uploads are automatically transcoded once, in the background, into a light H.264 playback copy sized for the outputs (originals kept; `VIDEO_OPTIMIZE=all` normalizes every upload, `off` disables)
+- **4K-safe video pipeline** — workers decode with all cores (and the box's hardware decoder when present), and every uploaded video is checked against the ideal playback format (H.264/yuv420p MP4 within the output size): anything else is transcoded once, in the background, into a light playback copy; already-perfect files are marked playback-ready untouched. Originals always kept (`VIDEO_OPTIMIZE=oversized` limits conversion to 4K-class files, `off` disables)
 - **Live preview popups** — pop any output into its own confidence-monitor window (click a thumbnail or the ⧉ button): an MJPEG stream that automatically switches the worker to larger, faster preview frames (854px @ ~4fps) while the window is open, with live state, and now/next for signage
 - **Video playback as NDI** — upload a video (mp4, mov, mkv, webm…) and play it out as an NDI source: play once or loop, hold the last or first frame while stopped, optional autoplay on start
 - **Show-control friendly playback API** — trigger video play/stop/load with a plain GET or POST URL on the same port as the web UI (works from Companion, Crestron, QLab, or a browser bookmark), addressing instances by id or by name
@@ -1397,6 +1397,22 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.5.0
+
+**Optimize everything** — every video is checked and converted unless it's
+already perfect.
+
+- Default `VIDEO_OPTIMIZE` mode is now `all`: every uploaded video is
+  probed (ffprobe) and, unless it already matches the ideal playback
+  format — H.264 + 4:2:0 in an MP4-family container, within the target
+  box — it's converted in the background. Already-perfect files are marked
+  **✓ playback-ready** without a wasted re-encode. Originals are always
+  kept.
+- **Boot-time library sweep**: videos never checked (uploaded before this
+  feature, or while it was off) are queued automatically on service start.
+- Without ffmpeg installed, files are still classified (playback-ready vs
+  needs-conversion) so the library shows what would benefit.
 
 #### 1.4.0
 

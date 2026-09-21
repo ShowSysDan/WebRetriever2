@@ -517,7 +517,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v1.4.0'),
+      h('span',{className:'version'},'v1.5.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
@@ -666,6 +666,9 @@ function renderMediaCard(m) {
         if (s==='done') return h('div',{className:'media-opt done',
           title:'A light H.264 playback copy is used on air; ?original=1 fetches the upload'},
           `⚡ optimized → ${m.optimized_width||'?'}×${m.optimized_height||'?'}`);
+        if (s==='native') return h('div',{className:'media-opt done',
+          title:'Already H.264/yuv420p within the output size — plays as-is'},
+          '✓ playback-ready');
         if (s==='pending'||s==='processing') return h('div',{className:'media-opt busy'},'⚙ optimizing…');
         if (s==='failed') return h('div',{className:'media-opt warn'},'⚠ optimize failed');
         if (s==='skipped') return h('div',{className:'media-opt warn',
