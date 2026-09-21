@@ -113,6 +113,15 @@
   .media-card:hover .media-card-actions { display:flex; gap:4px; }
   .media-usage { font-size:10px; color:var(--accent); margin-top:2px; }
 
+  /* Media library filter chips */
+  .media-filters { display:flex; flex-direction:column; gap:6px; margin-top:14px; }
+  .chip-group { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .chip-label { font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; width:52px; flex-shrink:0; }
+  .chip { padding:3px 11px; font-size:12px; border-radius:14px; background:var(--surface2); border:1px solid var(--border); }
+  .chip:hover { border-color:var(--border-hover); }
+  .chip.active { background:var(--accent-dim); color:var(--accent); border-color:var(--accent-dim); font-weight:600; }
+  .media-origin { font-size:10px; color:var(--text-dim); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
   .upload-zone { border:2px dashed var(--border); border-radius:var(--radius); padding:32px; text-align:center; color:var(--text-dim); cursor:pointer; transition:border-color .15s; }
   .upload-zone:hover { border-color:var(--accent); color:var(--text); }
   .upload-zone.dragover { border-color:var(--accent); background:var(--accent-dim); }
@@ -191,6 +200,7 @@ let state = {
   modal: null,
   tab: 'instances',
   fpsInput: '60',
+  mediaFilter: { type:'all', source:'all', usage:'all' },
   // Signage tab
   signageInstId: null,
   signage: null,        // GET /instances/<id>/signage payload
@@ -498,7 +508,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v1.2.0'),
+      h('span',{className:'version'},'v1.3.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
@@ -603,8 +613,57 @@ function renderInstancesPage() {
   return main;
 }
 
+// --- Media Library filters -------------------------------------------------
+
+function mediaMatchesFilter(m, f) {
+  if (f.type==='image' && m.is_video) return false;
+  if (f.type==='video' && !m.is_video) return false;
+  const src = m.origin || 'library';
+  if (f.source!=='all' && src!==f.source) return false;
+  const su = m.signage_usage || [];
+  if (f.usage==='grouped' && !su.some(u=>u.group_id)) return false;
+  if (f.usage==='playlist' && !su.length) return false;
+  if (f.usage==='unused') {
+    const usedByInst = state.instances.some(i=>i.media_file_id===m.id);
+    if (su.length || usedByInst) return false;
+  }
+  return true;
+}
+
+function renderMediaCard(m) {
+  const usedBy = state.instances.filter(i=>i.media_file_id===m.id);
+  const su = m.signage_usage || [];
+  const dur = m.duration_s ? ` · ${Math.floor(m.duration_s/60)}:${String(Math.round(m.duration_s%60)).padStart(2,'0')}` : '';
+  const size = m.file_size > 1048576 ? `${(m.file_size/1048576).toFixed(1)}MB` : `${(m.file_size/1024).toFixed(0)}KB`;
+  const origin = m.origin || 'library';
+  const originLabel = {library:'📁 Library', signage:'📺 Signage upload',
+                       deck:`🖽 ${m.origin_name||'Deck'}`}[origin] || origin;
+  // One line per playlist appearance: "Instance › Group"
+  const suLabels = [...new Set(su.map(u =>
+    `${u.instance_name||('#'+u.instance_id)}${u.group_name?` › 🗂 ${u.group_name}`:''}`))];
+  return h('div',{className:'media-card'},
+    m.is_video
+      ? h('video',{src:m.url+'#t=0.1',muted:'true',preload:'metadata',title:m.original_name})
+      : h('img',{src:m.url,alt:m.original_name,loading:'lazy'}),
+    h('div',{className:'media-card-info'},
+      h('div',{className:'media-card-name'},(m.is_video?'🎞 ':'')+m.original_name),
+      h('div',{className:'media-card-meta'},
+        `${m.width_px||'?'}×${m.height_px||'?'}${dur} · ${size}`),
+      h('div',{className:'media-card-meta',title:'Permanent ID for API playback URLs — never reused, even after deletes'},
+        `id ${m.id}${m.uid?` · uid ${m.uid}`:''}`),
+      h('div',{className:'media-origin',title:'How this file was added'},originLabel),
+      usedBy.length ? h('div',{className:'media-usage'},`Source for: ${usedBy.map(i=>i.name).join(', ')}`) : null,
+      suLabels.length ? h('div',{className:'media-usage'},`Playlist: ${suLabels.join(' · ')}`) : null,
+    ),
+    h('div',{className:'media-card-actions'},
+      h('button',{className:'sm danger',onClick:(e)=>{e.stopPropagation();deleteMedia(m.id);}},'✕'),
+    ),
+  );
+}
+
 function renderMediaPage() {
   const main = h('div',{className:'main'});
+  const f = state.mediaFilter;
 
   // Upload zone
   const zone = h('div',{className:'upload-zone'},'Drop images or videos here, or click to upload');
@@ -617,38 +676,53 @@ function renderMediaPage() {
   main.appendChild(zone);
   main.appendChild(fileInput);
 
-  // Media grid
-  const title = h('div',{className:'section-header',style:{marginTop:'20px'}},
-    h('div',{className:'section-title'},`Library (${state.media.length} files)`),
-  );
-  main.appendChild(title);
+  // Filter bar — counts are within the OTHER active filters, so they always
+  // reflect what clicking the chip would show
+  const chipRow = (label, key, options) => {
+    const row = h('div',{className:'chip-group'}, h('span',{className:'chip-label'},label));
+    for (const [val, text] of options) {
+      const count = state.media.filter(m =>
+        mediaMatchesFilter(m, {...f, [key]: val})).length;
+      row.appendChild(h('button',
+        {className:`chip ${f[key]===val?'active':''}`,
+         onClick:()=>{state.mediaFilter={...f,[key]:val};render();}},
+        `${text} (${count})`));
+    }
+    return row;
+  };
+  main.appendChild(h('div',{className:'media-filters'},
+    chipRow('Type','type',[['all','All'],['image','Images'],['video','Videos']]),
+    chipRow('Source','source',[['all','All'],['library','Library upload'],['signage','Signage upload'],['deck','Deck slides']]),
+    chipRow('Usage','usage',[['all','All'],['grouped','In a signage group'],['playlist','In a playlist'],['unused','Unused']]),
+  ));
+
+  const filtered = state.media.filter(m=>mediaMatchesFilter(m, f));
+  const filterActive = f.type!=='all'||f.source!=='all'||f.usage!=='all';
+  main.appendChild(h('div',{className:'section-header',style:{marginTop:'16px'}},
+    h('div',{className:'section-title'},
+      filterActive ? `Library (${filtered.length} of ${state.media.length} files)`
+                   : `Library (${state.media.length} files)`),
+  ));
 
   if(!state.media.length) {
     main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'🖼'),h('div',null,'No files uploaded yet.')));
+  } else if(!filtered.length) {
+    main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'🔍'),h('div',null,'No files match the current filters.')));
+  } else if (f.source==='deck') {
+    // Deck view: one section per source deck, slides in order
+    const decks = {};
+    filtered.forEach(m=>{ (decks[m.origin_name||'Unknown deck'] ??= []).push(m); });
+    for (const [deck, files] of Object.entries(decks)) {
+      main.appendChild(h('div',{className:'section-header',style:{marginTop:'14px'}},
+        h('div',{className:'section-title'},`🖽 ${deck} (${files.length} slides)`)));
+      const grid = h('div',{className:'media-grid'});
+      files.sort((a,b)=>a.original_name.localeCompare(b.original_name))
+           .forEach(m=>grid.appendChild(renderMediaCard(m)));
+      main.appendChild(grid);
+    }
   } else {
     const grid = h('div',{className:'media-grid'});
-    state.media.forEach(m=>{
-      const usedBy = state.instances.filter(i=>i.media_file_id===m.id);
-      const dur = m.duration_s ? ` · ${Math.floor(m.duration_s/60)}:${String(Math.round(m.duration_s%60)).padStart(2,'0')}` : '';
-      const size = m.file_size > 1048576 ? `${(m.file_size/1048576).toFixed(1)}MB` : `${(m.file_size/1024).toFixed(0)}KB`;
-      const card = h('div',{className:'media-card'},
-        m.is_video
-          ? h('video',{src:m.url+'#t=0.1',muted:'true',preload:'metadata',title:m.original_name})
-          : h('img',{src:m.url,alt:m.original_name,loading:'lazy'}),
-        h('div',{className:'media-card-info'},
-          h('div',{className:'media-card-name'},(m.is_video?'🎞 ':'')+m.original_name),
-          h('div',{className:'media-card-meta'},
-            `${m.width_px||'?'}×${m.height_px||'?'}${dur} · ${size}`),
-          h('div',{className:'media-card-meta',title:'Permanent ID for API playback URLs — never reused, even after deletes'},
-            `id ${m.id}${m.uid?` · uid ${m.uid}`:''}`),
-          usedBy.length ? h('div',{className:'media-usage'},`Used by: ${usedBy.map(i=>i.name).join(', ')}`) : null,
-        ),
-        h('div',{className:'media-card-actions'},
-          h('button',{className:'sm danger',onClick:(e)=>{e.stopPropagation();deleteMedia(m.id);}},'✕'),
-        ),
-      );
-      grid.appendChild(card);
-    });
+    filtered.forEach(m=>grid.appendChild(renderMediaCard(m)));
     main.appendChild(grid);
   }
   return main;

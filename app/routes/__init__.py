@@ -879,8 +879,31 @@ def instance_preview_stream(ref):
 
 @api.route("/media", methods=["GET"])
 def list_media():
+    """Media listing, each entry augmented with its signage playlist usage
+    (which instances' playlists it's in, and inside which group, if any) so
+    the library can filter on group membership."""
     files = MediaFile.query.order_by(MediaFile.uploaded_at.desc()).all()
-    return jsonify([f.to_dict() for f in files])
+
+    inst_names = {i.id: i.name for i in
+                  db.session.query(OutputInstance.id, OutputInstance.name).all()}
+    group_names = {g.id: g.name for g in
+                   db.session.query(SignageGroup.id, SignageGroup.name).all()}
+    usage = {}
+    for it in SignageItem.query.all():
+        usage.setdefault(it.media_file_id, []).append({
+            "item_id": it.id,
+            "instance_id": it.instance_id,
+            "instance_name": inst_names.get(it.instance_id),
+            "group_id": it.group_id,
+            "group_name": group_names.get(it.group_id) if it.group_id else None,
+        })
+
+    out = []
+    for f in files:
+        d = f.to_dict()
+        d["signage_usage"] = usage.get(f.id, [])
+        out.append(d)
+    return jsonify(out)
 
 
 def _probe_media(filepath, ext):
@@ -909,7 +932,8 @@ def _probe_media(filepath, ext):
     return width_px, height_px, duration_s
 
 
-def _create_media_record(filepath, unique_name, original_name, ext, mime_type=None):
+def _create_media_record(filepath, unique_name, original_name, ext, mime_type=None,
+                         origin="library", origin_name=None):
     """Create + commit a MediaFile row for a file already in the uploads dir.
     Returns (media, None) on success, (None, (response, status)) on failure —
     the on-disk file is removed on failure so nothing is orphaned."""
@@ -931,6 +955,8 @@ def _create_media_record(filepath, unique_name, original_name, ext, mime_type=No
         width_px=width_px,
         height_px=height_px,
         duration_s=duration_s,
+        origin=origin,
+        origin_name=origin_name,
     )
     db.session.add(media)
     try:
@@ -946,7 +972,7 @@ def _create_media_record(filepath, unique_name, original_name, ext, mime_type=No
     return media, None
 
 
-def _store_media_upload(file):
+def _store_media_upload(file, origin="library"):
     """Validate + store an uploaded image/video and create its MediaFile.
     Returns (media, None) or (None, (response, status))."""
     if file.filename == "":
@@ -966,7 +992,8 @@ def _store_media_upload(file):
     file.save(filepath)
 
     return _create_media_record(
-        filepath, unique_name, original_name, ext, mime_type=file.content_type
+        filepath, unique_name, original_name, ext,
+        mime_type=file.content_type, origin=origin,
     )
 
 
@@ -1396,7 +1423,7 @@ def signage_upload(instance_id):
 
     # Plain image/video → media library + one playlist item
     if ext in current_app.config.get("ALLOWED_EXTENSIONS", set()):
-        media, err = _store_media_upload(file)
+        media, err = _store_media_upload(file, origin="signage")
         if err:
             return err
         item = SignageItem(
@@ -1440,6 +1467,7 @@ def signage_upload(instance_id):
                 dest, unique_name,
                 f"{deck_name} — slide {idx:02d}.png", "png",
                 mime_type="image/png",
+                origin="deck", origin_name=original_name,
             )
             if err:
                 return err
