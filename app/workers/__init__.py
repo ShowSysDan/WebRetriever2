@@ -189,6 +189,37 @@ def _receiver_endpoints_for_pid(pid: int) -> dict:
     }
 
 
+# --- Server egress (NIC level) ----------------------------------------------
+# Total bandwidth leaving the box, from interface counters. This is the
+# ground truth that per-connection TCP sampling can't see: UDP and multicast
+# media, plus everything else (web UI, previews). Loopback is excluded —
+# local traffic never leaves the server.
+
+_egress_lock = threading.Lock()
+_egress_sample: Optional[tuple] = None  # (bytes_sent, monotonic)
+
+
+def server_egress_mbps() -> Optional[float]:
+    """Mbps leaving the server since the last call (delta over NIC
+    bytes_sent, loopback excluded). None on the first call — rates need two
+    samples — and on platforms without psutil."""
+    global _egress_sample
+    try:
+        import psutil
+        counters = psutil.net_io_counters(pernic=True)
+    except Exception:
+        return None
+    sent = sum(c.bytes_sent for name, c in counters.items()
+               if not name.lower().startswith("lo")
+               and "loopback" not in name.lower())
+    now = time.monotonic()
+    with _egress_lock:
+        prev, _egress_sample = _egress_sample, (sent, now)
+    if prev is None or now <= prev[1] or sent < prev[0]:
+        return None
+    return round((sent - prev[0]) * 8 / (now - prev[1]) / 1e6, 2)
+
+
 def _kill_process_tree(process: mp.Process):
     """Force-kill a worker AND its descendants (Playwright driver, Chromium).
 

@@ -1309,6 +1309,7 @@ Behavior notes:
 | `DELETE` | `/api/signage/groups/:id` | Delete group + its items; `?keep_items=1` ungroups instead |
 | `POST` | `/api/instances/:id/signage/reorder` | Persist a full ordering — `{"order":[{"type":"item"\|"group","id":n},..], "group_items":{"<gid>":[item ids]}}` |
 | `POST` | `/api/instances/:id/signage/upload` | Upload straight into the playlist (multipart); ppt/pptx/odp/pdf become a group of slide images |
+| `GET` | `/api/receivers` | Fleet-wide receiver view: every connection across all running instances, summed TCP bandwidth (`total_tcp_mbps`), unique receiver / connection counts, and total NIC egress (`egress_mbps`, loopback excluded) |
 | `GET` | `/api/instances/:ref/receivers` | Who is pulling this source: peer IPs + reverse-DNS hostnames of established NDI connections to the worker's sockets, with the SDK's own count (`sdk_receivers`) for cross-checking |
 | `GET`/`POST` | `/api/instances/:ref/signage/status` | Now playing / up next / seconds remaining (`:ref` = id or name) |
 | `GET` | `/api/instances/:ref/signage/events` | Real-time now-playing stream (Server-Sent Events) — pushes the status payload on every change; usable from any `EventSource` client |
@@ -1491,6 +1492,13 @@ multi-user hardening, bigger UI.**
   (`tcp` / `udp-multicast` / `measuring` / `unknown`) and `mbps` per
   receiver. Rates need two samples, so the first poll reports
   `measuring`; platforms without `ss` report `unknown`.
+- **Fleet-wide bandwidth view.** The header's `RX` pill is clickable:
+  every connection across all running sources in one popup, with three
+  headline numbers — summed per-receiver TCP rate, unique receiver /
+  connection totals, and **server egress** (NIC counters, loopback
+  excluded), the ground-truth bandwidth actually leaving the box, which
+  also carries UDP/multicast media the TCP sum can't see. Also at
+  `GET /api/receivers` for dashboards and monitoring.
 - **Full-page upload progress.** Uploads now open a full-screen overlay
   with large per-file progress bars (% sent, then a processing pulse while
   the server probes/converts, then done/error) and an m-of-n summary. A

@@ -25,7 +25,7 @@ from app.models import (
     db, OutputInstance, GlobalSettings, MediaFile, generate_media_uid,
     SignageGroup, SignageItem,
 )
-from app.workers import manager
+from app.workers import manager, server_egress_mbps
 from app.transcode import transcoder, ffmpeg_available
 from app.logging_config import log_event
 
@@ -1714,6 +1714,48 @@ def signage_status(ref):
             status = None
     return jsonify({
         "id": inst.id, "name": inst.name, "running": running, "status": status,
+    })
+
+
+@api.route("/receivers", methods=["GET"])
+def all_receivers():
+    """Fleet-wide receiver view: every connection across all running
+    instances, their measured TCP bandwidth summed, and the server's total
+    NIC egress.
+
+    total_tcp_mbps only counts media flowing over the receivers' TCP
+    connections; egress_mbps is the interface-counter ground truth
+    (loopback excluded) and also carries UDP/multicast media, previews and
+    the web UI — the gap between the two is roughly the non-TCP output.
+    Rates need two samples, so both read null on the first call."""
+    instances = OutputInstance.query.order_by(OutputInstance.created_at).all()
+    per_instance = []
+    ips = set()
+    total_conns = 0
+    total_mbps = 0.0
+    for inst in instances:
+        if not manager.is_running(inst.id):
+            continue
+        data = manager.get_receiver_endpoints(inst.id)
+        if not data or not data.get("supported"):
+            continue
+        for r in data["receivers"]:
+            ips.add(r["ip"])
+            total_conns += r["connections"]
+            if r.get("mbps"):
+                total_mbps += r["mbps"]
+        ndi = manager.get_ndi_stats(inst.id) or {}
+        per_instance.append({
+            "instance_id": inst.id, "name": inst.name,
+            "sdk_receivers": ndi.get("receivers"),
+            "receivers": data["receivers"],
+        })
+    return jsonify({
+        "instances": per_instance,
+        "unique_receivers": len(ips),
+        "total_connections": total_conns,
+        "total_tcp_mbps": round(total_mbps, 2),
+        "egress_mbps": server_egress_mbps(),
     })
 
 
