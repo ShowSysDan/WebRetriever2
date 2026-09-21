@@ -125,6 +125,8 @@
   .chip:hover { border-color:var(--border-hover); }
   .chip.active { background:var(--accent-dim); color:var(--accent); border-color:var(--accent-dim); font-weight:600; }
   .media-origin { font-size:10px; color:var(--text-dim); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* Plain-text type chips — immune to font fallback, unlike pictographs */
+  .type-badge { display:inline-block; font-family:'JetBrains Mono',monospace; font-size:9px; font-weight:600; letter-spacing:.5px; color:var(--text-dim); background:var(--surface2); border:1px solid var(--border); border-radius:3px; padding:0 4px; margin-right:6px; vertical-align:1px; }
   .media-opt { font-size:10px; margin-top:2px; font-family:'JetBrains Mono',monospace; }
   .media-opt.done { color:var(--accent); }
   .media-opt.busy { color:var(--blue); animation:up-pulse 1.2s ease-in-out infinite; }
@@ -154,8 +156,8 @@
   .sg-remaining { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--warning); }
   .sg-toolbar { display:flex; gap:8px; align-items:center; margin:14px 0 10px; flex-wrap:wrap; }
   .sg-list { display:flex; flex-direction:column; gap:4px; }
-  .sg-row { display:grid; grid-template-columns:22px 18px 74px 1fr 130px 190px 62px 150px; align-items:center; gap:10px; padding:7px 12px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); }
-  .sg-row.grouped { margin-left:30px; grid-template-columns:22px 18px 74px 1fr 130px 190px 62px 150px; }
+  .sg-row { display:grid; grid-template-columns:22px 18px 74px 1fr 130px 190px 76px 150px; align-items:center; gap:10px; padding:7px 12px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); }
+  .sg-row.grouped { margin-left:30px; grid-template-columns:22px 18px 74px 1fr 130px 190px 76px 150px; }
   .sg-row.dragover { border-color:var(--accent); box-shadow:0 -2px 0 var(--accent); }
   /* Schedule state: red-ish = can't play (expired or disabled), grey = not started yet */
   .sg-row.expired { border-color:#5b1a1a; background:#1a0f11; }
@@ -571,7 +573,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v1.6.1'),
+      h('span',{className:'version'},'v1.6.2'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
@@ -642,10 +644,10 @@ function renderSettingsBar() {
 function renderInstanceCard(inst) {
   const srcLabel = {
     webpage:'🌐 '+(inst.source_value||'—'),
-    image: inst.media_file ? '🖼️ '+inst.media_file.original_name : '🖼️ '+(inst.source_value||'—'),
+    image: 'IMG · '+(inst.media_file ? inst.media_file.original_name : (inst.source_value||'—')),
     text:'📝 '+(inst.text_content||'—').substring(0,30),
     webcam:'📷 '+((inst.source_value||'—').split('/').pop()),
-    video:'🎬 '+(inst.media_file ? inst.media_file.original_name : '—')+(inst.video_loop?' ⟳':''),
+    video:'VID · '+(inst.media_file ? inst.media_file.original_name : '—')+(inst.video_loop?' ⟳':''),
     signage:`📺 Playlist · ${inst.signage_item_count||0} item${inst.signage_item_count===1?'':'s'}`,
   }[inst.source_type]||inst.source_value;
 
@@ -736,11 +738,11 @@ function renderMediaCard(m) {
   const dur = m.duration_s ? ` · ${Math.floor(m.duration_s/60)}:${String(Math.round(m.duration_s%60)).padStart(2,'0')}` : '';
   const size = m.file_size > 1048576 ? `${(m.file_size/1048576).toFixed(1)}MB` : `${(m.file_size/1024).toFixed(0)}KB`;
   const origin = m.origin || 'library';
-  const originLabel = {library:'📁 Library', signage:'📺 Signage upload',
-                       deck:`📑 ${m.origin_name||'Deck'}`}[origin] || origin;
+  const originLabel = {library:'Library upload', signage:'Signage upload',
+                       deck:`Deck: ${m.origin_name||'?'}`}[origin] || origin;
   // One line per playlist appearance: "Instance › Group"
   const suLabels = [...new Set(su.map(u =>
-    `${u.instance_name||('#'+u.instance_id)}${u.group_name?` › 🗂️ ${u.group_name}`:''}`))];
+    `${u.instance_name||('#'+u.instance_id)}${u.group_name?` › ${u.group_name}`:''}`))];
   return h('div',{className:'media-card'},
     // Server-generated poster JPEG — a plain <img> per card instead of a
     // full <video> element (browsers cap concurrent media decoders, which
@@ -751,7 +753,8 @@ function renderMediaCard(m) {
       m.is_video ? h('div',{className:'play-glyph'},'▶') : null,
     ),
     h('div',{className:'media-card-info'},
-      h('div',{className:'media-card-name'},(m.is_video?'🎬 ':'')+m.original_name),
+      h('div',{className:'media-card-name'},
+        h('span',{className:'type-badge'},m.is_video?'VID':'IMG'), m.original_name),
       h('div',{className:'media-card-meta'},
         `${m.width_px||'?'}×${m.height_px||'?'}${dur} · ${size}`),
       h('div',{className:'media-card-meta',title:'Permanent ID for API playback URLs — never reused, even after deletes'},
@@ -835,7 +838,7 @@ function renderMediaPage() {
   ));
 
   if(!state.media.length) {
-    main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'🖼️'),h('div',null,'No files uploaded yet.')));
+    main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'▦'),h('div',null,'No files uploaded yet.')));
   } else if(!filtered.length) {
     main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'🔍'),h('div',null,'No files match the current filters.')));
   } else if (f.source==='deck') {
@@ -844,7 +847,7 @@ function renderMediaPage() {
     filtered.forEach(m=>{ (decks[m.origin_name||'Unknown deck'] ??= []).push(m); });
     for (const [deck, files] of Object.entries(decks)) {
       main.appendChild(h('div',{className:'section-header',style:{marginTop:'14px'}},
-        h('div',{className:'section-title'},`📑 ${deck} (${files.length} slides)`)));
+        h('div',{className:'section-title'},`Deck: ${deck} (${files.length} slides)`)));
       const grid = h('div',{className:'media-grid'});
       files.sort((a,b)=>a.original_name.localeCompare(b.original_name))
            .forEach(m=>grid.appendChild(renderMediaCard(m)));
@@ -1059,14 +1062,16 @@ function sgItemRow(item, group) {
     h('img',{className:'sg-thumb',src:m.thumb_url||'',loading:'lazy',alt:'',
              onError:e=>{e.target.style.visibility='hidden';}}),
     h('div',null,
-      h('div',{className:'sg-name'},(m.is_video?'🎬 ':'🖼️ ')+(m.original_name||'(deleted)')),
+      h('div',{className:'sg-name'},
+        h('span',{className:'type-badge'},m.is_video?'VID':'IMG'),
+        m.original_name||'(deleted)'),
       h('div',{className:'sg-sub'},`#${item.id}${m.is_video&&m.duration_s?` · file ${Math.round(m.duration_s)}s`:''}`),
     ),
     h('div',{className:'sg-timing'},`▦ ${sgFmtSecs(t.dur)}${t.inherited?'*':''} · fade ${sgFmtSecs(t.fade)}`),
     h('div',{className:'sg-sched',title:`${status.label?status.label+' · ':''}${sched||'always'}`},
       status.label ? h('span',{className:'sg-status-tag'},status.label+' ') : null,
       sched||'always'),
-    h('div',{className:'sg-imp',title:'Impressions (times shown)'},`👁️ ${item.impressions||0}`),
+    h('div',{className:'sg-imp',title:'Impressions (times shown)'},`${item.impressions||0} views`),
     h('div',{className:'sg-actions'},
       h('div',{className:`toggle ${item.enabled?'on':''}`,onClick:()=>sgToggleItem(item),title:item.enabled?'Enabled':'Disabled'}),
       h('button',{className:'sm',onClick:()=>{state.sgModal={type:'item',obj:item};render();},title:'Edit timing & schedule'},'✎'),
@@ -1087,7 +1092,7 @@ function sgGroupRow(g) {
   const row = h('div',{className:`sg-row sg-group-row ${status.cls}`},
     h('div',{className:'drag-handle',title:'Drag to reorder'},'⠿'),
     h('div',{style:{cursor:'pointer'},onClick:()=>{state.sgCollapsed[g.id]=!collapsed;render();}},collapsed?'▸':'▾'),
-    h('div',{style:{fontSize:'20px',textAlign:'center'}},'🗂️'),
+    h('div',{style:{textAlign:'center'}},h('span',{className:'type-badge',style:{marginRight:'0'}},'GRP')),
     h('div',null,
       h('div',{className:'sg-name'},g.name),
       h('div',{className:'sg-sub'},`group · ${items.length} item${items.length===1?'':'s'} — drop items here to add`),
@@ -1230,7 +1235,7 @@ function renderSignagePage() {
     h('button',{className:'sm',id:'sg-selall-btn',onClick:sgToggleSelectAll},
       (state.signage.items.length && sgSel.size >= state.signage.items.length) ? '☐ Select None' : '☑ Select All'),
     h('button',{className:'sm',onClick:()=>{state.sgModal={type:'library'};render();}},'+ Add from Library'),
-    h('button',{className:'sm',onClick:sgNewGroup},'🗂️ New Group'),
+    h('button',{className:'sm',onClick:sgNewGroup},'+ New Group'),
     h('button',{className:'sm',id:'sg-group-btn',disabled:sgSel.size?null:'true',onClick:sgGroupSelected},'Group Selected'),
     h('button',{className:'sm',id:'sg-edit-btn',disabled:sgSel.size?null:'true',
       onClick:()=>{state.sgModal={type:'bulk'};render();}},
@@ -1243,7 +1248,7 @@ function renderSignagePage() {
   // Playlist
   const entries = sgEntries();
   if (!entries.length) {
-    main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'🖼️'),
+    main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'▦'),
       h('div',null,'Playlist is empty. Upload content above or add from the media library.')));
   } else {
     const list = h('div',{className:'sg-list'});
