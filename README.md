@@ -617,6 +617,14 @@ ps --ppid "$(pgrep -f run.py | head -n1)" -o pid,rss,cmd
 
 # Per-instance heartbeat + health from the API
 curl -s http://127.0.0.1:5000/api/health | python3 -m json.tool
+
+# Who's pulling each source: connected NDI receiver count + tally per instance
+curl -s http://127.0.0.1:5000/api/instances | python3 -c \
+  "import sys,json; [print(i['name'], i.get('ndi')) for i in json.load(sys.stdin)]"
+
+# Inspect actual NDI TCP connections at the socket level (receiver IPs);
+# NDI listens on 5960+ (one port per sender, plus discovery on 5353/5959)
+sudo ss -tnp | grep -E ':59[6-9][0-9]'
 ```
 
 A simple periodic memory snapshot (expect RSS to stay flat between 4h browser
@@ -1163,7 +1171,7 @@ curl http://<host>:5000/api/instances/1/signage/skip
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/instances` | List all instances |
+| `GET` | `/api/instances` | List all instances — running ones include an `ndi` object with `receivers` (connected NDI receiver count, `null` if the SDK can't report it) and `on_program` / `on_preview` tally |
 | `POST` | `/api/instances` | Create instance |
 | `GET` | `/api/instances/:id` | Get instance |
 | `PUT` | `/api/instances/:id` | Update instance |
@@ -1438,6 +1446,18 @@ Current version is tracked in the `VERSION` file at the project root.
   timeout — several people can use the UI at once (each browser polls and
   edits) without "database is locked" errors; readers no longer block the
   writer. No-op when running on PostgreSQL.
+- **NDI receiver count + tally.** Each worker polls the NDI SDK once a
+  second for how many receivers are connected to its sender
+  (`send_get_no_connections`) and the downstream tally state
+  (`send_get_tally`). Instance cards show `◉ n RX` with red `PGM` / green
+  `PVW` tally badges, the header shows the total across all sources, and
+  the Signage live bar shows the count for its output. The API exposes it
+  as an `ndi` object (`receivers`, `on_program`, `on_preview`) on
+  `/api/instances`; `receivers` is `null` when the SDK can't report it
+  (dummy mode). The count covers every transport — each NDI receiver keeps
+  a reliable control connection open even when video travels over UDP or
+  multicast — but the SDK does not expose per-receiver identity or which
+  transport each one negotiated.
 - **Full-page upload progress.** Uploads now open a full-screen overlay
   with large per-file progress bars (% sent, then a processing pulse while
   the server probes/converts, then done/error) and an m-of-n summary. A

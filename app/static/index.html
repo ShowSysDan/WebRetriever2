@@ -31,6 +31,15 @@
   .version { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; background:var(--surface2); padding:2px 8px; border-radius:10px; }
   .status-pill { font-size:12px; padding:4px 12px; border-radius:20px; font-family:'JetBrains Mono',monospace; background:var(--accent-dim); color:var(--accent); }
   .status-pill.stopped { background:var(--danger-dim); color:var(--danger); }
+  .status-pill.rx { background:var(--surface2); color:var(--blue); border:1px solid var(--border); cursor:default; }
+
+  /* NDI receiver count + tally badges (reported by the NDI SDK) */
+  .rx-line { display:flex; align-items:center; gap:6px; margin-top:2px; }
+  .rx-count { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text-dim); }
+  .rx-count.active { color:var(--accent); }
+  .tally { font-family:'JetBrains Mono',monospace; font-size:9px; font-weight:700; letter-spacing:.5px; border-radius:3px; padding:1px 5px; }
+  .tally.pgm { background:var(--danger); color:#fff; }
+  .tally.pvw { background:var(--accent); color:#000; }
   .header-actions { display:flex; gap:12px; align-items:center; }
   .server-clock { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text-dim); white-space:nowrap; padding:4px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); cursor:default; }
 
@@ -640,11 +649,17 @@ function h(tag, attrs, ...children) {
 
 function renderHeader() {
   const run = state.instances.filter(i=>i.running).length;
+  // Total NDI receivers across running sources — only shown when at least
+  // one worker reports a count (dummy mode / no NDI SDK reports none)
+  const rxKnown = state.instances.some(i=>i.ndi && i.ndi.receivers!=null);
+  const rx = state.instances.reduce((a,i)=>a+((i.ndi&&i.ndi.receivers)||0),0);
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
       h('span',{className:'version'},'v1.7.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
+      rxKnown ? h('div',{className:'status-pill rx',
+        title:'NDI receivers connected across all running sources'},`◉ ${rx} RX`) : null,
     ),
     h('div',{className:'header-actions'},
       h('div',{className:'server-clock',id:'server-clock',
@@ -744,6 +759,17 @@ function renderInstanceCard(inst) {
       inst.source_type==='video' && inst.running
         ? h('div',{className:'meta',style:{color:inst.video_state==='playing'?'var(--accent)':'var(--text-dim)'}},
             inst.video_state==='playing'?'▶ PLAYING':'⏸ HOLDING')
+        : null,
+      inst.running && inst.ndi && (inst.ndi.receivers!=null || inst.ndi.on_program || inst.ndi.on_preview)
+        ? h('div',{className:'rx-line'},
+            inst.ndi.receivers!=null
+              ? h('span',{className:`rx-count ${inst.ndi.receivers?'active':''}`,
+                          title:'NDI receivers currently connected to this source'},
+                  `◉ ${inst.ndi.receivers} RX`)
+              : null,
+            inst.ndi.on_program ? h('span',{className:'tally pgm',title:'On program (downstream tally)'},'PGM') : null,
+            inst.ndi.on_preview ? h('span',{className:'tally pvw',title:'On preview (downstream tally)'},'PVW') : null,
+          )
         : null,
     ),
     h('div',{className:'instance-res'},`${inst.width}×${inst.height}`),
@@ -1330,6 +1356,10 @@ function renderSignagePage() {
         h('div',{className:'sg-remaining',id:'sg-remaining'},'')),
       h('div',null,h('div',{className:'label'},'Up Next'),
         h('div',{className:'val dim',id:'sg-next'},'—')),
+      inst.running && inst.ndi && inst.ndi.receivers!=null
+        ? h('div',null,h('div',{className:'label'},'Receivers'),
+            h('div',{className:'val dim',title:'NDI receivers pulling this source'},`◉ ${inst.ndi.receivers}`))
+        : null,
     ),
     h('div',{className:'sg-live-actions'},
       inst.running

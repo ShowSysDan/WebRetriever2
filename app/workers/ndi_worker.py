@@ -123,6 +123,14 @@ SIGNAGE_STILL_CACHE_MB = int(os.getenv("SIGNAGE_STILL_CACHE_MB", "256"))
 PREVIEW_BOOST_WIDTH = 854      # px (16:9 → 854x480); clamped to output width
 PREVIEW_BOOST_INTERVAL = 0.25  # seconds between saves while boosted (~4fps)
 
+# NDI receiver stats: how often the send loops poll the SDK for the number
+# of connected receivers and the tally state, into shared values the API
+# reads. -1 in the connections value means "unknown" (dummy mode, or an
+# ndi-python build without the call).
+CONN_STATS_INTERVAL = 1.0
+TALLY_PROGRAM = 1  # bit flags in the shared tally value
+TALLY_PREVIEW = 2
+
 
 def _load_signage_playlist(path):
     """Read the playlist JSON the API writes for this instance.
@@ -592,6 +600,8 @@ class NDIWorker:
         video_hold: Optional[mp.Value] = None,
         signage_cmd: Optional[mp.Value] = None,
         preview_boost: Optional[mp.Value] = None,
+        ndi_connections: Optional[mp.Value] = None,
+        ndi_tally: Optional[mp.Value] = None,
         preview_dir: Optional[str] = None,
         preview_interval: float = 2.0,
     ):
@@ -616,8 +626,11 @@ class NDIWorker:
         self._video_hold = video_hold  # per-command hold-frame override
         self._signage_cmd = signage_cmd  # skip/reload bit flags from the API process
         self._preview_boost = preview_boost  # monotonic deadline: HD previews until then
+        self._ndi_connections = ndi_connections  # receiver count reported to the API
+        self._ndi_tally = ndi_tally  # program/preview tally bits reported to the API
         self._preview_dir = preview_dir
         self._preview_interval = preview_interval
+        self._last_conn_poll = 0.0
 
     # ------------------------------------------------------------------
     # Frame buffer management
@@ -820,6 +833,43 @@ class NDIWorker:
             self._heartbeat.value = time.monotonic()
 
     # ------------------------------------------------------------------
+    # NDI receiver stats (connection count + tally)
+    # ------------------------------------------------------------------
+
+    def _update_conn_stats(self, ndi, ndi_send, now: float):
+        """Poll the SDK for connected-receiver count and tally into shared
+        values (rate-limited to CONN_STATS_INTERVAL).
+
+        send_get_no_connections counts every receiver holding a connection
+        to this sender — each NDI receiver keeps a reliable control/metadata
+        connection open even when the video itself travels over UDP or
+        multicast, so the count covers all transport modes. Tally reflects
+        what downstream switchers report back (on program / on preview).
+        Both calls are non-blocking (timeout 0) and wrapped defensively so
+        an ndi-python build without them just leaves the values at
+        "unknown" instead of taking down the send loop."""
+        if ndi is None or self._ndi_connections is None:
+            return
+        if now - self._last_conn_poll < CONN_STATS_INTERVAL:
+            return
+        self._last_conn_poll = now
+        try:
+            self._ndi_connections.value = int(ndi.send_get_no_connections(ndi_send, 0))
+        except Exception:
+            pass
+        if self._ndi_tally is None:
+            return
+        try:
+            tally = ndi.Tally()
+            ndi.send_get_tally(ndi_send, tally, 0)
+            self._ndi_tally.value = (
+                (TALLY_PROGRAM if getattr(tally, "on_program", False) else 0)
+                | (TALLY_PREVIEW if getattr(tally, "on_preview", False) else 0)
+            )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
     # NDI lifecycle
     # ------------------------------------------------------------------
 
@@ -950,6 +1000,7 @@ class NDIWorker:
                     video_frame.data = frame_buffer
                     ndi.send_send_video_v2(ndi_send, video_frame)
 
+                self._update_conn_stats(ndi, ndi_send, frame_start)
                 self._update_heartbeat()
 
                 # --- Pace to output FPS ---
@@ -1185,6 +1236,7 @@ class NDIWorker:
                 if ndi is not None:
                     video_frame.data = frame_buffer
                     ndi.send_send_video_v2(ndi_send, video_frame)
+                self._update_conn_stats(ndi, ndi_send, now)
 
                 # Only write a preview when the frame actually changed —
                 # while holding, rewriting an identical JPEG every 2s just
@@ -1586,6 +1638,7 @@ class NDIWorker:
                 if ndi is not None:
                     video_frame.data = frame_buffer
                     ndi.send_send_video_v2(ndi_send, video_frame)
+                self._update_conn_stats(ndi, ndi_send, now)
 
                 # --- Once a second: expire check + status file ---
                 if now - last_status_t >= 1.0:
@@ -1772,6 +1825,7 @@ class NDIWorker:
                     video_frame.data = frame_buffer
                     ndi.send_send_video_v2(ndi_send, video_frame)
                     self._update_heartbeat()
+                self._update_conn_stats(ndi, ndi_send, frame_start)
 
                 # --- Pace to output FPS with drift correction ---
                 target_time = frame_start + output_interval

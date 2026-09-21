@@ -409,9 +409,11 @@ def stop_all():
 # =========================================================================
 
 def _instance_dict(inst):
-    """Instance dict augmented with live playback state (video sources)."""
+    """Instance dict augmented with live playback state (video sources) and
+    NDI receiver stats (connection count + tally) while running."""
     d = inst.to_dict()
     d["video_state"] = manager.get_video_state(inst.id)
+    d["ndi"] = manager.get_ndi_stats(inst.id)
     return d
 
 
