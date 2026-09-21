@@ -26,6 +26,7 @@ from app.workers.ndi_worker import (
     VIDEO_HOLD_UNSET, VIDEO_HOLD_FIRST, VIDEO_HOLD_LAST,
     VIDEO_PATH_MAX,
     SIGNAGE_CMD_SKIP, SIGNAGE_CMD_RELOAD,
+    TALLY_PROGRAM, TALLY_PREVIEW,
 )
 from app.logging_config import log_event
 
@@ -70,6 +71,8 @@ class WorkerManager:
         self._video_holds: Dict[int, mp.Value] = {}
         self._signage_cmds: Dict[int, mp.Value] = {}
         self._preview_boosts: Dict[int, mp.Value] = {}
+        self._ndi_connections: Dict[int, mp.Value] = {}
+        self._ndi_tallys: Dict[int, mp.Value] = {}
         self._configs: Dict[int, dict] = {}
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
@@ -80,6 +83,16 @@ class WorkerManager:
         # Start button races two spawns and orphans one worker untracked
         self._lock = threading.RLock()
 
+    def _forget_instance(self, instance_id: int):
+        """Drop every per-instance shared ref (worker, process, control and
+        stats Values). One list, used by stop/restart/cleanup alike — so a
+        newly added channel can't be forgotten in one of them and leak."""
+        for d in (self._workers, self._processes, self._heartbeats,
+                  self._video_cmds, self._video_states, self._video_paths,
+                  self._video_holds, self._signage_cmds, self._preview_boosts,
+                  self._ndi_connections, self._ndi_tallys):
+            d.pop(instance_id, None)
+
     def _spawn(self, instance_id: int, config: dict) -> mp.Process:
         """Create a fresh heartbeat + worker + process from a stored config
         and register them. Shared by initial start and watchdog restart."""
@@ -89,7 +102,14 @@ class WorkerManager:
         # out into a live preview window
         preview_boost = mp.Value(ctypes.c_double, 0.0)
         self._preview_boosts[instance_id] = preview_boost
-        extra = {"preview_boost": preview_boost}
+        # NDI receiver stats reported back by the worker's send loop:
+        # connection count (-1 = unknown, e.g. dummy mode) and tally bits
+        ndi_connections = mp.Value(ctypes.c_int, -1)
+        ndi_tally = mp.Value(ctypes.c_int, 0)
+        self._ndi_connections[instance_id] = ndi_connections
+        self._ndi_tallys[instance_id] = ndi_tally
+        extra = {"preview_boost": preview_boost,
+                 "ndi_connections": ndi_connections, "ndi_tally": ndi_tally}
         if config.get("source_type") == "video":
             # Shared control channel for play/stop/load commands, the file
             # path payload for loads, hold-frame overrides, and playback state
@@ -185,15 +205,7 @@ class WorkerManager:
                         _kill_process_tree(process)
                         process.join(timeout=3)
 
-            self._workers.pop(instance_id, None)
-            self._processes.pop(instance_id, None)
-            self._heartbeats.pop(instance_id, None)
-            self._video_cmds.pop(instance_id, None)
-            self._video_states.pop(instance_id, None)
-            self._video_paths.pop(instance_id, None)
-            self._video_holds.pop(instance_id, None)
-            self._signage_cmds.pop(instance_id, None)
-            self._preview_boosts.pop(instance_id, None)
+            self._forget_instance(instance_id)
             self._configs.pop(instance_id, None)
             self._restart_meta.pop(instance_id, None)
             log_event("INSTANCE_STOPPED", f"id={instance_id}")
@@ -328,6 +340,23 @@ class WorkerManager:
         log_event("SIGNAGE_COMMAND", f"id={instance_id} cmd={command}")
         return True
 
+    def get_ndi_stats(self, instance_id: int) -> Optional[dict]:
+        """Receiver count + tally for a running worker, or None.
+
+        receivers is None when the worker can't report it (dummy mode, or
+        an ndi-python build without send_get_no_connections)."""
+        conn = self._ndi_connections.get(instance_id)
+        if conn is None or not self.is_running(instance_id):
+            return None
+        tally = self._ndi_tallys.get(instance_id)
+        flags = tally.value if tally is not None else 0
+        n = conn.value
+        return {
+            "receivers": n if n >= 0 else None,
+            "on_program": bool(flags & TALLY_PROGRAM),
+            "on_preview": bool(flags & TALLY_PREVIEW),
+        }
+
     def get_video_state(self, instance_id: int) -> Optional[str]:
         """Playback state of a running video worker, or None if not applicable."""
         state_value = self._video_states.get(instance_id)
@@ -370,15 +399,7 @@ class WorkerManager:
                     proc.join(timeout=3)
 
             # Clean up old refs (_spawn recreates control values as needed)
-            self._workers.pop(iid, None)
-            self._processes.pop(iid, None)
-            self._heartbeats.pop(iid, None)
-            self._video_cmds.pop(iid, None)
-            self._video_states.pop(iid, None)
-            self._video_paths.pop(iid, None)
-            self._video_holds.pop(iid, None)
-            self._signage_cmds.pop(iid, None)
-            self._preview_boosts.pop(iid, None)
+            self._forget_instance(iid)
 
             process = self._spawn(iid, config)
             log_event("INSTANCE_RESTARTED", f"id={iid} reason={reason} new_pid={process.pid}")
@@ -448,15 +469,7 @@ class WorkerManager:
             if not proc.is_alive() and iid not in self._configs
         ]
         for iid in dead:
-            self._workers.pop(iid, None)
-            self._processes.pop(iid, None)
-            self._heartbeats.pop(iid, None)
-            self._video_cmds.pop(iid, None)
-            self._video_states.pop(iid, None)
-            self._video_paths.pop(iid, None)
-            self._video_holds.pop(iid, None)
-            self._signage_cmds.pop(iid, None)
-            self._preview_boosts.pop(iid, None)
+            self._forget_instance(iid)
         return dead
 
 

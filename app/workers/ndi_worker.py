@@ -104,11 +104,32 @@ VIDEO_PATH_MAX = 4096
 SIGNAGE_CMD_SKIP = 1    # start transitioning to the next item now
 SIGNAGE_CMD_RELOAD = 2  # re-read the playlist JSON from disk
 
+# Build the NEXT signage item's layer this many seconds before its
+# transition, on a background thread. Stills are fully decoded into a RAM
+# canvas and videos get their file opened (first frame decoded, page cache
+# warmed), so going on air never waits on the disk inside the send loop.
+# Slots shorter than the lead just preload right after the previous
+# transition — the busy/already-preloaded guard in preload_next() means at
+# most ONE build ever runs per upcoming item, however often the loop asks.
+SIGNAGE_PRELOAD_LEAD = 6.0
+
+# RAM budget for decoded signage stills (MB). Canvases are kept across
+# rotations, so a still that already played never touches the disk again.
+SIGNAGE_STILL_CACHE_MB = int(os.getenv("SIGNAGE_STILL_CACHE_MB", "256"))
+
 # Preview boost: while a live preview popup is streaming, the API keeps a
 # shared monotonic deadline refreshed; until it passes, previews are saved
 # larger and faster than the list-view thumbnails
 PREVIEW_BOOST_WIDTH = 854      # px (16:9 → 854x480); clamped to output width
 PREVIEW_BOOST_INTERVAL = 0.25  # seconds between saves while boosted (~4fps)
+
+# NDI receiver stats: how often the send loops poll the SDK for the number
+# of connected receivers and the tally state, into shared values the API
+# reads. -1 in the connections value means "unknown" (dummy mode, or an
+# ndi-python build without the call).
+CONN_STATS_INTERVAL = 1.0
+TALLY_PROGRAM = 1  # bit flags in the shared tally value
+TALLY_PREVIEW = 2
 
 
 def _load_signage_playlist(path):
@@ -126,6 +147,24 @@ def _load_signage_playlist(path):
     except Exception as e:
         logger.warning(f"Cannot read signage playlist {path}: {e}")
         return []
+
+
+def _warm_file_cache(path):
+    """Hint the kernel to read a file into the page cache ahead of use.
+
+    POSIX_FADV_WILLNEED starts asynchronous readahead — by the time the
+    decoder wants the bytes they are (mostly) already in RAM, which turns
+    the first seconds of playback from disk reads into memory copies. Purely
+    advisory: any failure is ignored and playback just reads from disk."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            if hasattr(os, "posix_fadvise"):
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_WILLNEED)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def _signage_item_eligible(item, now=None):
@@ -167,6 +206,66 @@ def _signage_item_eligible(item, now=None):
     return True
 
 
+class _StillCache:
+    """Decoded, letterboxed still canvases kept in RAM across rotations.
+
+    A signage playlist replays the same files for hours; without this every
+    rotation re-reads and re-decodes each image from disk. Canvases are
+    keyed by (path, mtime, size) — replacing a file on disk naturally
+    invalidates its entry — and evicted LRU once the byte budget is hit.
+    Cached arrays are shared between plays and marked read-only: an image
+    layer never writes its canvas after construction, so sharing is safe
+    (and skips even the memcpy a fresh decode would need).
+
+    Thread-safe: layers are built both inline (send loop) and by the
+    preload thread.
+    """
+
+    def __init__(self, max_bytes):
+        from collections import OrderedDict
+        self._entries = OrderedDict()  # key -> canvas
+        self._bytes = 0
+        self._max = max_bytes
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key(path, out_w, out_h):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (path, st.st_mtime_ns, st.st_size, out_w, out_h)
+
+    def get(self, path, out_w, out_h):
+        key = self._key(path, out_w, out_h)
+        if key is None:
+            return None
+        with self._lock:
+            buf = self._entries.get(key)
+            if buf is not None:
+                self._entries.move_to_end(key)
+            return buf
+
+    def put(self, path, out_w, out_h, buf):
+        if buf.nbytes > self._max:
+            return
+        key = self._key(path, out_w, out_h)
+        if key is None:
+            return
+        buf.setflags(write=False)
+        with self._lock:
+            if key in self._entries:
+                return
+            self._entries[key] = buf
+            self._bytes += buf.nbytes
+            while self._bytes > self._max and len(self._entries) > 1:
+                _, old = self._entries.popitem(last=False)
+                self._bytes -= old.nbytes
+
+
+_STILL_CACHE = _StillCache(SIGNAGE_STILL_CACHE_MB * 1024 * 1024)
+
+
 class _SignageLayer:
     """One playlist entry rendered onto its own (h, w, 3) BGR canvas.
 
@@ -174,22 +273,28 @@ class _SignageLayer:
     air and, during a crossfade, the outgoing one — and alpha-blends their
     canvases into the shared BGRX frame buffer. item=None is the black idle
     layer (canvas stays zeroed) shown when nothing is scheduled.
+
+    Still canvases come from / go into _STILL_CACHE, so an image that has
+    played once lives in RAM and is never read from disk again (until the
+    file changes or the cache budget evicts it).
     """
 
     def __init__(self, item, out_w, out_h):
         self.item = item or None
-        self.buf = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        self.buf = None
         self.ok = True
         self.done = False      # video reached end-of-file
         self.advanced = False  # frame() decoded a new video frame this call
         self._vf = None
         self._next_frame_time = None
         if item is None:
+            self.buf = np.zeros((out_h, out_w, 3), dtype=np.uint8)
             return
 
         kind = item.get("kind")
         path = item.get("path", "")
         if kind == "video":
+            self.buf = np.zeros((out_h, out_w, 3), dtype=np.uint8)
             self._vf = _VideoFile(path, out_w, out_h)
             first = self._vf.read() if self._vf.ok else None
             if first is None:
@@ -202,7 +307,13 @@ class _SignageLayer:
             # video source's BGRX buffer
             self._vf.blit(first, self.buf)
         else:  # image
+            cached = _STILL_CACHE.get(path, out_w, out_h)
+            if cached is not None:
+                # Shared read-only canvas — zero disk I/O, zero decode
+                self.buf = cached
+                return
             import cv2
+            self.buf = np.zeros((out_h, out_w, 3), dtype=np.uint8)
             img = cv2.imread(path, cv2.IMREAD_COLOR)
             if img is None:
                 self.ok = False
@@ -216,6 +327,7 @@ class _SignageLayer:
             off_x = (out_w - fit_w) // 2
             off_y = (out_h - fit_h) // 2
             self.buf[off_y:off_y + fit_h, off_x:off_x + fit_w] = img
+            _STILL_CACHE.put(path, out_w, out_h, self.buf)
 
     def start(self, now):
         """Begin playback clock (videos advance from their first frame)."""
@@ -488,6 +600,8 @@ class NDIWorker:
         video_hold: Optional[mp.Value] = None,
         signage_cmd: Optional[mp.Value] = None,
         preview_boost: Optional[mp.Value] = None,
+        ndi_connections: Optional[mp.Value] = None,
+        ndi_tally: Optional[mp.Value] = None,
         preview_dir: Optional[str] = None,
         preview_interval: float = 2.0,
     ):
@@ -512,8 +626,11 @@ class NDIWorker:
         self._video_hold = video_hold  # per-command hold-frame override
         self._signage_cmd = signage_cmd  # skip/reload bit flags from the API process
         self._preview_boost = preview_boost  # monotonic deadline: HD previews until then
+        self._ndi_connections = ndi_connections  # receiver count reported to the API
+        self._ndi_tally = ndi_tally  # program/preview tally bits reported to the API
         self._preview_dir = preview_dir
         self._preview_interval = preview_interval
+        self._last_conn_poll = 0.0
 
     # ------------------------------------------------------------------
     # Frame buffer management
@@ -716,6 +833,43 @@ class NDIWorker:
             self._heartbeat.value = time.monotonic()
 
     # ------------------------------------------------------------------
+    # NDI receiver stats (connection count + tally)
+    # ------------------------------------------------------------------
+
+    def _update_conn_stats(self, ndi, ndi_send, now: float):
+        """Poll the SDK for connected-receiver count and tally into shared
+        values (rate-limited to CONN_STATS_INTERVAL).
+
+        send_get_no_connections counts every receiver holding a connection
+        to this sender — each NDI receiver keeps a reliable control/metadata
+        connection open even when the video itself travels over UDP or
+        multicast, so the count covers all transport modes. Tally reflects
+        what downstream switchers report back (on program / on preview).
+        Both calls are non-blocking (timeout 0) and wrapped defensively so
+        an ndi-python build without them just leaves the values at
+        "unknown" instead of taking down the send loop."""
+        if ndi is None or self._ndi_connections is None:
+            return
+        if now - self._last_conn_poll < CONN_STATS_INTERVAL:
+            return
+        self._last_conn_poll = now
+        try:
+            self._ndi_connections.value = int(ndi.send_get_no_connections(ndi_send, 0))
+        except Exception:
+            pass
+        if self._ndi_tally is None:
+            return
+        try:
+            tally = ndi.Tally()
+            ndi.send_get_tally(ndi_send, tally, 0)
+            self._ndi_tally.value = (
+                (TALLY_PROGRAM if getattr(tally, "on_program", False) else 0)
+                | (TALLY_PREVIEW if getattr(tally, "on_preview", False) else 0)
+            )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
     # NDI lifecycle
     # ------------------------------------------------------------------
 
@@ -846,6 +1000,7 @@ class NDIWorker:
                     video_frame.data = frame_buffer
                     ndi.send_send_video_v2(ndi_send, video_frame)
 
+                self._update_conn_stats(ndi, ndi_send, frame_start)
                 self._update_heartbeat()
 
                 # --- Pace to output FPS ---
@@ -1081,6 +1236,7 @@ class NDIWorker:
                 if ndi is not None:
                     video_frame.data = frame_buffer
                     ndi.send_send_video_v2(ndi_send, video_frame)
+                self._update_conn_stats(ndi, ndi_send, now)
 
                 # Only write a preview when the frame actually changed —
                 # while holding, rewriting an identical JPEG every 2s just
@@ -1191,6 +1347,11 @@ class NDIWorker:
             file actually ends, even if metadata said otherwise; with an
             explicit duration longer than the file it holds its last frame
             until the slot ends.
+          - The upcoming item is preloaded on a background thread a few
+            seconds before its transition (SIGNAGE_PRELOAD_LEAD): stills are
+            decoded into a RAM canvas, videos are opened with their first
+            frame decoded and the file read into the OS page cache — so the
+            transition itself never blocks the send loop on disk I/O.
         """
         import cv2
         from datetime import datetime
@@ -1270,16 +1431,83 @@ class NDIWorker:
                     return j, playlist[j]
             return -1, None
 
+        # --- Preload: build the upcoming item's layer off the send loop ---
+        # Stills decode straight into a RAM canvas; videos open their file
+        # (first frame decoded) with the page cache warmed. The layer is
+        # handed over at transition time only if the scheduled next item is
+        # still the one that was preloaded — otherwise it's rebuilt inline
+        # exactly as before.
+        preload_lock = threading.Lock()
+        preload_layer = None
+        preload_id = None
+        preload_busy = False
+
+        def _preload_worker(item):
+            nonlocal preload_layer, preload_id, preload_busy
+            layer = None
+            try:
+                if item.get("kind") == "video":
+                    _warm_file_cache(item.get("path", ""))
+                layer = _SignageLayer(item, self.width, self.height)
+            except Exception:
+                layer = None
+            with preload_lock:
+                if layer is not None and layer.ok:
+                    if preload_layer is not None:
+                        preload_layer.release()
+                    preload_layer = layer
+                    preload_id = item.get("id")
+                elif layer is not None:
+                    layer.release()
+                preload_busy = False
+
+        def preload_next():
+            """Kick off a background build of the next eligible item's layer."""
+            nonlocal preload_busy
+            _, item = pick_next(cur_index)
+            if item is None:
+                return
+            with preload_lock:
+                if preload_busy or (preload_layer is not None
+                                    and preload_id == item.get("id")):
+                    return
+                preload_busy = True
+            threading.Thread(target=_preload_worker, args=(item,),
+                             daemon=True, name="signage-preload").start()
+
+        def take_preloaded(item):
+            """Pop the preloaded layer if it matches `item`, else None."""
+            nonlocal preload_layer, preload_id
+            with preload_lock:
+                if (preload_layer is not None and item is not None
+                        and preload_id == item.get("id")):
+                    layer = preload_layer
+                    preload_layer = None
+                    preload_id = None
+                    return layer
+            return None
+
+        def drop_preloaded():
+            """Release a stale preloaded layer (playlist edited, shutdown)."""
+            nonlocal preload_layer, preload_id
+            with preload_lock:
+                if preload_layer is not None:
+                    preload_layer.release()
+                preload_layer = None
+                preload_id = None
+
         def begin_transition(now):
             """Fade from `current` to the next eligible item (or to black)."""
             nonlocal current, cur_index, cur_start, cur_fade, fade_start_t
             nonlocal fading_from, fade_t0, fade_dur, buffer_synced, frame_dirty
+            nonlocal last_status_t
 
             j, item = pick_next(cur_index)
-            layer = None
+            layer = take_preloaded(item)
             attempts = 0
             while item is not None and attempts < len(playlist):
-                layer = _SignageLayer(item, self.width, self.height)
+                if layer is None:
+                    layer = _SignageLayer(item, self.width, self.height)
                 if layer.ok:
                     break
                 logger.warning(
@@ -1293,6 +1521,9 @@ class NDIWorker:
                 attempts += 1
 
             if item is None:
+                # Going to black: a stale preloaded layer (schedule changed
+                # since it was built) must not idle holding a file handle
+                drop_preloaded()
                 if current.item is None:
                     fade_start_t = float("inf")  # already black, stay put
                     return
@@ -1328,6 +1559,9 @@ class NDIWorker:
             else:
                 old.release()
                 fading_from = None
+            # Status file updates this same iteration — the event stream
+            # pushes item changes to browsers in real time
+            last_status_t = 0.0
 
         self._update_heartbeat()
 
@@ -1339,6 +1573,7 @@ class NDIWorker:
                 cmds = self._poll_signage_cmd()
                 if cmds & SIGNAGE_CMD_RELOAD:
                     playlist = _load_signage_playlist(playlist_path) if playlist_path else []
+                    drop_preloaded()  # baked-in timing/schedule may have changed
                     if current.item is not None:
                         cur_id = current.item.get("id")
                         cur_index = next(
@@ -1373,6 +1608,11 @@ class NDIWorker:
                         and now < fade_start_t):
                     fade_start_t = now
 
+                # --- Preload the upcoming item ahead of its transition ---
+                if (fading_from is None and current.item is not None
+                        and now >= fade_start_t - SIGNAGE_PRELOAD_LEAD):
+                    preload_next()
+
                 # --- Start next transition / leave idle ---
                 if fading_from is None:
                     if current.item is None:
@@ -1401,6 +1641,7 @@ class NDIWorker:
                 if ndi is not None:
                     video_frame.data = frame_buffer
                     ndi.send_send_video_v2(ndi_send, video_frame)
+                self._update_conn_stats(ndi, ndi_send, now)
 
                 # --- Once a second: expire check + status file ---
                 if now - last_status_t >= 1.0:
@@ -1432,6 +1673,7 @@ class NDIWorker:
                 if sleep_time > 0.001:
                     time.sleep(sleep_time)
         finally:
+            drop_preloaded()
             if fading_from is not None:
                 fading_from.release()
             current.release()
@@ -1586,6 +1828,7 @@ class NDIWorker:
                     video_frame.data = frame_buffer
                     ndi.send_send_video_v2(ndi_send, video_frame)
                     self._update_heartbeat()
+                self._update_conn_stats(ndi, ndi_send, frame_start)
 
                 # --- Pace to output FPS with drift correction ---
                 target_time = frame_start + output_interval

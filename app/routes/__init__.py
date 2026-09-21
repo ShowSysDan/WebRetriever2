@@ -100,11 +100,17 @@ def _start_worker(inst, settings=None):
 # =========================================================================
 
 def _signage_paths(instance_id):
-    """Filesystem paths for one signage instance's runtime state."""
+    """Filesystem paths for one signage instance's runtime state.
+
+    Playlist and impressions must survive a reboot and live in the
+    persistent state folder; the now-playing status is rewritten every
+    second and goes to the runtime folder (tmpfs where available, so the
+    constant writes land in RAM instead of wearing the disk)."""
     state_dir = current_app.config["SIGNAGE_STATE_FOLDER"]
+    runtime_dir = current_app.config.get("SIGNAGE_RUNTIME_FOLDER", state_dir)
     return {
         "playlist_path": os.path.join(state_dir, f"playlist_{instance_id}.json"),
-        "status_path": os.path.join(state_dir, f"status_{instance_id}.json"),
+        "status_path": os.path.join(runtime_dir, f"status_{instance_id}.json"),
         "impressions_path": os.path.join(state_dir, f"impressions_{instance_id}.log"),
     }
 
@@ -403,9 +409,11 @@ def stop_all():
 # =========================================================================
 
 def _instance_dict(inst):
-    """Instance dict augmented with live playback state (video sources)."""
+    """Instance dict augmented with live playback state (video sources) and
+    NDI receiver stats (connection count + tally) while running."""
     d = inst.to_dict()
     d["video_state"] = manager.get_video_state(inst.id)
+    d["ndi"] = manager.get_ndi_stats(inst.id)
     return d
 
 
@@ -1678,6 +1686,66 @@ def signage_status(ref):
             status = None
     return jsonify({
         "id": inst.id, "name": inst.name, "running": running, "status": status,
+    })
+
+
+# How the signage event stream is paced. POLL is how often the generator
+# checks the (RAM-resident) status file; the worker force-writes it the
+# frame a transition happens, so item changes reach the browser within
+# ~POLL seconds. KEEPALIVE comments stop proxies dropping quiet streams;
+# MAX_S caps a stream so an abandoned tab can't hold a server thread
+# forever (EventSource reconnects automatically).
+SIGNAGE_EVENTS_POLL = 0.2
+SIGNAGE_EVENTS_KEEPALIVE = 15.0
+SIGNAGE_EVENTS_MAX_S = 4 * 3600
+
+
+@api.route("/instances/<ref>/signage/events", methods=["GET"])
+def signage_events(ref):
+    """Real-time now-playing state as a Server-Sent Events stream.
+
+    Pushes the same payload as /signage/status whenever it changes (item
+    transitions land in ~200ms; the countdown ticks with the worker's 1s
+    status writes). One-directional by design — commands stay on the plain
+    HTTP endpoints — which is why SSE fits better than a WebSocket: no
+    extra dependencies, works through proxies, and the browser's
+    EventSource reconnects on its own."""
+    inst = _resolve_instance(ref)
+    if inst.source_type != "signage":
+        return jsonify({"error": f"Instance '{inst.name}' is not a signage source"}), 400
+    status_path = _signage_paths(inst.id)["status_path"]
+    instance_id = inst.id
+
+    def generate():
+        last_payload = None
+        last_sent = 0.0
+        deadline = time.monotonic() + SIGNAGE_EVENTS_MAX_S
+        while time.monotonic() < deadline:
+            running = manager.is_running(instance_id)
+            status = None
+            if running:
+                try:
+                    with open(status_path, "r", encoding="utf-8") as f:
+                        status = json.load(f)
+                except (OSError, ValueError):
+                    status = None
+            payload = json.dumps(
+                {"id": instance_id, "running": running, "status": status},
+                sort_keys=True,
+            )
+            now = time.monotonic()
+            if payload != last_payload:
+                last_payload = payload
+                last_sent = now
+                yield f"data: {payload}\n\n"
+            elif now - last_sent >= SIGNAGE_EVENTS_KEEPALIVE:
+                last_sent = now
+                yield ": keepalive\n\n"
+            time.sleep(SIGNAGE_EVENTS_POLL)
+
+    return Response(generate(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",  # nginx: don't buffer the stream
     })
 
 

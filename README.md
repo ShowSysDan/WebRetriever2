@@ -617,6 +617,14 @@ ps --ppid "$(pgrep -f run.py | head -n1)" -o pid,rss,cmd
 
 # Per-instance heartbeat + health from the API
 curl -s http://127.0.0.1:5000/api/health | python3 -m json.tool
+
+# Who's pulling each source: connected NDI receiver count + tally per instance
+curl -s http://127.0.0.1:5000/api/instances | python3 -c \
+  "import sys,json; [print(i['name'], i.get('ndi')) for i in json.load(sys.stdin)]"
+
+# Inspect actual NDI TCP connections at the socket level (receiver IPs);
+# NDI listens on 5960+ (one port per sender, plus discovery on 5353/5959)
+sudo ss -tnp | grep -E ':59[6-9][0-9]'
 ```
 
 A simple periodic memory snapshot (expect RSS to stay flat between 4h browser
@@ -1163,7 +1171,7 @@ curl http://<host>:5000/api/instances/1/signage/skip
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/instances` | List all instances |
+| `GET` | `/api/instances` | List all instances — running ones include an `ndi` object with `receivers` (connected NDI receiver count, `null` if the SDK can't report it) and `on_program` / `on_preview` tally |
 | `POST` | `/api/instances` | Create instance |
 | `GET` | `/api/instances/:id` | Get instance |
 | `PUT` | `/api/instances/:id` | Update instance |
@@ -1302,6 +1310,7 @@ Behavior notes:
 | `POST` | `/api/instances/:id/signage/reorder` | Persist a full ordering — `{"order":[{"type":"item"\|"group","id":n},..], "group_items":{"<gid>":[item ids]}}` |
 | `POST` | `/api/instances/:id/signage/upload` | Upload straight into the playlist (multipart); ppt/pptx/odp/pdf become a group of slide images |
 | `GET`/`POST` | `/api/instances/:ref/signage/status` | Now playing / up next / seconds remaining (`:ref` = id or name) |
+| `GET` | `/api/instances/:ref/signage/events` | Real-time now-playing stream (Server-Sent Events) — pushes the status payload on every change; usable from any `EventSource` client |
 | `GET`/`POST` | `/api/instances/:ref/signage/skip` | Crossfade to the next item now |
 
 Schedule datetimes use the HTML `datetime-local` format (`2026-10-01T07:00`)
@@ -1399,6 +1408,71 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.7.0
+
+**Signage RAM preloading & caching, real-time status, receiver counts,
+multi-user hardening, bigger UI.**
+
+- **Signage items are preloaded into RAM before they go on air.** The
+  worker builds the upcoming item's layer on a background thread ~6s before
+  its transition: stills are fully decoded into a memory canvas, videos are
+  opened (first frame decoded) with the file read ahead into the OS page
+  cache (`posix_fadvise WILLNEED`). Transitions no longer touch the disk
+  inside the send loop, so going on air can't drop frames on slow storage
+  or large images. If the schedule changes between preload and transition,
+  the worker falls back to the previous inline load. Slots shorter than
+  the lead are safe: the preload guard builds each upcoming item exactly
+  once, however often the loop checks.
+- **Stills live in RAM across rotations.** Decoded, letterboxed canvases
+  are kept in an LRU cache (`SIGNAGE_STILL_CACHE_MB`, default 256) keyed by
+  file mtime — an image that has played once is never read from disk again
+  until the file changes or the budget evicts it.
+- **Constant small writes moved off the SSD.** Preview JPEGs (rewritten up
+  to every 2s per running instance) and the signage now-playing status
+  (1 write/s) now default to tmpfs (`/dev/shm`) on Linux, so they land in
+  RAM. Playlist JSON and impression logs stay on disk — they must survive
+  a reboot. Overridable via `PREVIEW_FOLDER` / `SIGNAGE_RUNTIME_FOLDER`;
+  non-Linux platforms fall back to the previous app-folder paths.
+- **Real-time now-playing updates (Server-Sent Events).** New
+  `/api/instances/:ref/signage/events` endpoint streams the status payload
+  the moment it changes — the worker writes its status file the same frame
+  a transition starts, so the green on-air highlight and Now Playing text
+  move within ~200ms instead of a 2s poll. The UI falls back to polling
+  automatically if the stream drops, closes the stream on hidden tabs, and
+  `EventSource` reconnects on its own. SSE was chosen over WebSockets
+  because the flow is one-directional (commands stay on plain HTTP) and it
+  needs no extra dependencies or proxy configuration.
+- **Multi-user hardening.** SQLite now runs in WAL mode with a 5s busy
+  timeout — several people can use the UI at once (each browser polls and
+  edits) without "database is locked" errors; readers no longer block the
+  writer. No-op when running on PostgreSQL.
+- **NDI receiver count + tally.** Each worker polls the NDI SDK once a
+  second for how many receivers are connected to its sender
+  (`send_get_no_connections`) and the downstream tally state
+  (`send_get_tally`). Instance cards show `◉ n RX` with red `PGM` / green
+  `PVW` tally badges, the header shows the total across all sources, and
+  the Signage live bar shows the count for its output. The API exposes it
+  as an `ndi` object (`receivers`, `on_program`, `on_preview`) on
+  `/api/instances`; `receivers` is `null` when the SDK can't report it
+  (dummy mode). The count covers every transport — each NDI receiver keeps
+  a reliable control connection open even when video travels over UDP or
+  multicast — but the SDK does not expose per-receiver identity or which
+  transport each one negotiated.
+- **Full-page upload progress.** Uploads now open a full-screen overlay
+  with large per-file progress bars (% sent, then a processing pulse while
+  the server probes/converts, then done/error) and an m-of-n summary. A
+  *Hide* button drops it to the previous bottom-right mini panel; uploads
+  continue either way.
+- **On-air highlight in the Signage playlist.** The now-playing preview
+  image is gone from the Signage tab; instead the item currently on air is
+  highlighted green in the playlist with an `ON AIR` badge (its group
+  header too), updated in real time from the event stream. The slimmer
+  live bar keeps Now Playing / countdown / Up Next and the transport
+  buttons.
+- **Larger UI text across the board** — instance FPS/refresh/resolution
+  readouts, playlist rows, media cards, filter chips, tabs, section titles
+  and form hints all stepped up for readability on production monitors.
 
 #### 1.6.2
 
@@ -1606,9 +1680,12 @@ scheduled signage player, plus a friendlier upload experience.
   counts) that the API folds into the database.
 - **Live control** — new **Signage** tab with drag-to-reorder playlist,
   multi-select group/delete, per-item/group settings modals, a live
-  now-playing panel (preview, countdown, up-next) and a **Skip Next**
-  button. Skip and status are also plain-URL show-control endpoints
-  (`/api/instances/<id-or-name>/signage/skip`, `.../signage/status`).
+  now-playing bar (name, countdown, up-next) and a **Skip Next** button.
+  The item currently on air is highlighted green in the playlist (with an
+  `ON AIR` badge, also on its group header); the popup preview window gives
+  the visual check. Skip and status are also plain-URL show-control
+  endpoints (`/api/instances/<id-or-name>/signage/skip`,
+  `.../signage/status`).
 - **Hot playlist reload** — every playlist mutation (add, edit, reorder,
   schedule change, media delete) is pushed to a running worker via a shared
   command channel and picked up within a second — no restart, the NDI

@@ -29,8 +29,17 @@
   .logo { font-family:'JetBrains Mono',monospace; font-size:18px; font-weight:700; color:var(--accent); letter-spacing:-0.5px; }
   .logo span { color:var(--text-dim); font-weight:400; }
   .version { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; background:var(--surface2); padding:2px 8px; border-radius:10px; }
-  .status-pill { font-size:11px; padding:4px 12px; border-radius:20px; font-family:'JetBrains Mono',monospace; background:var(--accent-dim); color:var(--accent); }
+  .status-pill { font-size:12px; padding:4px 12px; border-radius:20px; font-family:'JetBrains Mono',monospace; background:var(--accent-dim); color:var(--accent); }
   .status-pill.stopped { background:var(--danger-dim); color:var(--danger); }
+  .status-pill.rx { background:var(--surface2); color:var(--blue); border:1px solid var(--border); cursor:default; }
+
+  /* NDI receiver count + tally badges (reported by the NDI SDK) */
+  .rx-line { display:flex; align-items:center; gap:6px; margin-top:2px; }
+  .rx-count { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text-dim); }
+  .rx-count.active { color:var(--accent); }
+  .tally { font-family:'JetBrains Mono',monospace; font-size:9px; font-weight:700; letter-spacing:.5px; border-radius:3px; padding:1px 5px; }
+  .tally.pgm { background:var(--danger); color:#fff; }
+  .tally.pvw { background:var(--accent); color:#000; }
   .header-actions { display:flex; gap:12px; align-items:center; }
   .server-clock { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text-dim); white-space:nowrap; padding:4px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); cursor:default; }
 
@@ -46,13 +55,13 @@
 
   /* Tabs */
   .tabs { display:flex; gap:0; border-bottom:1px solid var(--border); background:var(--surface); padding:0 28px; }
-  .tab { padding:10px 20px; font-size:13px; font-weight:500; color:var(--text-dim); cursor:pointer; border-bottom:2px solid transparent; transition:all .15s; }
+  .tab { padding:11px 22px; font-size:14px; font-weight:500; color:var(--text-dim); cursor:pointer; border-bottom:2px solid transparent; transition:all .15s; }
   .tab:hover { color:var(--text); }
   .tab.active { color:var(--accent); border-bottom-color:var(--accent); }
 
   /* Settings bar */
   .settings-bar { display:flex; align-items:center; gap:16px; padding:14px 28px; border-bottom:1px solid var(--border); background:var(--surface); flex-wrap:wrap; }
-  .settings-bar label { font-size:11px; color:var(--text-dim); font-weight:500; text-transform:uppercase; letter-spacing:.5px; }
+  .settings-bar label { font-size:12px; color:var(--text-dim); font-weight:500; text-transform:uppercase; letter-spacing:.5px; }
   .settings-bar input { font-family:'JetBrains Mono',monospace; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); padding:5px 10px; font-size:13px; width:180px; }
   .settings-bar input:focus { outline:none; border-color:var(--accent); }
   .settings-group { display:flex; align-items:center; gap:8px; }
@@ -60,7 +69,7 @@
   /* Main */
   .main { padding:20px 28px; }
   .section-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
-  .section-title { font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim); }
+  .section-title { font-size:14px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim); }
 
   /* Instance cards */
   .instances { display:flex; flex-direction:column; gap:6px; }
@@ -72,13 +81,13 @@
   .instance-card.stopped { border-left:3px solid var(--border); }
   .instance-status { width:9px; height:9px; border-radius:50%; background:var(--border); }
   .instance-status.on { background:var(--accent); box-shadow:0 0 8px var(--accent); }
-  .instance-info h3 { font-size:13px; font-weight:600; margin-bottom:1px; }
-  .instance-id { font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:400; color:var(--text-dim); background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:1px 5px; margin-right:6px; vertical-align:1px; }
-  .instance-info .meta { font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
-  .instance-res { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text-dim); }
-  .instance-source { font-size:11px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .instance-fps { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--warning); }
-  .instance-refresh { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--blue); }
+  .instance-info h3 { font-size:14px; font-weight:600; margin-bottom:1px; }
+  .instance-id { font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:400; color:var(--text-dim); background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:1px 5px; margin-right:6px; vertical-align:1px; }
+  .instance-info .meta { font-size:12px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+  .instance-res { font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--text-dim); }
+  .instance-source { font-size:12px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .instance-fps { font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--warning); }
+  .instance-refresh { font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--blue); }
   .instance-actions { display:flex; gap:5px; justify-content:flex-end; }
 
   /* Toggle */
@@ -100,7 +109,7 @@
   .form-row .form-group { flex:1; }
   .modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:18px; }
   .text-settings,.refresh-settings { border-top:1px solid var(--border); padding-top:12px; margin-top:12px; }
-  .form-hint { font-size:11px; color:var(--text-dim); margin-top:3px; }
+  .form-hint { font-size:12px; color:var(--text-dim); margin-top:3px; }
 
   /* Media library */
   .media-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; }
@@ -111,23 +120,23 @@
   .media-thumb-wrap { position:relative; background:#000; height:120px; }
   .media-thumb-wrap .play-glyph { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:24px; color:rgba(255,255,255,.7); text-shadow:0 1px 8px rgba(0,0,0,.9); pointer-events:none; }
   .media-card-info { padding:8px 10px; }
-  .media-card-name { font-size:12px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .media-card-meta { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; margin-top:2px; }
+  .media-card-name { font-size:13px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .media-card-meta { font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; margin-top:2px; }
   .media-card-actions { position:absolute; top:6px; right:6px; display:none; }
   .media-card:hover .media-card-actions { display:flex; gap:4px; }
-  .media-usage { font-size:10px; color:var(--accent); margin-top:2px; }
+  .media-usage { font-size:11px; color:var(--accent); margin-top:2px; }
 
   /* Media library filter chips */
   .media-filters { display:flex; flex-direction:column; gap:6px; margin-top:14px; }
   .chip-group { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-  .chip-label { font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; width:52px; flex-shrink:0; }
-  .chip { padding:3px 11px; font-size:12px; border-radius:14px; background:var(--surface2); border:1px solid var(--border); }
+  .chip-label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; width:56px; flex-shrink:0; }
+  .chip { padding:3px 11px; font-size:13px; border-radius:14px; background:var(--surface2); border:1px solid var(--border); }
   .chip:hover { border-color:var(--border-hover); }
   .chip.active { background:var(--accent-dim); color:var(--accent); border-color:var(--accent-dim); font-weight:600; }
-  .media-origin { font-size:10px; color:var(--text-dim); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .media-origin { font-size:11px; color:var(--text-dim); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   /* Plain-text type chips — immune to font fallback, unlike pictographs */
   .type-badge { display:inline-block; font-family:'JetBrains Mono',monospace; font-size:9px; font-weight:600; letter-spacing:.5px; color:var(--text-dim); background:var(--surface2); border:1px solid var(--border); border-radius:3px; padding:0 4px; margin-right:6px; vertical-align:1px; }
-  .media-opt { font-size:10px; margin-top:2px; font-family:'JetBrains Mono',monospace; }
+  .media-opt { font-size:11px; margin-top:2px; font-family:'JetBrains Mono',monospace; }
   .media-opt.done { color:var(--accent); }
   .media-opt.busy { color:var(--blue); animation:up-pulse 1.2s ease-in-out infinite; }
   .media-opt.warn { color:var(--warning); }
@@ -147,13 +156,13 @@
   .media-picker-item img, .media-picker-item video { width:100%; height:60px; object-fit:cover; display:block; background:#000; }
 
   /* Signage */
-  .sg-live { display:flex; gap:18px; align-items:center; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:14px 18px; margin-bottom:14px; flex-wrap:wrap; }
-  .sg-live img { width:180px; height:101px; object-fit:cover; border-radius:4px; background:#000; border:1px solid var(--border); }
-  .sg-live-info { display:flex; flex-direction:column; gap:8px; min-width:220px; flex:1; }
-  .sg-live .label { font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; }
-  .sg-live .val { font-size:14px; font-weight:600; }
+  .sg-live { display:flex; gap:36px; align-items:center; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:14px 20px; margin-bottom:14px; flex-wrap:wrap; }
+  .sg-live-info { display:flex; gap:40px; flex:1; min-width:280px; flex-wrap:wrap; }
+  .sg-live .label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; margin-bottom:3px; }
+  .sg-live .val { font-size:18px; font-weight:600; }
   .sg-live .val.dim { color:var(--text-dim); font-weight:400; }
-  .sg-remaining { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--warning); }
+  .sg-live-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .sg-remaining { font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--warning); margin-top:2px; }
   .sg-toolbar { display:flex; gap:8px; align-items:center; margin:14px 0 10px; flex-wrap:wrap; }
   .sg-list { display:flex; flex-direction:column; gap:4px; }
   .sg-row { display:grid; grid-template-columns:22px 18px 74px 1fr 130px 190px 76px 150px; align-items:center; gap:10px; padding:7px 12px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); }
@@ -168,14 +177,19 @@
   .sg-status-tag { font-weight:700; text-transform:uppercase; letter-spacing:.5px; }
   .sg-row.sel { border-color:var(--blue); background:#131b2b; }
   .sg-row.expired.sel, .sg-row.upcoming.sel { border-color:var(--blue); }
+  /* On air — the item (and its group header) currently playing on the output */
+  .sg-row.playing { border-color:var(--accent); background:#0d2114; box-shadow:inset 3px 0 0 var(--accent); }
+  .sg-row.playing .sg-name { color:var(--accent); }
+  .sg-onair { display:none; font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:700; color:#000; background:var(--accent); border-radius:3px; padding:1px 6px; margin-left:8px; vertical-align:1px; letter-spacing:.5px; }
+  .sg-row.playing .sg-onair { display:inline-block; }
   .sg-row.dragging { opacity:.35; }
   .sg-group-row { background:var(--surface2); border-left:3px solid var(--blue); }
   .sg-thumb { width:70px; height:40px; object-fit:cover; border-radius:3px; background:#000; border:1px solid var(--border); }
-  .sg-name { font-size:12px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .sg-sub { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
-  .sg-timing { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text-dim); }
-  .sg-sched { font-size:10px; color:var(--warning); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .sg-imp { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--blue); text-align:right; }
+  .sg-name { font-size:14px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sg-sub { font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+  .sg-timing { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text-dim); }
+  .sg-sched { font-size:11px; color:var(--warning); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sg-imp { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--blue); text-align:right; }
   .sg-actions { display:flex; gap:4px; justify-content:flex-end; }
   .drag-handle { cursor:grab; color:var(--text-dim); text-align:center; user-select:none; }
   .sg-dropzone { border:1px dashed var(--border); border-radius:var(--radius); padding:10px; text-align:center; color:var(--text-dim); font-size:11px; margin-top:4px; }
@@ -197,6 +211,25 @@
   .up-err { color:var(--danger); margin-top:5px; }
   .up-close { cursor:pointer; color:var(--text-dim); flex-shrink:0; }
   .up-close:hover { color:var(--text); }
+
+  /* Full-page upload overlay — shown while uploads are in flight; the
+     bottom-right mini panel above is the minimized / all-done fallback */
+  #upload-overlay { position:fixed; inset:0; background:rgba(5,6,10,.82); backdrop-filter:blur(3px); z-index:400; display:flex; align-items:center; justify-content:center; }
+  .upov-panel { width:min(680px,92vw); max-height:82vh; overflow-y:auto; background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:28px 32px; box-shadow:0 24px 80px rgba(0,0,0,.6); }
+  .upov-title { font-size:20px; font-weight:600; }
+  .upov-sub { font-size:13px; color:var(--text-dim); margin:4px 0 20px; }
+  .upov-item { margin-bottom:18px; }
+  .upov-head { display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:8px; }
+  .upov-name { font-size:15px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .upov-status { font-family:'JetBrains Mono',monospace; font-size:16px; font-weight:700; color:var(--text-dim); flex-shrink:0; }
+  .upov-item.done .upov-status { color:var(--accent); }
+  .upov-item.error .upov-status { color:var(--danger); }
+  .upov-bar { height:14px; background:var(--bg); border:1px solid var(--border); border-radius:7px; overflow:hidden; }
+  .upov-fill { height:100%; background:var(--accent); border-radius:7px; transition:width .15s; }
+  .upov-item.error .upov-fill { background:var(--danger); }
+  .upov-item.processing .upov-fill { animation:up-pulse 1.2s ease-in-out infinite; }
+  .upov-err { color:var(--danger); font-size:12px; margin-top:6px; }
+  .upov-actions { display:flex; justify-content:flex-end; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -397,36 +430,77 @@ async function saveInstance(data, id) {
   state.modal=null; state.modalDefaults=null; await loadData(true);
 }
 // --- Uploads with progress ---------------------------------------------
-// fetch() can't report upload progress, so uploads go through XHR. Each
-// file gets a card in a fixed bottom-right panel (outside the re-rendered
-// app root) showing % sent, then a "processing" pulse while the server
-// probes/converts, then done/error.
+// fetch() can't report upload progress, so uploads go through XHR. While
+// anything is uploading/processing a full-page overlay with large progress
+// bars is shown (dismissible to a bottom-right mini panel — the upload
+// keeps going either way); once everything finishes, the overlay closes
+// and done/error cards linger briefly in the mini panel. Both live outside
+// the re-rendered app root so poll re-renders can't clobber them.
 const uploads = [];
 let uploadSeq = 0;
+let uploadsMinimized = false; // user hid the overlay for this batch
+
+function uploadStatusText(u) {
+  return u.status==='uploading' ? `${u.pct}%`
+    : u.status==='processing' ? 'processing…'
+    : u.status==='done' ? '✓ done' : '✗ failed';
+}
+
+// One progress card, in overlay ('upov') or mini-panel ('up') styling
+function uploadCard(u, pre, closable) {
+  return h('div',{className:`${pre}-item ${u.status}`},
+    h('div',{className:`${pre}-head`},
+      h('div',{className:`${pre}-name`,title:u.name},u.name),
+      h('div',{className:`${pre}-status`},uploadStatusText(u)),
+      closable && (u.status==='done'||u.status==='error')
+        ? h('div',{className:'up-close',onClick:()=>{removeUpload(u.id);}},'✕') : null,
+    ),
+    h('div',{className:`${pre}-bar`},h('div',{className:`${pre}-fill`,style:{width:`${u.pct}%`}})),
+    u.status==='error'&&u.msg ? h('div',{className:`${pre}-err`},u.msg) : null,
+  );
+}
 
 function updateUploadPanel() {
   let panel = document.getElementById('upload-panel');
-  if (!uploads.length) { if (panel) panel.remove(); return; }
+  let overlay = document.getElementById('upload-overlay');
+  if (!uploads.length) {
+    if (panel) panel.remove();
+    if (overlay) overlay.remove();
+    return;
+  }
+  const active = uploads.some(u=>u.status==='uploading'||u.status==='processing');
+
+  if (active && !uploadsMinimized) {
+    // Full-page overlay with large per-file bars
+    if (panel) panel.remove();
+    if (!overlay) {
+      overlay = h('div',{id:'upload-overlay'});
+      document.body.appendChild(overlay);
+    }
+    const total = uploads.length;
+    const finished = uploads.filter(u=>u.status==='done'||u.status==='error').length;
+    overlay.innerHTML = '';
+    overlay.appendChild(h('div',{className:'upov-panel'},
+      h('div',{className:'upov-title'},'Uploading media'),
+      h('div',{className:'upov-sub'},
+        `${finished} of ${total} file${total===1?'':'s'} finished — keep this page open until uploads complete`),
+      ...uploads.map(u=>uploadCard(u,'upov',false)),
+      h('div',{className:'upov-actions'},
+        h('button',{className:'sm',onClick:()=>{uploadsMinimized=true;updateUploadPanel();}},
+          'Hide — keep uploading in background'),
+      ),
+    ));
+    return;
+  }
+
+  // Minimized / finished: compact bottom-right panel
+  if (overlay) overlay.remove();
   if (!panel) {
     panel = h('div',{id:'upload-panel'});
     document.body.appendChild(panel);
   }
   panel.innerHTML = '';
-  for (const u of uploads) {
-    const statusText = u.status==='uploading' ? `${u.pct}%`
-      : u.status==='processing' ? 'processing…'
-      : u.status==='done' ? '✓ done' : '✗ failed';
-    panel.appendChild(h('div',{className:`up-item ${u.status}`},
-      h('div',{className:'up-head'},
-        h('div',{className:'up-name',title:u.name},u.name),
-        h('div',{className:'up-status'},statusText),
-        (u.status==='done'||u.status==='error')
-          ? h('div',{className:'up-close',onClick:()=>{removeUpload(u.id);}},'✕') : null,
-      ),
-      h('div',{className:'up-bar'},h('div',{className:'up-fill',style:{width:`${u.pct}%`}})),
-      u.status==='error'&&u.msg ? h('div',{className:'up-err'},u.msg) : null,
-    ));
-  }
+  for (const u of uploads) panel.appendChild(uploadCard(u,'up',true));
 }
 
 function removeUpload(id) {
@@ -437,6 +511,7 @@ function removeUpload(id) {
 
 function uploadWithProgress(url, file) {
   return new Promise(resolve => {
+    if (!uploads.length) uploadsMinimized = false; // fresh batch → overlay again
     const u = {id:++uploadSeq, name:file.name, pct:0, status:'uploading', msg:''};
     uploads.push(u); updateUploadPanel();
     const xhr = new XMLHttpRequest();
@@ -570,11 +645,17 @@ function h(tag, attrs, ...children) {
 
 function renderHeader() {
   const run = state.instances.filter(i=>i.running).length;
+  // Total NDI receivers across running sources — only shown when at least
+  // one worker reports a count (dummy mode / no NDI SDK reports none)
+  const rxKnown = state.instances.some(i=>i.ndi && i.ndi.receivers!=null);
+  const rx = state.instances.reduce((a,i)=>a+((i.ndi&&i.ndi.receivers)||0),0);
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v1.6.2'),
+      h('span',{className:'version'},'v1.7.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
+      rxKnown ? h('div',{className:'status-pill rx',
+        title:'NDI receivers connected across all running sources'},`◉ ${rx} RX`) : null,
     ),
     h('div',{className:'header-actions'},
       h('div',{className:'server-clock',id:'server-clock',
@@ -674,6 +755,17 @@ function renderInstanceCard(inst) {
       inst.source_type==='video' && inst.running
         ? h('div',{className:'meta',style:{color:inst.video_state==='playing'?'var(--accent)':'var(--text-dim)'}},
             inst.video_state==='playing'?'▶ PLAYING':'⏸ HOLDING')
+        : null,
+      inst.running && inst.ndi && (inst.ndi.receivers!=null || inst.ndi.on_program || inst.ndi.on_preview)
+        ? h('div',{className:'rx-line'},
+            inst.ndi.receivers!=null
+              ? h('span',{className:`rx-count ${inst.ndi.receivers?'active':''}`,
+                          title:'NDI receivers currently connected to this source'},
+                  `◉ ${inst.ndi.receivers} RX`)
+              : null,
+            inst.ndi.on_program ? h('span',{className:'tally pgm',title:'On program (downstream tally)'},'PGM') : null,
+            inst.ndi.on_preview ? h('span',{className:'tally pvw',title:'On preview (downstream tally)'},'PVW') : null,
+          )
         : null,
     ),
     h('div',{className:'instance-res'},`${inst.width}×${inst.height}`),
@@ -1056,7 +1148,8 @@ function sgItemRow(item, group) {
   cb.addEventListener('click',e=>e.stopPropagation());
 
   const status = sgItemStatus(item, group);
-  const row = h('div',{className:`sg-row ${group?'grouped':''} ${sgSel.has(item.id)?'sel':''} ${status.cls}`},
+  const row = h('div',{className:`sg-row ${group?'grouped':''} ${sgSel.has(item.id)?'sel':''} ${status.cls} ${sgNowPlayingId===item.id?'playing':''}`,
+                       'data-sgitem':item.id},
     h('div',{className:'drag-handle',title:'Drag to reorder'},'⠿'),
     cb,
     h('img',{className:'sg-thumb',src:m.thumb_url||'',loading:'lazy',alt:'',
@@ -1064,7 +1157,8 @@ function sgItemRow(item, group) {
     h('div',null,
       h('div',{className:'sg-name'},
         h('span',{className:'type-badge'},m.is_video?'VID':'IMG'),
-        m.original_name||'(deleted)'),
+        m.original_name||'(deleted)',
+        h('span',{className:'sg-onair'},'ON AIR')),
       h('div',{className:'sg-sub'},`#${item.id}${m.is_video&&m.duration_s?` · file ${Math.round(m.duration_s)}s`:''}`),
     ),
     h('div',{className:'sg-timing'},`▦ ${sgFmtSecs(t.dur)}${t.inherited?'*':''} · fade ${sgFmtSecs(t.fade)}`),
@@ -1089,12 +1183,12 @@ function sgGroupRow(g) {
   const collapsed = !!state.sgCollapsed[g.id];
   const sched = sgSchedSummary(g);
   const status = sgItemStatus(g, null);
-  const row = h('div',{className:`sg-row sg-group-row ${status.cls}`},
+  const row = h('div',{className:`sg-row sg-group-row ${status.cls}`,'data-sggroup':g.id},
     h('div',{className:'drag-handle',title:'Drag to reorder'},'⠿'),
     h('div',{style:{cursor:'pointer'},onClick:()=>{state.sgCollapsed[g.id]=!collapsed;render();}},collapsed?'▸':'▾'),
     h('div',{style:{textAlign:'center'}},h('span',{className:'type-badge',style:{marginRight:'0'}},'GRP')),
     h('div',null,
-      h('div',{className:'sg-name'},g.name),
+      h('div',{className:'sg-name'},g.name,h('span',{className:'sg-onair'},'ON AIR')),
       h('div',{className:'sg-sub'},`group · ${items.length} item${items.length===1?'':'s'} — drop items here to add`),
     ),
     h('div',{className:'sg-timing'},
@@ -1141,20 +1235,82 @@ function sgToggleSelectAll() {
   render();
 }
 
+let sgNowPlayingId = null; // playlist item id currently on air (green row)
+
+// Toggle the green "on air" highlight on the playlist rows (and the group
+// header containing the playing item) without a full re-render
+function sgApplyPlayingHighlight() {
+  const curId = sgNowPlayingId;
+  let curGroup = null;
+  if (curId != null && state.signage) {
+    const it = state.signage.items.find(x=>x.id===curId);
+    curGroup = it ? it.group_id : null;
+  }
+  document.querySelectorAll('.sg-row[data-sgitem]').forEach(r=>{
+    r.classList.toggle('playing', curId!=null && parseInt(r.getAttribute('data-sgitem'))===curId);
+  });
+  document.querySelectorAll('.sg-row[data-sggroup]').forEach(r=>{
+    r.classList.toggle('playing', curGroup!=null && parseInt(r.getAttribute('data-sggroup'))===curGroup);
+  });
+}
+
+let sgLastStatus = null; // last payload — re-applied after re-renders
+
+function applySignageStatus(s) {
+  sgLastStatus = s;
+  const set = (id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
+  if (s.running && s.status) {
+    set('sg-now', s.status.current ? s.status.current.name : 'Black (nothing scheduled)');
+    set('sg-remaining', s.status.current && s.status.remaining_s!=null
+      ? `${Math.max(0,Math.round(s.status.remaining_s))}s left` : '');
+    set('sg-next', s.status.next ? s.status.next.name : '—');
+    sgNowPlayingId = s.status.current ? s.status.current.id : null;
+  } else {
+    set('sg-now', s.running ? 'Starting…' : 'Not running');
+    set('sg-next','—'); set('sg-remaining','');
+    sgNowPlayingId = null;
+  }
+  sgApplyPlayingHighlight();
+}
+
+// --- Real-time signage status (Server-Sent Events) ----------------------
+// The server pushes the now-playing payload the moment it changes (item
+// transitions land in ~200ms, the countdown ticks each second). While the
+// stream is delivering, the interval poll below becomes a no-op; if the
+// stream drops, EventSource reconnects on its own and the poll covers the
+// gap in the meantime.
+let sgEvt = null, sgEvtInstId = null, sgEvtLive = false;
+
+function syncSignageEvents() {
+  // One stream per visible signage view — hidden tabs and other pages hold
+  // no server connection, so any number of browser sessions can stay open
+  const wanted = state.tab==='signage' && state.signageInstId && !document.hidden;
+  if (!wanted) {
+    if (sgEvt) { sgEvt.close(); sgEvt=null; sgEvtInstId=null; sgEvtLive=false; }
+    return;
+  }
+  if (sgEvt && sgEvtInstId === state.signageInstId) return;
+  if (sgEvt) sgEvt.close();
+  sgEvtInstId = state.signageInstId;
+  sgEvtLive = false;
+  sgEvt = new EventSource(`${API}/instances/${sgEvtInstId}/signage/events`);
+  sgEvt.onmessage = e => {
+    sgEvtLive = true;
+    try { applySignageStatus(JSON.parse(e.data)); } catch(err) {}
+  };
+  sgEvt.onerror = () => { sgEvtLive = false; };
+}
+
 async function updateSignageStatus() {
   if (state.tab!=='signage' || !state.signageInstId || document.hidden) return;
+  if (sgEvtLive && sgEvtInstId === state.signageInstId) {
+    // Stream is live — just re-apply the last payload (a re-render may
+    // have rebuilt the DOM since the last push)
+    if (sgLastStatus) applySignageStatus(sgLastStatus);
+    return;
+  }
   try {
-    const s = await api(`/instances/${state.signageInstId}/signage/status`);
-    const set = (id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
-    if (s.running && s.status) {
-      set('sg-now', s.status.current ? s.status.current.name : 'Black (nothing scheduled)');
-      set('sg-remaining', s.status.current && s.status.remaining_s!=null
-        ? `${Math.max(0,Math.round(s.status.remaining_s))}s left` : '');
-      set('sg-next', s.status.next ? s.status.next.name : '—');
-    } else {
-      set('sg-now', s.running ? 'Starting…' : 'Not running');
-      set('sg-next','—'); set('sg-remaining','');
-    }
+    applySignageStatus(await api(`/instances/${state.signageInstId}/signage/status`));
   } catch(e) {}
 }
 
@@ -1187,33 +1343,29 @@ function renderSignagePage() {
     return main;
   }
 
-  // Live panel
-  const preview = inst.running
-    ? (previewCache[inst.id]
-        ? h('img',{'data-preview':inst.id,src:previewCache[inst.id],alt:'Live'})
-        : h('div',{className:'instance-preview-empty','data-preview-slot':inst.id,style:{width:'180px',height:'101px'}},'Loading…'))
-    : h('div',{className:'instance-preview-empty',style:{width:'180px',height:'101px'}},'Not running');
-  preview.style.cursor = 'pointer';
-  preview.title = 'Open live preview window';
-  preview.addEventListener('click', ()=>openPreviewPopup(inst));
+  // Live bar — the item on air is highlighted green in the playlist below;
+  // the popup preview window is a click away for a visual check
   main.appendChild(h('div',{className:'sg-live'},
-    preview,
     h('div',{className:'sg-live-info'},
       h('div',null,h('div',{className:'label'},'Now Playing'),
         h('div',{className:'val',id:'sg-now'},inst.running?'…':'Not running'),
         h('div',{className:'sg-remaining',id:'sg-remaining'},'')),
       h('div',null,h('div',{className:'label'},'Up Next'),
         h('div',{className:'val dim',id:'sg-next'},'—')),
+      inst.running && inst.ndi && inst.ndi.receivers!=null
+        ? h('div',null,h('div',{className:'label'},'Receivers'),
+            h('div',{className:'val dim',title:'NDI receivers pulling this source'},`◉ ${inst.ndi.receivers}`))
+        : null,
     ),
-    h('div',{style:{display:'flex',gap:'8px',flexDirection:'column'}},
+    h('div',{className:'sg-live-actions'},
       inst.running
         ? h('button',{onClick:()=>sgSkip(),title:'Crossfade to the next item now'},'⏭ Skip Next')
         : h('button',{className:'primary',onClick:()=>startInstance(inst.id)},'▶ Start'),
       inst.running
         ? h('button',{className:'danger',onClick:()=>stopInstance(inst.id)},'■ Stop')
         : null,
-      h('button',{className:'sm',onClick:()=>openPreviewPopup(inst),title:'Open live preview window'},'⧉ Popup Preview'),
-      h('button',{className:'sm',onClick:()=>{state.modal=inst;render();}},'✎ Instance Settings'),
+      h('button',{onClick:()=>openPreviewPopup(inst),title:'Open live preview window'},'⧉ Popup Preview'),
+      h('button',{onClick:()=>{state.modal=inst;render();}},'✎ Instance Settings'),
     ),
   ));
 
@@ -1726,6 +1878,7 @@ function render() {
   const sgModal = renderSignageModal();
   if(sgModal) root.appendChild(sgModal);
   syncRoute();
+  syncSignageEvents();
 }
 
 // A modal open or a drag in progress must not be clobbered by a poll re-render
@@ -1737,8 +1890,11 @@ setInterval(() => { if (!uiBusy() && !document.hidden) loadData(); }, 5000);
 setInterval(updatePreviews, 2000);
 setInterval(updateSignageStatus, 2000);
 setInterval(tickServerClock, 1000);
-// Catch up immediately when the tab becomes visible again
+// Catch up immediately when the tab becomes visible again; hidden tabs
+// also drop their signage event stream (reopened on return) so idle
+// sessions never hold server connections
 document.addEventListener('visibilitychange', () => {
+  syncSignageEvents();
   if (!document.hidden && !uiBusy()) { loadData(); updatePreviews(); }
 });
 </script>
