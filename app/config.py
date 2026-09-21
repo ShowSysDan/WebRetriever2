@@ -61,6 +61,11 @@ class Config:
     PREVIEW_FOLDER = os.path.join(BASE_DIR, "previews")
     PREVIEW_INTERVAL = 2.0  # seconds between preview saves
 
+    # Media library poster thumbnails (server-generated JPEGs — the UI never
+    # loads full images/videos just to draw a grid card)
+    THUMB_FOLDER = os.path.join(BASE_DIR, "thumbs")
+    THUMB_WIDTH = 320
+
     # Syslog
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     SYSLOG_ENABLED = os.getenv("SYSLOG_ENABLED", "false").lower() == "true"

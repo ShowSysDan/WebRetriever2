@@ -47,9 +47,10 @@ def create_app(config_class=Config):
     db.init_app(app)
     Migrate(app, db)
 
-    # Ensure upload, preview, and signage state directories exist
+    # Ensure upload, preview, thumbnail, and signage state directories exist
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
     os.makedirs(app.config["PREVIEW_FOLDER"], exist_ok=True)
+    os.makedirs(app.config["THUMB_FOLDER"], exist_ok=True)
     os.makedirs(app.config["SIGNAGE_STATE_FOLDER"], exist_ok=True)
 
     # Register API

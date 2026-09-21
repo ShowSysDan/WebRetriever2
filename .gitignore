@@ -28,6 +28,9 @@ app/previews/
 # Signage runtime state (playlists, status, impression logs)
 app/signage_state/
 
+# Media poster thumbnails (generated at runtime)
+app/thumbs/
+
 # IDE
 .vscode/
 .idea/

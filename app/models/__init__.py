@@ -113,6 +113,12 @@ class MediaFile(db.Model):
             "optimized_width": self.optimized_width,
             "optimized_height": self.optimized_height,
             "url": f"/api/media/{self.id}/file",
+            "thumb_url": f"/api/media/{self.id}/thumb",
+            "download_url": f"/api/media/{self.id}/download",
+            "download_optimized_url": (
+                f"/api/media/{self.id}/download?optimized=1"
+                if self.optimized_filename and self.optimize_status == "done" else None
+            ),
             "uploaded_at": self.uploaded_at.isoformat() if self.uploaded_at else None,
         }
 

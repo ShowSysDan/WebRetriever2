@@ -1187,6 +1187,8 @@ thumbnail or the ⧉ button) or bookmark the URL directly.
 | `POST` | `/api/media` | Upload a file (multipart) |
 | `GET` | `/api/media/:id` | Get file metadata |
 | `GET` | `/api/media/:id/file` | Serve the playback file (optimized copy when one exists; `?original=1` for the untouched upload) |
+| `GET` | `/api/media/:id/thumb` | Poster thumbnail JPEG (generated server-side, cached) |
+| `GET` | `/api/media/:id/download` | Download the original upload as an attachment; `?optimized=1` downloads the transcoded copy |
 | `POST` | `/api/media/:id/optimize` | Queue a video for background optimization (202; 501 when ffmpeg is missing) |
 | `DELETE` | `/api/media/:id` | Delete file (unlinks from instances, removes the optimized copy too) |
 
@@ -1397,6 +1399,42 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.6.0
+
+**Reliable thumbnails + media downloads.**
+
+- **Server-generated poster thumbnails.** Library cards, media pickers, and
+  signage playlist rows previously embedded a full `<video>` element per
+  video (fetch metadata, seek to 0.1s) — browsers cap concurrent media
+  decoders, so with several videos some thumbnails never rendered. The
+  server now generates a poster JPEG per file (one decoded frame ~0.5s in
+  for videos, a downscale for images), served from
+  `GET /api/media/:id/thumb` with day-long caching, generated eagerly on
+  upload and lazily on first request for pre-existing files. Every
+  thumbnail in the UI is now a plain `<img>`; video cards get a ▶ glyph.
+- **Downloads.** `GET /api/media/:id/download` returns the original upload
+  as an attachment under its real filename; `?optimized=1` downloads the
+  transcoded playback copy as `<name> (optimized).mp4`. In the UI: ⬇
+  (original) and ⬇⚡ (optimized, when present) buttons on every media card,
+  and both download buttons in the signage item settings modal.
+- Thumbnails are cleaned up with their media; thumbnail generation prefers
+  the optimized copy (faster to open) when one exists.
+- **Snappier interactions.** Frequently-clicked controls (start/stop,
+  enable toggles, video play/stop, signage skip, item/group toggles, drag
+  reorder) now update the UI optimistically — local state flips and the
+  page re-renders immediately, with the API call and a background refresh
+  reconciling afterwards — instead of waiting out a full request round
+  trip per click. The signage playlist is also fetched in the same
+  parallel batch as the rest of the page data.
+- **Virtual pages.** The tab and signage selection now live in the URL
+  (`#/instances`, `#/signage/3`, `#/media`) — refreshing or bookmarking
+  keeps your place instead of dumping you back on Instances, and
+  back/forward navigate between tabs.
+- **No render-blocking external requests.** Web fonts load asynchronously
+  with system-font fallbacks, so on an isolated/air-gapped network the UI
+  renders immediately instead of stalling on an unreachable CDN. (All
+  JS/CSS is already inline — fonts were the only external fetch.)
 
 #### 1.5.0
 
