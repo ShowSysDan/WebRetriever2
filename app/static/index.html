@@ -41,7 +41,10 @@
   .tally.pgm { background:var(--danger); color:#fff; }
   .tally.pvw { background:var(--accent); color:#000; }
 
-  /* Receivers modal (who is pulling a source) */
+  /* Receivers modal (who is pulling a source / the whole server) */
+  .rx-stats { display:flex; gap:36px; margin-bottom:6px; flex-wrap:wrap; }
+  .rx-stat-label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; margin-bottom:3px; }
+  .rx-stat-val { font-size:18px; font-weight:600; font-family:'JetBrains Mono',monospace; }
   .rx-table { width:100%; border-collapse:collapse; font-size:13px; }
   .rx-table th { text-align:left; font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; padding:4px 8px; border-bottom:1px solid var(--border); }
   .rx-table td { padding:6px 8px; border-bottom:1px solid var(--border); }
@@ -627,64 +630,104 @@ async function videoStop(id) {
   await api(`/instances/${id}/video/stop`,{method:'POST'}); await loadData();
 }
 
-// --- Receivers popup (who is pulling a source) ---------------------------
+// --- Receivers popup (who is pulling a source / the whole server) ---------
 async function openRxModal(inst) {
-  state.rxModal = {instId: inst.id, name: inst.name, data: null};
+  // inst = one instance, or null for the fleet-wide view (header pill)
+  state.rxModal = inst ? {instId: inst.id, name: inst.name, data: null}
+                       : {all: true, data: null};
   render();
   await refreshRxModal();
 }
 async function refreshRxModal() {
-  if (!state.rxModal) return;
+  const m = state.rxModal;
+  if (!m) return;
   try {
-    const d = await api(`/instances/${state.rxModal.instId}/receivers`);
-    if (state.rxModal && state.rxModal.instId === d.id) {
-      state.rxModal.data = d;
-      render();
-    }
+    const d = m.all ? await api('/receivers')
+                    : await api(`/instances/${m.instId}/receivers`);
+    if (state.rxModal === m) { m.data = d; render(); }
   } catch(e) {}
 }
 
+const rxTransportLabel = r =>
+  r.transport==='tcp' ? '⇄ TCP'
+  : r.transport==='udp-multicast' ? '⇢ UDP / multicast'
+  : r.transport==='measuring' ? 'measuring…' : '—';
+
+function rxTable(receivers) {
+  return h('table',{className:'rx-table'},
+    h('thead',null,h('tr',null,
+      h('th',null,'Hostname'),h('th',null,'IP Address'),h('th',null,'Conns'),
+      h('th',null,'Transport'),h('th',null,'TCP Rate'))),
+    h('tbody',null, ...receivers.map(r=>h('tr',null,
+      h('td',null,r.hostname||'—'),
+      h('td',{className:'mono'},r.ip),
+      h('td',null,String(r.connections)),
+      h('td',{title:'Inferred from TCP throughput: media flowing over the TCP connection = TCP; a quiet control-only connection means the video travels as UDP or multicast'},
+        rxTransportLabel(r)),
+      h('td',{className:'mono'},r.mbps!=null?`${r.mbps} Mbps`:''),
+    ))),
+  );
+}
+
+const RX_HINT =
+  'Every receiver keeps a TCP control connection whatever the video transport; the Transport column '+
+  'tells them apart by measuring it — megabits on the socket = TCP media, near-idle = UDP or multicast. '+
+  'Hostnames come from reverse DNS and rates need two samples, so both can take a refresh to fill in. '+
+  'Auto-refreshes while open.';
+
 function renderRxModal() {
   if (!state.rxModal) return null;
-  const {name, data} = state.rxModal;
+  const {all, name, data} = state.rxModal;
   const close = ()=>{state.rxModal=null;render();};
-  let body;
-  if (!data) {
-    body = h('div',{className:'form-hint'},'Looking up connections…');
-  } else if (!data.supported) {
-    body = h('div',{className:'form-hint'},`Not available: ${data.reason||'unsupported'}`);
-  } else if (!data.receivers || !data.receivers.length) {
-    body = h('div',{className:'form-hint'},
-      data.running===false ? 'Instance not running.' : 'No receivers connected.');
+  let hint, body;
+
+  if (all) {
+    hint = 'All established NDI connections across running sources. Summed TCP rate counts media on those '+
+      'connections; server egress is the interface-counter total actually leaving the box (loopback excluded) — '+
+      'it also carries UDP/multicast media, previews and this web UI, so the gap between the two is roughly '+
+      'the non-TCP output. ' + RX_HINT;
+    if (!data) {
+      body = h('div',{className:'form-hint'},'Looking up connections…');
+    } else {
+      const stat = (label,val) => h('div',null,
+        h('div',{className:'rx-stat-label'},label),
+        h('div',{className:'rx-stat-val'},val));
+      body = h('div',null,
+        h('div',{className:'rx-stats'},
+          stat('Server Egress', data.egress_mbps!=null ? `${data.egress_mbps} Mbps` : 'measuring…'),
+          stat('Summed TCP Rate', `${data.total_tcp_mbps} Mbps`),
+          stat('Receivers', `${data.unique_receivers} unique · ${data.total_connections} conn${data.total_connections===1?'':'s'}`),
+        ),
+        !data.instances.length
+          ? h('div',{className:'form-hint'},'No running instances.')
+          : data.instances.map(i=>h('div',{style:{marginTop:'14px'}},
+              h('div',{className:'section-title',style:{marginBottom:'6px'}},
+                `#${i.instance_id} ${i.name}`
+                + (i.sdk_receivers!=null?` — SDK reports ${i.sdk_receivers}`:'')),
+              i.receivers.length ? rxTable(i.receivers)
+                : h('div',{className:'form-hint'},'No receivers connected.'),
+            )),
+      );
+    }
   } else {
-    const transportLabel = r =>
-      r.transport==='tcp' ? '⇄ TCP'
-      : r.transport==='udp-multicast' ? '⇢ UDP / multicast'
-      : r.transport==='measuring' ? 'measuring…' : '—';
-    body = h('table',{className:'rx-table'},
-      h('thead',null,h('tr',null,
-        h('th',null,'Hostname'),h('th',null,'IP Address'),h('th',null,'Conns'),
-        h('th',null,'Transport'),h('th',null,'TCP Rate'))),
-      h('tbody',null, ...data.receivers.map(r=>h('tr',null,
-        h('td',null,r.hostname||'—'),
-        h('td',{className:'mono'},r.ip),
-        h('td',null,String(r.connections)),
-        h('td',{title:'Inferred from TCP throughput: media flowing over the TCP connection = TCP; a quiet control-only connection means the video travels as UDP or multicast'},
-          transportLabel(r)),
-        h('td',{className:'mono'},r.mbps!=null?`${r.mbps} Mbps`:''),
-      ))),
-    );
+    const sdkNote = data && data.sdk_receivers!=null ? ` The NDI SDK reports ${data.sdk_receivers}.` : '';
+    hint = `Established NDI connections to this source, from the worker's sockets.${sdkNote} ` + RX_HINT;
+    if (!data) {
+      body = h('div',{className:'form-hint'},'Looking up connections…');
+    } else if (!data.supported) {
+      body = h('div',{className:'form-hint'},`Not available: ${data.reason||'unsupported'}`);
+    } else if (!data.receivers || !data.receivers.length) {
+      body = h('div',{className:'form-hint'},
+        data.running===false ? 'Instance not running.' : 'No receivers connected.');
+    } else {
+      body = rxTable(data.receivers);
+    }
   }
-  const sdkNote = data && data.sdk_receivers!=null ? ` The NDI SDK reports ${data.sdk_receivers}.` : '';
+
   return h('div',{className:'modal-overlay',onClick:e=>{if(e.target.className==='modal-overlay')close();}},
-    h('div',{className:'modal',style:{width:'560px'}},
-      h('h2',null,`Receivers — ${name}`),
-      h('div',{className:'form-hint',style:{marginBottom:'10px'}},
-        `Established NDI connections to this source, from the worker's sockets.${sdkNote} `+
-        `Every receiver keeps a TCP control connection whatever the video transport; the Transport column `+
-        `tells them apart by measuring it — megabits on the socket = TCP media, near-idle = UDP or multicast. `+
-        `Hostnames come from reverse DNS and rates need two samples, so both can take a refresh to fill in. `+
-        `Auto-refreshes while open.`),
+    h('div',{className:'modal',style:{width: all?'640px':'560px'}},
+      h('h2',null, all ? 'All Receivers & Bandwidth' : `Receivers — ${name}`),
+      h('div',{className:'form-hint',style:{marginBottom:'10px'}},hint),
       body,
       h('div',{className:'modal-actions'},
         h('button',{onClick:refreshRxModal},'↻ Refresh'),
@@ -728,7 +771,9 @@ function renderHeader() {
       h('span',{className:'version'},'v1.7.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
       rxKnown ? h('div',{className:'status-pill rx',
-        title:'NDI receivers connected across all running sources'},`◉ ${rx} RX`) : null,
+        style:{cursor:'pointer'},
+        title:'NDI receivers across all running sources — click for every connection, summed bandwidth and server egress',
+        onClick:()=>openRxModal(null)},`◉ ${rx} RX`) : null,
     ),
     h('div',{className:'header-actions'},
       h('div',{className:'server-clock',id:'server-clock',
