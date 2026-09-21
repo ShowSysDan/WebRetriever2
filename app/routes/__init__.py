@@ -9,6 +9,7 @@ import json
 import time
 import uuid
 import shutil
+import signal
 import logging
 import tempfile
 import threading
@@ -30,6 +31,33 @@ from app.logging_config import log_event
 
 api = Blueprint("api", __name__, url_prefix="/api")
 logger = logging.getLogger(__name__)
+
+
+def _run_process_group(cmd, timeout):
+    """Run a helper tool in its own process group and reap the WHOLE group
+    on timeout.
+
+    subprocess.run's timeout kill only reaches the direct child. soffice is
+    a wrapper that forks soffice.bin — killing just the wrapper orphans the
+    real process, which then holds the LibreOffice profile lock and breaks
+    every later conversion until someone kills it by hand. Group kill is
+    POSIX-only; elsewhere this behaves like subprocess.run (single kill).
+    Raises subprocess.TimeoutExpired after cleanup, like run() does."""
+    posix = hasattr(os, "setsid")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=posix)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if posix:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        proc.kill()
+        proc.wait(timeout=10)
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def _allowed_file(filename):
@@ -1537,10 +1565,10 @@ def _convert_presentation(src_path, ext):
                     "presentations. Install it (apt install libreoffice-impress) "
                     "or upload a PDF export instead."
                 )
-            result = subprocess.run(
+            result = _run_process_group(
                 [soffice, "--headless", "--convert-to", "pdf",
                  "--outdir", workdir, src_path],
-                capture_output=True, timeout=300,
+                timeout=300,
             )
             pdfs = glob.glob(os.path.join(workdir, "*.pdf"))
             if result.returncode != 0 or not pdfs:

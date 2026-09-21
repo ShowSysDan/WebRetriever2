@@ -10,12 +10,15 @@ Features:
 """
 
 import os
+import re
 import time
 import ctypes
+import shutil
 import signal
 import socket
 import logging
 import threading
+import subprocess
 import multiprocessing as mp
 from typing import Dict, Optional
 
@@ -54,6 +57,14 @@ RESTART_STABLE_RESET = 120.0
 # over UDP or multicast). Enumerating the worker's sockets gives peer IPs;
 # reverse DNS turns those into hostnames.
 
+# Transport classification: every NDI receiver holds a TCP control
+# connection, so presence alone can't tell TCP media from UDP/multicast
+# media. Throughput can: media over TCP moves megabits on the socket, a
+# control-only connection idles at a few kbps. A receiver whose TCP rate
+# stays below this threshold is getting its media some other way (UDP or
+# multicast).
+RX_TCP_MEDIA_MBPS = 0.5
+
 _HOSTNAME_TTL = 300.0  # seconds a reverse-DNS answer (or miss) is cached
 _hostname_cache: Dict[str, tuple] = {}  # ip -> (hostname|None, expires_at)
 _hostname_pending: set = set()
@@ -89,6 +100,55 @@ def _resolve_hostname(ip: str) -> Optional[str]:
     return hit[0] if hit else None
 
 
+def _norm_ip(ip: str) -> str:
+    """Normalize an address for cross-source matching: IPv4-mapped IPv6
+    (::ffff:10.0.0.5) becomes plain IPv4, zone suffixes (%eth0) drop."""
+    ip = ip.split("%", 1)[0]
+    if ip.lower().startswith("::ffff:") and "." in ip:
+        ip = ip[7:]
+    return ip
+
+
+def _tcp_flow_bytes(ports) -> Optional[dict]:
+    """bytes_acked per established TCP connection on the given local ports.
+
+    Returns {(peer_ip, peer_port, local_port): bytes_acked} via `ss -tinO`
+    (Linux/iproute2) — bytes_acked is what the peer has acknowledged
+    receiving, i.e. data actually delivered to that receiver. None when ss
+    isn't available (non-Linux), letting callers report transport unknown.
+
+    Parsing note: with an explicit `state established` filter ss omits the
+    State column, so the first two addr:port tokens on a line are the local
+    and peer addresses."""
+    if not ports or not shutil.which("ss"):
+        return None
+    filt = " or ".join(f"sport = :{p}" for p in sorted(ports))
+    try:
+        out = subprocess.run(
+            ["ss", "-tinOH", "state", "established", f"( {filt} )"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    flows = {}
+    for line in out.splitlines():
+        addrs = []
+        for tok in line.split():
+            host, sep, port = tok.rpartition(":")
+            if sep and host and port.isdigit():
+                addrs.append((_norm_ip(host.strip("[]")), int(port)))
+            if len(addrs) == 2:
+                break
+        if len(addrs) == 2:
+            # ss omits bytes_acked on a connection that has never sent
+            # data — that IS the idle control-only case, so count it as 0
+            m = re.search(r"bytes_acked:(\d+)", line)
+            (l_ip, l_port), (p_ip, p_port) = addrs
+            if l_port in ports:
+                flows[(p_ip, p_port, l_port)] = int(m.group(1)) if m else 0
+    return flows
+
+
 def _receiver_endpoints_for_pid(pid: int) -> dict:
     """Socket-level receiver list for one worker process.
 
@@ -116,13 +176,16 @@ def _receiver_endpoints_for_pid(pid: int) -> dict:
     for c in conns:
         if (c.status == psutil.CONN_ESTABLISHED and c.laddr and c.raddr
                 and c.laddr.port in listen_ports):
-            peers[c.raddr.ip] = peers.get(c.raddr.ip, 0) + 1
+            ip = _norm_ip(c.raddr.ip)
+            peers[ip] = peers.get(ip, 0) + 1
     return {
         "supported": True,
         "receivers": [
             {"ip": ip, "hostname": _resolve_hostname(ip), "connections": n}
             for ip, n in sorted(peers.items())
         ],
+        # internal, for throughput sampling — stripped before serving
+        "_listen_ports": listen_ports,
     }
 
 
@@ -154,6 +217,8 @@ class WorkerManager:
         self._preview_boosts: Dict[int, mp.Value] = {}
         self._ndi_connections: Dict[int, mp.Value] = {}
         self._ndi_tallys: Dict[int, mp.Value] = {}
+        # Last bytes_acked sample per receiver connection, for throughput
+        self._rx_samples: Dict[int, dict] = {}
         self._configs: Dict[int, dict] = {}
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
@@ -171,7 +236,7 @@ class WorkerManager:
         for d in (self._workers, self._processes, self._heartbeats,
                   self._video_cmds, self._video_states, self._video_paths,
                   self._video_holds, self._signage_cmds, self._preview_boosts,
-                  self._ndi_connections, self._ndi_tallys):
+                  self._ndi_connections, self._ndi_tallys, self._rx_samples):
             d.pop(instance_id, None)
 
     def _spawn(self, instance_id: int, config: dict) -> mp.Process:
@@ -441,11 +506,46 @@ class WorkerManager:
     def get_receiver_endpoints(self, instance_id: int) -> Optional[dict]:
         """Socket-level receiver identification for a running worker: the
         peer IPs (and cached hostnames) of established TCP connections to
-        the worker's NDI listening ports. None when not running."""
+        the worker's NDI listening ports. None when not running.
+
+        Each receiver also gets a measured TCP throughput (mbps) and an
+        inferred transport: presence can't distinguish TCP media from
+        UDP/multicast media (the control connection is TCP either way), but
+        rate can — media over TCP moves megabits, a control-only connection
+        idles. Rates come from bytes_acked deltas between calls, so the
+        first call reports "measuring" and the next (the UI polls every 3s)
+        carries numbers; "unknown" means no `ss` on this platform."""
         proc = self._processes.get(instance_id)
         if proc is None or not proc.is_alive() or proc.pid is None:
             return None
-        return _receiver_endpoints_for_pid(proc.pid)
+        info = _receiver_endpoints_for_pid(proc.pid)
+        listen_ports = info.pop("_listen_ports", set())
+        if not info.get("supported"):
+            return info
+
+        flows = _tcp_flow_bytes(listen_ports)
+        now = time.monotonic()
+        rate_by_ip: Dict[str, float] = {}
+        if flows is not None:
+            prev = self._rx_samples.get(instance_id, {})
+            for key, acked in flows.items():
+                p = prev.get(key)
+                if p is not None and now > p[1] and acked >= p[0]:
+                    bps = (acked - p[0]) * 8 / (now - p[1])
+                    rate_by_ip[key[0]] = rate_by_ip.get(key[0], 0.0) + bps
+            self._rx_samples[instance_id] = {k: (v, now) for k, v in flows.items()}
+
+        for r in info["receivers"]:
+            if flows is None:
+                r["transport"], r["mbps"] = "unknown", None
+            elif r["ip"] in rate_by_ip:
+                mbps = rate_by_ip[r["ip"]] / 1e6
+                r["mbps"] = round(mbps, 2)
+                r["transport"] = ("tcp" if mbps >= RX_TCP_MEDIA_MBPS
+                                  else "udp-multicast")
+            else:
+                r["transport"], r["mbps"] = "measuring", None
+        return info
 
     def get_video_state(self, instance_id: int) -> Optional[str]:
         """Playback state of a running video worker, or None if not applicable."""
@@ -564,3 +664,29 @@ class WorkerManager:
 
 
 manager = WorkerManager()
+
+
+def install_shutdown_cleanup():
+    """Make sure no worker (or its Chromium tree) outlives the app.
+
+    - atexit: any normal interpreter exit (Ctrl+C, SystemExit, end of main)
+      stops every worker cleanly — graceful stop first, process-group kill
+      as the fallback, exactly like a manual Stop.
+    - SIGTERM: Python's default action kills the process WITHOUT running
+      atexit, which would orphan the workers. Converting it to SystemExit
+      makes cleanup run. systemd's cgroup kill already covers services;
+      this covers manual runs, NSSM, and other supervisors.
+
+    Called from run.py (the entrypoint). Safe to skip in embedders — they
+    own their process lifecycle; signal registration is main-thread-only
+    and silently skipped elsewhere."""
+    import atexit
+    atexit.register(manager.stop_all)
+
+    def _terminate(_signum, _frame):
+        raise SystemExit(0)
+
+    try:
+        signal.signal(signal.SIGTERM, _terminate)
+    except ValueError:
+        pass  # not the main thread — leave signal handling to the host

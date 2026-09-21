@@ -657,23 +657,34 @@ function renderRxModal() {
     body = h('div',{className:'form-hint'},
       data.running===false ? 'Instance not running.' : 'No receivers connected.');
   } else {
+    const transportLabel = r =>
+      r.transport==='tcp' ? '⇄ TCP'
+      : r.transport==='udp-multicast' ? '⇢ UDP / multicast'
+      : r.transport==='measuring' ? 'measuring…' : '—';
     body = h('table',{className:'rx-table'},
       h('thead',null,h('tr',null,
-        h('th',null,'Hostname'),h('th',null,'IP Address'),h('th',null,'Connections'))),
+        h('th',null,'Hostname'),h('th',null,'IP Address'),h('th',null,'Conns'),
+        h('th',null,'Transport'),h('th',null,'TCP Rate'))),
       h('tbody',null, ...data.receivers.map(r=>h('tr',null,
         h('td',null,r.hostname||'—'),
         h('td',{className:'mono'},r.ip),
         h('td',null,String(r.connections)),
+        h('td',{title:'Inferred from TCP throughput: media flowing over the TCP connection = TCP; a quiet control-only connection means the video travels as UDP or multicast'},
+          transportLabel(r)),
+        h('td',{className:'mono'},r.mbps!=null?`${r.mbps} Mbps`:''),
       ))),
     );
   }
   const sdkNote = data && data.sdk_receivers!=null ? ` The NDI SDK reports ${data.sdk_receivers}.` : '';
   return h('div',{className:'modal-overlay',onClick:e=>{if(e.target.className==='modal-overlay')close();}},
-    h('div',{className:'modal',style:{width:'480px'}},
+    h('div',{className:'modal',style:{width:'560px'}},
       h('h2',null,`Receivers — ${name}`),
       h('div',{className:'form-hint',style:{marginBottom:'10px'}},
         `Established NDI connections to this source, from the worker's sockets.${sdkNote} `+
-        `Hostnames come from reverse DNS and can take a moment to fill in. Auto-refreshes while open.`),
+        `Every receiver keeps a TCP control connection whatever the video transport; the Transport column `+
+        `tells them apart by measuring it — megabits on the socket = TCP media, near-idle = UDP or multicast. `+
+        `Hostnames come from reverse DNS and rates need two samples, so both can take a refresh to fill in. `+
+        `Auto-refreshes while open.`),
       body,
       h('div',{className:'modal-actions'},
         h('button',{onClick:refreshRxModal},'↻ Refresh'),

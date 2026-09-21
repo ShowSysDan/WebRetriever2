@@ -1469,6 +1469,28 @@ multi-user hardening, bigger UI.**
   the video transport. Hostname lookups are cached and run in the
   background so the API never blocks on slow DNS. Also available as
   `GET /api/instances/:ref/receivers` for automation.
+- **Process hygiene: nothing outlives the app.** Three cleanup guarantees
+  added: (1) workers self-terminate (clean teardown: browser closed, NDI
+  destroyed) within ~5s of their manager process vanishing — even after a
+  SIGKILL, where no parent cleanup can run; (2) the app registers
+  atexit + SIGTERM handlers that stop every worker and its Chromium tree
+  on any exit path (systemd's cgroup kill already covered services; this
+  covers manual runs, NSSM and other supervisors); (3) LibreOffice
+  conversions run in their own process group that is killed whole on
+  timeout — previously a timeout killed only the `soffice` wrapper,
+  orphaning `soffice.bin`, which holds the profile lock and breaks every
+  later conversion. All other helper tools (`ffmpeg`, `ffprobe`,
+  `pdftoppm`, `ss`) are single processes already reaped by their timeouts.
+- **Per-receiver transport + bitrate.** Presence alone can't tell TCP
+  media from UDP/multicast media (the control connection is TCP either
+  way), but throughput can: the server samples each connection's
+  `bytes_acked` (via `ss`, Linux) between polls and shows a live TCP rate
+  per receiver — megabits flowing over the socket means TCP transport, a
+  near-idle control connection means the video travels as UDP or
+  multicast. The receivers popup shows both; the API adds `transport`
+  (`tcp` / `udp-multicast` / `measuring` / `unknown`) and `mbps` per
+  receiver. Rates need two samples, so the first poll reports
+  `measuring`; platforms without `ss` report `unknown`.
 - **Full-page upload progress.** Uploads now open a full-screen overlay
   with large per-file progress bars (% sent, then a processing pulse while
   the server probes/converts, then done/error) and an m-of-n summary. A

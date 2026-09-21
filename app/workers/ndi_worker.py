@@ -123,6 +123,11 @@ SIGNAGE_STILL_CACHE_MB = int(os.getenv("SIGNAGE_STILL_CACHE_MB", "256"))
 PREVIEW_BOOST_WIDTH = 854      # px (16:9 → 854x480); clamped to output width
 PREVIEW_BOOST_INTERVAL = 0.25  # seconds between saves while boosted (~4fps)
 
+# How often a worker verifies its manager process is still alive. A worker
+# whose parent died (manager SIGKILLed, supervisor misconfigured) must not
+# keep streaming NDI as an orphan forever.
+ORPHAN_CHECK_INTERVAL = 5.0
+
 # NDI receiver stats: how often the send loops poll the SDK for the number
 # of connected receivers and the tally state, into shared values the API
 # reads. -1 in the connections value means "unknown" (dummy mode, or an
@@ -631,6 +636,8 @@ class NDIWorker:
         self._preview_dir = preview_dir
         self._preview_interval = preview_interval
         self._last_conn_poll = 0.0
+        self._parent_pid = None  # set by worker_entry in the child process
+        self._last_parent_check = 0.0
 
     # ------------------------------------------------------------------
     # Frame buffer management
@@ -831,6 +838,38 @@ class NDIWorker:
         """Write current monotonic time to shared value."""
         if self._heartbeat is not None:
             self._heartbeat.value = time.monotonic()
+        self._check_orphaned()
+
+    def _check_orphaned(self):
+        """Shut down if the manager process is gone.
+
+        A cleanly stopped manager tears workers down itself; this covers
+        the paths where it can't (SIGKILL, crash outside systemd's cgroup
+        kill). Piggybacks on the heartbeat call every loop iteration,
+        rate-limited to one real check per ORPHAN_CHECK_INTERVAL. On POSIX
+        an orphan is reparented, so getppid() changing is the signal; on
+        Windows the original ppid is sticky, so the parent is checked via
+        psutil instead. Setting the stop event exits the loops through
+        their normal finally blocks — browser closed, NDI destroyed."""
+        if self._parent_pid is None:
+            return
+        now = time.monotonic()
+        if now - self._last_parent_check < ORPHAN_CHECK_INTERVAL:
+            return
+        self._last_parent_check = now
+        if os.name == "posix":
+            orphaned = os.getppid() != self._parent_pid
+        else:
+            try:
+                import psutil
+                orphaned = not psutil.pid_exists(self._parent_pid)
+            except ImportError:
+                return
+        if orphaned:
+            logger.warning(
+                f"Manager process gone — worker shutting down: {self.ndi_name}"
+            )
+            self._stop_event.set()
 
     # ------------------------------------------------------------------
     # NDI receiver stats (connection count + tally)
@@ -1923,4 +1962,7 @@ def worker_entry(worker: NDIWorker):
             os.setpgrp()
         except OSError:
             pass
+    # Remember who spawned us: the heartbeat path checks this stays alive
+    # and shuts the worker down if the manager vanishes without cleanup
+    worker._parent_pid = os.getppid()
     worker.run()
