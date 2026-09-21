@@ -4,7 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WebRetriever V2</title>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<!-- Fonts load async with system fallbacks: on an isolated/air-gapped
+     network this never blocks or delays first render -->
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
   :root {
     --bg: #0a0b0f; --surface: #12141a; --surface2: #1a1d26;
@@ -106,6 +108,8 @@
   .media-card:hover { border-color:var(--border-hover); }
   .media-card.selected { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
   .media-card img, .media-card video { width:100%; height:120px; object-fit:cover; display:block; background:#000; }
+  .media-thumb-wrap { position:relative; background:#000; height:120px; }
+  .media-thumb-wrap .play-glyph { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:24px; color:rgba(255,255,255,.7); text-shadow:0 1px 8px rgba(0,0,0,.9); pointer-events:none; }
   .media-card-info { padding:8px 10px; }
   .media-card-name { font-size:12px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .media-card-meta { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; margin-top:2px; }
@@ -245,8 +249,13 @@ function tickServerClock() {
 }
 
 async function loadData(force=false) {
-  const [settings, instances, media] = await Promise.all([
+  // Signage playlist is fetched in the same parallel batch (using the
+  // current selection) instead of as a follow-up round trip
+  const [settings, instances, media, signagePre] = await Promise.all([
     api('/settings'), api('/instances'), api('/media'),
+    state.signageInstId
+      ? api(`/instances/${state.signageInstId}/signage`).catch(()=>null)
+      : Promise.resolve(null),
   ]);
   // Pull the server clock out of the settings payload BEFORE it feeds the
   // change signature — it changes every poll and must not force re-renders.
@@ -268,14 +277,20 @@ async function loadData(force=false) {
   if (!settingsEditing) {
     state.fpsInput = String(settings.output_fps);
   }
-  // Signage: keep a valid selection and load the selected playlist
+  // Signage: keep a valid selection; only refetch when the parallel fetch
+  // used a selection that turned out stale (deleted instance, first load)
   const sgInsts = instances.filter(i => i.source_type === 'signage');
+  const hadSel = state.signageInstId;
   if (!sgInsts.some(i => i.id === state.signageInstId)) {
     state.signageInstId = sgInsts.length ? sgInsts[0].id : null;
   }
   if (state.signageInstId) {
-    try { state.signage = await api(`/instances/${state.signageInstId}/signage`); }
-    catch(e) { state.signage = null; }
+    if (signagePre && hadSel === state.signageInstId) {
+      state.signage = signagePre;
+    } else {
+      try { state.signage = await api(`/instances/${state.signageInstId}/signage`); }
+      catch(e) { state.signage = null; }
+    }
   } else {
     state.signage = null;
   }
@@ -342,13 +357,38 @@ async function saveSettings() {
   state.settings = await api('/settings', { method:'PUT', body:{ output_fps:parseInt(state.fpsInput)||60 }});
   render();
 }
-async function startAll() { await api('/start-all',{method:'POST'}); await loadData(); }
-async function stopAll() { await api('/stop-all',{method:'POST'}); await loadData(); }
-async function startInstance(id) { await api(`/instances/${id}/start`,{method:'POST'}); await loadData(); }
-async function stopInstance(id) { await api(`/instances/${id}/stop`,{method:'POST'}); await loadData(); }
+// Frequently-clicked controls update the UI optimistically: flip local
+// state and re-render NOW, then let the API call + background reload
+// reconcile — no dead air between click and feedback.
+async function startAll() {
+  state.instances.forEach(i=>{ if(i.enabled) i.running=true; }); render();
+  await api('/start-all',{method:'POST'}); await loadData();
+}
+async function stopAll() {
+  state.instances.forEach(i=>{ i.running=false; }); render();
+  await api('/stop-all',{method:'POST'}); await loadData();
+}
+async function startInstance(id) {
+  const i = state.instances.find(x=>x.id===id);
+  if (i) { i.running = true; render(); }
+  await api(`/instances/${id}/start`,{method:'POST'}); await loadData();
+}
+async function stopInstance(id) {
+  const i = state.instances.find(x=>x.id===id);
+  if (i) { i.running = false; render(); }
+  await api(`/instances/${id}/stop`,{method:'POST'}); await loadData();
+}
 async function refreshInstance(id) { await api(`/instances/${id}/refresh`,{method:'POST'}); await loadData(); }
-async function deleteInstance(id) { if(!confirm('Delete this instance?'))return; await api(`/instances/${id}`,{method:'DELETE'}); await loadData(); }
-async function toggleEnabled(inst) { await api(`/instances/${inst.id}`,{method:'PUT',body:{enabled:!inst.enabled}}); await loadData(); }
+async function deleteInstance(id) {
+  if(!confirm('Delete this instance?'))return;
+  const idx = state.instances.findIndex(x=>x.id===id);
+  if (idx>=0) { state.instances.splice(idx,1); render(); }
+  await api(`/instances/${id}`,{method:'DELETE'}); await loadData();
+}
+async function toggleEnabled(inst) {
+  inst.enabled = !inst.enabled; render();
+  await api(`/instances/${inst.id}`,{method:'PUT',body:{enabled:inst.enabled}}); await loadData();
+}
 async function saveInstance(data, id) {
   if(id) await api(`/instances/${id}`,{method:'PUT',body:data});
   else await api('/instances',{method:'POST',body:data});
@@ -430,7 +470,11 @@ async function sgUploadFile(file) {
   await uploadWithProgress(`${API}/instances/${state.signageInstId}/signage/upload`, file);
   await loadData(true);
 }
-async function sgSkip() { await api(`/instances/${state.signageInstId}/signage/skip`,{method:'POST'}); }
+async function sgSkip() {
+  // Fire-and-forget; the 2s status poll shows the change — pull one forward
+  api(`/instances/${state.signageInstId}/signage/skip`,{method:'POST'})
+    .then(()=>setTimeout(updateSignageStatus, 500));
+}
 async function sgDeleteItem(id) {
   if(!confirm('Remove this item from the playlist?')) return;
   await api(`/signage/items/${id}`,{method:'DELETE'}); sgSel.delete(id); await loadData(true);
@@ -464,11 +508,13 @@ async function sgDeleteGroup(g) {
   await loadData(true);
 }
 async function sgToggleItem(item) {
-  await api(`/signage/items/${item.id}`,{method:'PUT',body:{enabled:!item.enabled}});
+  item.enabled = !item.enabled; render();
+  await api(`/signage/items/${item.id}`,{method:'PUT',body:{enabled:item.enabled}});
   await loadData(true);
 }
 async function sgToggleGroup(g) {
-  await api(`/signage/groups/${g.id}`,{method:'PUT',body:{enabled:!g.enabled}});
+  g.enabled = !g.enabled; render();
+  await api(`/signage/groups/${g.id}`,{method:'PUT',body:{enabled:g.enabled}});
   await loadData(true);
 }
 async function optimizeMedia(id) {
@@ -486,8 +532,16 @@ async function deleteMedia(id) {
   await api(`/media/${id}`,{method:'DELETE'});
   await loadData();
 }
-async function videoPlay(id) { await api(`/instances/${id}/video/play`,{method:'POST'}); await loadData(); }
-async function videoStop(id) { await api(`/instances/${id}/video/stop`,{method:'POST'}); await loadData(); }
+async function videoPlay(id) {
+  const i = state.instances.find(x=>x.id===id);
+  if (i) { i.running = true; i.video_state = 'playing'; render(); }
+  await api(`/instances/${id}/video/play`,{method:'POST'}); await loadData();
+}
+async function videoStop(id) {
+  const i = state.instances.find(x=>x.id===id);
+  if (i) { i.video_state = 'stopped'; render(); }
+  await api(`/instances/${id}/video/stop`,{method:'POST'}); await loadData();
+}
 
 // Live preview popup — one window per instance (reused on re-click). Sized
 // to the output aspect ratio plus room for the header/footer bars.
@@ -517,7 +571,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v1.5.0'),
+      h('span',{className:'version'},'v1.6.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
@@ -530,10 +584,47 @@ function renderHeader() {
   );
 }
 
+// --- Virtual pages (hash routes) -----------------------------------------
+// #/instances · #/signage · #/signage/<id> · #/media — refreshing or
+// bookmarking keeps the current tab (and signage selection); back/forward
+// navigate between tabs.
+
+function applyRoute() {
+  const parts = location.hash.replace(/^#\/?/, '').split('/');
+  if (['instances','signage','media'].includes(parts[0])) state.tab = parts[0];
+  if (parts[0]==='signage' && parts[1]) {
+    const id = parseInt(parts[1]);
+    if (id) state.signageInstId = id;
+  }
+}
+
+function routeHash() {
+  return state.tab==='signage' && state.signageInstId
+    ? `#/signage/${state.signageInstId}` : `#/${state.tab}`;
+}
+
+// Normalize the URL to current state without adding history entries
+// (replaceState doesn't fire hashchange, so no render loop)
+function syncRoute() {
+  const target = routeHash();
+  if (location.hash !== target) history.replaceState(null, '', target);
+}
+
+window.addEventListener('hashchange', () => {
+  const prevInst = state.signageInstId;
+  applyRoute();
+  if (state.tab==='signage' && state.signageInstId !== prevInst) {
+    sgSel.clear();
+    loadData(true);
+  } else {
+    render();
+  }
+});
+
 function renderTabs() {
   const tabs = [['instances','Instances'],['signage','Signage'],['media','Media Library']];
   return h('div',{className:'tabs'}, ...tabs.map(([id,label])=>
-    h('div',{className:`tab ${state.tab===id?'active':''}`,onClick:()=>{state.tab=id;render();}},label)
+    h('div',{className:`tab ${state.tab===id?'active':''}`,onClick:()=>{location.hash=`#/${id}`;}},label)
   ));
 }
 
@@ -651,9 +742,14 @@ function renderMediaCard(m) {
   const suLabels = [...new Set(su.map(u =>
     `${u.instance_name||('#'+u.instance_id)}${u.group_name?` › 🗂 ${u.group_name}`:''}`))];
   return h('div',{className:'media-card'},
-    m.is_video
-      ? h('video',{src:m.url+'#t=0.1',muted:'true',preload:'metadata',title:m.original_name})
-      : h('img',{src:m.url,alt:m.original_name,loading:'lazy'}),
+    // Server-generated poster JPEG — a plain <img> per card instead of a
+    // full <video> element (browsers cap concurrent media decoders, which
+    // made video thumbnails flaky in bigger libraries)
+    h('div',{className:'media-thumb-wrap'},
+      h('img',{src:m.thumb_url,alt:m.original_name,loading:'lazy',
+               onError:e=>{e.target.style.visibility='hidden';}}),
+      m.is_video ? h('div',{className:'play-glyph'},'▶') : null,
+    ),
     h('div',{className:'media-card-info'},
       h('div',{className:'media-card-name'},(m.is_video?'🎞 ':'')+m.original_name),
       h('div',{className:'media-card-meta'},
@@ -683,6 +779,12 @@ function renderMediaCard(m) {
       m.can_optimize
         ? h('button',{className:'sm',title:'Create a light playback copy sized for the outputs',
             onClick:(e)=>{e.stopPropagation();optimizeMedia(m.id);}},'⚡')
+        : null,
+      h('button',{className:'sm',title:'Download the original upload',
+        onClick:(e)=>{e.stopPropagation();window.open(m.download_url,'_blank');}},'⬇'),
+      m.download_optimized_url
+        ? h('button',{className:'sm',title:'Download the optimized playback copy',
+            onClick:(e)=>{e.stopPropagation();window.open(m.download_optimized_url,'_blank');}},'⬇⚡')
         : null,
       h('button',{className:'sm danger',onClick:(e)=>{e.stopPropagation();deleteMedia(m.id);}},'✕'),
     ),
@@ -828,8 +930,30 @@ async function sgApplyMove(drag, target) {
     const idx = p.order.findIndex(e=>e.type===target.type&&e.id===target.id);
     p.order.splice(idx<0?p.order.length:idx, 0, ...movedEntries);
   }
+  // Apply the new order locally first so the rows land instantly; the POST
+  // + background reload reconcile with the server
+  sgApplyLocalOrder(p); render();
   await api(`/instances/${state.signageInstId}/signage/reorder`,{method:'POST',body:p});
   await loadData(true);
+}
+
+function sgApplyLocalOrder(p) {
+  const orderIdx = {};
+  p.order.forEach((e,i)=>{ orderIdx[`${e.type}:${e.id}`] = i*10; });
+  state.signage.groups.forEach(g=>{
+    const k = `group:${g.id}`;
+    if (k in orderIdx) g.sort_order = orderIdx[k];
+  });
+  state.signage.items.forEach(it=>{
+    const k = `item:${it.id}`;
+    if (k in orderIdx) { it.group_id = null; it.sort_order = orderIdx[k]; }
+  });
+  for (const [gid, ids] of Object.entries(p.group_items)) {
+    ids.forEach((id,i)=>{
+      const it = state.signage.items.find(x=>x.id===id);
+      if (it) { it.group_id = parseInt(gid); it.sort_order = i*10; }
+    });
+  }
 }
 
 function sgMakeDraggable(row, drag, target) {
@@ -932,9 +1056,8 @@ function sgItemRow(item, group) {
   const row = h('div',{className:`sg-row ${group?'grouped':''} ${sgSel.has(item.id)?'sel':''} ${status.cls}`},
     h('div',{className:'drag-handle',title:'Drag to reorder'},'⠿'),
     cb,
-    m.is_video
-      ? h('video',{className:'sg-thumb',src:(m.url||'')+'#t=0.1',muted:'true',preload:'metadata'})
-      : h('img',{className:'sg-thumb',src:m.url||'',loading:'lazy',alt:''}),
+    h('img',{className:'sg-thumb',src:m.thumb_url||'',loading:'lazy',alt:'',
+             onError:e=>{e.target.style.visibility='hidden';}}),
     h('div',null,
       h('div',{className:'sg-name'},(m.is_video?'🎞 ':'🖼 ')+(m.original_name||'(deleted)')),
       h('div',{className:'sg-sub'},`#${item.id}${m.is_video&&m.duration_s?` · file ${Math.round(m.duration_s)}s`:''}`),
@@ -1038,7 +1161,7 @@ function renderSignagePage() {
   const sel = h('select',{style:{width:'260px',fontFamily:"'JetBrains Mono',monospace",background:'var(--bg)',border:'1px solid var(--border)',borderRadius:'8px',color:'var(--text)',padding:'6px 10px',fontSize:'13px'}});
   sgInsts.forEach(i=>sel.appendChild(h('option',{value:String(i.id)},`#${i.id} ${i.name}`)));
   if (state.signageInstId) sel.value = String(state.signageInstId);
-  sel.addEventListener('change',()=>{ state.signageInstId = parseInt(sel.value); sgSel.clear(); loadData(true); });
+  sel.addEventListener('change',()=>{ location.hash = `#/signage/${parseInt(sel.value)}`; });
 
   main.appendChild(h('div',{className:'section-header'},
     h('div',{style:{display:'flex',alignItems:'center',gap:'10px'}},
@@ -1156,9 +1279,7 @@ function renderSignageModal() {
     const picked = new Set();
     const grid = h('div',{className:'media-picker',style:{maxHeight:'320px'}});
     state.media.forEach(m=>{
-      const thumb = m.is_video
-        ? h('video',{src:m.url+'#t=0.1',muted:'true',preload:'metadata',title:m.original_name})
-        : h('img',{src:m.url,alt:m.original_name,title:m.original_name});
+      const thumb = h('img',{src:m.thumb_url,alt:m.original_name,title:m.original_name,loading:'lazy'});
       const cell = h('div',{className:'media-picker-item',onClick:()=>{
         if(picked.has(m.id)){picked.delete(m.id);cell.classList.remove('selected');}
         else {picked.add(m.id);cell.classList.add('selected');}
@@ -1300,9 +1421,17 @@ function renderSignageModal() {
 
   const title = isGroup ? `Group: ${obj.name}` :
     `Item: ${(obj.media_file&&obj.media_file.original_name)||('#'+obj.id)}`;
+  const mf = !isGroup && obj.media_file;
+  const downloadRow = mf ? h('div',{className:'form-group',style:{display:'flex',gap:'8px',alignItems:'center'}},
+    h('button',{className:'sm',onClick:()=>window.open(mf.download_url,'_blank')},'⬇ Download original'),
+    mf.download_optimized_url
+      ? h('button',{className:'sm',onClick:()=>window.open(mf.download_optimized_url,'_blank')},'⬇⚡ Optimized copy')
+      : null,
+  ) : null;
   return h('div',{className:'modal-overlay',onClick:e=>{if(e.target.className==='modal-overlay')close();}},
     h('div',{className:'modal'},
       h('h2',null,title),
+      downloadRow,
       isGroup ? h('div',{className:'form-group'},h('label',null,'Group Name'),nameInput) : null,
       h('div',{className:'form-row'},
         h('div',{className:'form-group'},h('label',null,'Duration (seconds)'),durInput,
@@ -1390,9 +1519,7 @@ function renderModal() {
       grid.appendChild(noneItem);
     }
     items.forEach(m=>{
-      const thumb = m.is_video
-        ? h('video',{src:m.url+'#t=0.1',title:m.original_name,muted:'true',preload:'metadata'})
-        : h('img',{src:m.url,alt:m.original_name,title:m.original_name});
+      const thumb = h('img',{src:m.thumb_url,alt:m.original_name,title:m.original_name,loading:'lazy'});
       const item = h('div',{className:`media-picker-item ${selectedMediaId===m.id?'selected':''}`,onClick:()=>{
         selectedMediaId=m.id;
         grid.querySelectorAll('.media-picker-item').forEach(el=>el.classList.remove('selected'));
@@ -1593,11 +1720,13 @@ function render() {
   if(modal) root.appendChild(modal);
   const sgModal = renderSignageModal();
   if(sgModal) root.appendChild(sgModal);
+  syncRoute();
 }
 
 // A modal open or a drag in progress must not be clobbered by a poll re-render
 const uiBusy = () => state.modal || state.sgModal || sgDrag;
 
+applyRoute();  // restore tab + signage selection from the URL before first load
 loadData();
 setInterval(() => { if (!uiBusy() && !document.hidden) loadData(); }, 5000);
 setInterval(updatePreviews, 2000);

@@ -979,6 +979,9 @@ def _create_media_record(filepath, unique_name, original_name, ext, mime_type=No
             pass
         return None, (jsonify({"error": "Failed to save media record"}), 500)
     log_event("MEDIA_UPLOADED", f"id={media.id} name='{original_name}' size={file_size}")
+    # Best-effort eager poster thumbnail (the /thumb endpoint regenerates on
+    # miss, so a failure here is invisible)
+    _generate_thumb(media)
     return media, None
 
 
@@ -1062,6 +1065,98 @@ def get_media(media_id):
     return jsonify(media.to_dict())
 
 
+def _thumb_path(media_id):
+    return os.path.join(current_app.config["THUMB_FOLDER"], f"{media_id}.jpg")
+
+
+def _generate_thumb(media):
+    """Create the poster JPEG for a media file. Returns the path or None.
+
+    Videos: one decoded frame (~0.5s in) via OpenCV — the browser never has
+    to load and seek a full video element just to draw a grid card, which is
+    what made library thumbnails flaky. Images: a plain downscale."""
+    thumb_w = current_app.config.get("THUMB_WIDTH", 320)
+    src = _media_path(media)  # playback copy when available (faster to open)
+    dest = _thumb_path(media.id)
+    try:
+        if media.is_video:
+            import cv2
+            cap = cv2.VideoCapture(src)
+            if not cap.isOpened():
+                cap.release()
+                return None
+            # A frame slightly in beats a black/blank first frame
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            cap.set(cv2.CAP_PROP_POS_FRAMES, min(int(fps * 0.5), 30))
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, frame = cap.read()
+            cap.release()
+            if not ok or frame is None:
+                return None
+            h, w = frame.shape[:2]
+            tw = min(thumb_w, w)
+            th = max(1, int(h * tw / w))
+            frame = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
+            # Atomic write so a concurrent request never sees a partial file
+            tmp = dest + ".part.jpg"
+            if not cv2.imwrite(tmp, frame, [cv2.IMWRITE_JPEG_QUALITY, 80]):
+                return None
+            os.replace(tmp, dest)
+        else:
+            with PILImage.open(src) as img:
+                img = img.convert("RGB")
+                img.thumbnail((thumb_w, thumb_w * 4), PILImage.Resampling.LANCZOS)
+                tmp = dest + ".part.jpg"
+                img.save(tmp, "JPEG", quality=80)
+            os.replace(tmp, dest)
+        return dest
+    except Exception as e:
+        logger.debug(f"Thumbnail generation failed for media {media.id}: {e}")
+        try:
+            os.remove(dest + ".part.jpg")
+        except OSError:
+            pass
+        return None
+
+
+@api.route("/media/<int:media_id>/thumb", methods=["GET"])
+def media_thumb(media_id):
+    """Poster thumbnail (JPEG). Generated on first request and cached on
+    disk — media content never changes for an id, so clients may cache."""
+    media = MediaFile.query.get_or_404(media_id)
+    path = _thumb_path(media.id)
+    if not os.path.exists(path):
+        path = _generate_thumb(media)
+    if not path or not os.path.exists(path):
+        return "", 204
+    resp = send_file(path, mimetype="image/jpeg")
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
+
+
+@api.route("/media/<int:media_id>/download", methods=["GET"])
+def download_media(media_id):
+    """Download the file as an attachment with its human filename.
+    Default is the ORIGINAL upload; ?optimized=1 downloads the transcoded
+    playback copy (when one exists)."""
+    media = MediaFile.query.get_or_404(media_id)
+    upload_dir = current_app.config["UPLOAD_FOLDER"]
+    if request.args.get("optimized"):
+        if not (media.optimized_filename and media.optimize_status == "done"):
+            return jsonify({"error": "No optimized copy for this file"}), 404
+        stem = media.original_name.rsplit(".", 1)[0]
+        return send_from_directory(
+            upload_dir, media.optimized_filename, as_attachment=True,
+            download_name=f"{stem} (optimized).mp4",
+        )
+    return send_from_directory(
+        upload_dir, media.filename, as_attachment=True,
+        download_name=media.original_name,
+    )
+
+
 @api.route("/media/<int:media_id>/file", methods=["GET"])
 def serve_media_file(media_id):
     """Serve the media file. For optimized videos this is the playback copy
@@ -1127,6 +1222,10 @@ def delete_media(media_id):
                 os.remove(filepath)
         except OSError as e:
             logger.warning(f"Failed to delete media file {filepath}: {e}")
+    try:
+        os.remove(_thumb_path(media_id))
+    except OSError:
+        pass
 
     log_event("MEDIA_DELETED", f"id={media_id} name='{original_name}'")
     return jsonify({"message": "Deleted", "unlinked_instances": [i.id for i in instances]})
