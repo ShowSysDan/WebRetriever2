@@ -1400,6 +1400,26 @@ Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
 
+#### 1.6.2
+
+- Media-type indicators are now plain-text chips instead of emoji: `VID` /
+  `IMG` badges in front of file names (library cards and playlist rows),
+  `GRP` on group rows, `Deck:` labels for converted presentations,
+  `Library upload` / `Signage upload` origin lines, and `n views` for
+  impressions. Text can't fall through to a wrong font, so the stray
+  CJK-looking glyphs some machines showed are gone for good.
+
+#### 1.6.1
+
+- **Fixed icons rendering as CJK-looking glyphs on some machines.** The
+  media/deck/group icons used pictographs from a Unicode block without
+  default emoji presentation (🖼 U+1F5BC, 🖽 U+1F5BD, 🗂 U+1F5C2, 🎞
+  U+1F39E); browsers missing a text glyph for those fall back to whatever
+  font covers the codepoint — often a CJK font — producing what looks like
+  a Chinese character before file names. Replaced with universally
+  supported emoji (🎬 for video, 📑 for decks) and forced emoji
+  presentation (U+FE0F) on the rest.
+
 #### 1.6.0
 
 **Reliable thumbnails + media downloads.**
