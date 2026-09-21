@@ -1469,6 +1469,16 @@ multi-user hardening, bigger UI.**
   the video transport. Hostname lookups are cached and run in the
   background so the API never blocks on slow DNS. Also available as
   `GET /api/instances/:ref/receivers` for automation.
+- **Per-receiver transport + bitrate.** Presence alone can't tell TCP
+  media from UDP/multicast media (the control connection is TCP either
+  way), but throughput can: the server samples each connection's
+  `bytes_acked` (via `ss`, Linux) between polls and shows a live TCP rate
+  per receiver — megabits flowing over the socket means TCP transport, a
+  near-idle control connection means the video travels as UDP or
+  multicast. The receivers popup shows both; the API adds `transport`
+  (`tcp` / `udp-multicast` / `measuring` / `unknown`) and `mbps` per
+  receiver. Rates need two samples, so the first poll reports
+  `measuring`; platforms without `ss` report `unknown`.
 - **Full-page upload progress.** Uploads now open a full-screen overlay
   with large per-file progress bars (% sent, then a processing pulse while
   the server probes/converts, then done/error) and an m-of-n summary. A
