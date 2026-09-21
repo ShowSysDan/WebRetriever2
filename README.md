@@ -1400,6 +1400,32 @@ Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
 
+#### 1.7.0
+
+**Signage preloading, visible upload progress, bigger UI text.**
+
+- **Signage items are preloaded into RAM before they go on air.** The
+  worker builds the upcoming item's layer on a background thread ~6s before
+  its transition: stills are fully decoded into a memory canvas, videos are
+  opened (first frame decoded) with the file read ahead into the OS page
+  cache (`posix_fadvise WILLNEED`). Transitions no longer touch the disk
+  inside the send loop, so going on air can't drop frames on slow storage
+  or large images. If the schedule changes between preload and transition,
+  the worker falls back to the previous inline load.
+- **Full-page upload progress.** Uploads now open a full-screen overlay
+  with large per-file progress bars (% sent, then a processing pulse while
+  the server probes/converts, then done/error) and an m-of-n summary. A
+  *Hide* button drops it to the previous bottom-right mini panel; uploads
+  continue either way.
+- **On-air highlight in the Signage playlist.** The now-playing preview
+  image is gone from the Signage tab; instead the item currently on air is
+  highlighted green in the playlist with an `ON AIR` badge (its group
+  header too), updated live from the status poll. The slimmer live bar
+  keeps Now Playing / countdown / Up Next and the transport buttons.
+- **Larger UI text across the board** — instance FPS/refresh/resolution
+  readouts, playlist rows, media cards, filter chips, tabs, section titles
+  and form hints all stepped up for readability on production monitors.
+
 #### 1.6.2
 
 - Media-type indicators are now plain-text chips instead of emoji: `VID` /
@@ -1606,9 +1632,12 @@ scheduled signage player, plus a friendlier upload experience.
   counts) that the API folds into the database.
 - **Live control** — new **Signage** tab with drag-to-reorder playlist,
   multi-select group/delete, per-item/group settings modals, a live
-  now-playing panel (preview, countdown, up-next) and a **Skip Next**
-  button. Skip and status are also plain-URL show-control endpoints
-  (`/api/instances/<id-or-name>/signage/skip`, `.../signage/status`).
+  now-playing bar (name, countdown, up-next) and a **Skip Next** button.
+  The item currently on air is highlighted green in the playlist (with an
+  `ON AIR` badge, also on its group header); the popup preview window gives
+  the visual check. Skip and status are also plain-URL show-control
+  endpoints (`/api/instances/<id-or-name>/signage/skip`,
+  `.../signage/status`).
 - **Hot playlist reload** — every playlist mutation (add, edit, reorder,
   schedule change, media delete) is pushed to a running worker via a shared
   command channel and picked up within a second — no restart, the NDI

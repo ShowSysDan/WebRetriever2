@@ -104,6 +104,12 @@ VIDEO_PATH_MAX = 4096
 SIGNAGE_CMD_SKIP = 1    # start transitioning to the next item now
 SIGNAGE_CMD_RELOAD = 2  # re-read the playlist JSON from disk
 
+# Build the NEXT signage item's layer this many seconds before its
+# transition, on a background thread. Stills are fully decoded into a RAM
+# canvas and videos get their file opened (first frame decoded, page cache
+# warmed), so going on air never waits on the disk inside the send loop.
+SIGNAGE_PRELOAD_LEAD = 6.0
+
 # Preview boost: while a live preview popup is streaming, the API keeps a
 # shared monotonic deadline refreshed; until it passes, previews are saved
 # larger and faster than the list-view thumbnails
@@ -126,6 +132,24 @@ def _load_signage_playlist(path):
     except Exception as e:
         logger.warning(f"Cannot read signage playlist {path}: {e}")
         return []
+
+
+def _warm_file_cache(path):
+    """Hint the kernel to read a file into the page cache ahead of use.
+
+    POSIX_FADV_WILLNEED starts asynchronous readahead — by the time the
+    decoder wants the bytes they are (mostly) already in RAM, which turns
+    the first seconds of playback from disk reads into memory copies. Purely
+    advisory: any failure is ignored and playback just reads from disk."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            if hasattr(os, "posix_fadvise"):
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_WILLNEED)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def _signage_item_eligible(item, now=None):
@@ -1191,6 +1215,11 @@ class NDIWorker:
             file actually ends, even if metadata said otherwise; with an
             explicit duration longer than the file it holds its last frame
             until the slot ends.
+          - The upcoming item is preloaded on a background thread a few
+            seconds before its transition (SIGNAGE_PRELOAD_LEAD): stills are
+            decoded into a RAM canvas, videos are opened with their first
+            frame decoded and the file read into the OS page cache — so the
+            transition itself never blocks the send loop on disk I/O.
         """
         import cv2
         from datetime import datetime
@@ -1270,16 +1299,82 @@ class NDIWorker:
                     return j, playlist[j]
             return -1, None
 
+        # --- Preload: build the upcoming item's layer off the send loop ---
+        # Stills decode straight into a RAM canvas; videos open their file
+        # (first frame decoded) with the page cache warmed. The layer is
+        # handed over at transition time only if the scheduled next item is
+        # still the one that was preloaded — otherwise it's rebuilt inline
+        # exactly as before.
+        preload_lock = threading.Lock()
+        preload_layer = None
+        preload_id = None
+        preload_busy = False
+
+        def _preload_worker(item):
+            nonlocal preload_layer, preload_id, preload_busy
+            layer = None
+            try:
+                if item.get("kind") == "video":
+                    _warm_file_cache(item.get("path", ""))
+                layer = _SignageLayer(item, self.width, self.height)
+            except Exception:
+                layer = None
+            with preload_lock:
+                if layer is not None and layer.ok:
+                    if preload_layer is not None:
+                        preload_layer.release()
+                    preload_layer = layer
+                    preload_id = item.get("id")
+                elif layer is not None:
+                    layer.release()
+                preload_busy = False
+
+        def preload_next():
+            """Kick off a background build of the next eligible item's layer."""
+            nonlocal preload_busy
+            _, item = pick_next(cur_index)
+            if item is None:
+                return
+            with preload_lock:
+                if preload_busy or (preload_layer is not None
+                                    and preload_id == item.get("id")):
+                    return
+                preload_busy = True
+            threading.Thread(target=_preload_worker, args=(item,),
+                             daemon=True, name="signage-preload").start()
+
+        def take_preloaded(item):
+            """Pop the preloaded layer if it matches `item`, else None."""
+            nonlocal preload_layer, preload_id
+            with preload_lock:
+                if (preload_layer is not None and item is not None
+                        and preload_id == item.get("id")):
+                    layer = preload_layer
+                    preload_layer = None
+                    preload_id = None
+                    return layer
+            return None
+
+        def drop_preloaded():
+            """Release a stale preloaded layer (playlist edited, shutdown)."""
+            nonlocal preload_layer, preload_id
+            with preload_lock:
+                if preload_layer is not None:
+                    preload_layer.release()
+                preload_layer = None
+                preload_id = None
+
         def begin_transition(now):
             """Fade from `current` to the next eligible item (or to black)."""
             nonlocal current, cur_index, cur_start, cur_fade, fade_start_t
             nonlocal fading_from, fade_t0, fade_dur, buffer_synced, frame_dirty
 
             j, item = pick_next(cur_index)
-            layer = None
+            layer = take_preloaded(item)
             attempts = 0
             while item is not None and attempts < len(playlist):
-                layer = _SignageLayer(item, self.width, self.height)
+                if layer is None:
+                    layer = _SignageLayer(item, self.width, self.height)
                 if layer.ok:
                     break
                 logger.warning(
@@ -1339,6 +1434,7 @@ class NDIWorker:
                 cmds = self._poll_signage_cmd()
                 if cmds & SIGNAGE_CMD_RELOAD:
                     playlist = _load_signage_playlist(playlist_path) if playlist_path else []
+                    drop_preloaded()  # baked-in timing/schedule may have changed
                     if current.item is not None:
                         cur_id = current.item.get("id")
                         cur_index = next(
@@ -1372,6 +1468,11 @@ class NDIWorker:
                         and not (current.item or {}).get("duration_explicit")
                         and now < fade_start_t):
                     fade_start_t = now
+
+                # --- Preload the upcoming item ahead of its transition ---
+                if (fading_from is None and current.item is not None
+                        and now >= fade_start_t - SIGNAGE_PRELOAD_LEAD):
+                    preload_next()
 
                 # --- Start next transition / leave idle ---
                 if fading_from is None:
@@ -1432,6 +1533,7 @@ class NDIWorker:
                 if sleep_time > 0.001:
                     time.sleep(sleep_time)
         finally:
+            drop_preloaded()
             if fading_from is not None:
                 fading_from.release()
             current.release()
