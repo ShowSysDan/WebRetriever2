@@ -92,6 +92,156 @@ VIDEO_HOLD_LAST = 2
 # Size of the shared char buffer carrying file paths for load commands
 VIDEO_PATH_MAX = 4096
 
+# Signage playback commands — bit flags in a shared mp.Value so a skip and a
+# reload landing in the same poll window can't clobber each other
+SIGNAGE_CMD_SKIP = 1    # start transitioning to the next item now
+SIGNAGE_CMD_RELOAD = 2  # re-read the playlist JSON from disk
+
+# Preview boost: while a live preview popup is streaming, the API keeps a
+# shared monotonic deadline refreshed; until it passes, previews are saved
+# larger and faster than the list-view thumbnails
+PREVIEW_BOOST_WIDTH = 854      # px (16:9 → 854x480); clamped to output width
+PREVIEW_BOOST_INTERVAL = 0.25  # seconds between saves while boosted (~4fps)
+
+
+def _load_signage_playlist(path):
+    """Read the playlist JSON the API writes for this instance.
+
+    Returns a list of item dicts (possibly empty). The file is written
+    atomically (temp + rename) so a partial read can't happen; any other
+    failure just means an empty playlist until the next reload."""
+    import json
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        items = data.get("items", [])
+        return items if isinstance(items, list) else []
+    except Exception as e:
+        logger.warning(f"Cannot read signage playlist {path}: {e}")
+        return []
+
+
+def _signage_item_eligible(item, now=None):
+    """Whether an item may play right now, per its baked-in schedule.
+
+    Datetimes are naive ISO strings interpreted in the server's local
+    timezone (signage schedules mean wall-clock time on the box). The daily
+    window compares "HH:MM" strings; start > end wraps past midnight."""
+    from datetime import datetime
+    if item.get("_broken"):
+        return False  # failed to open/decode earlier this run — don't retry every cycle
+    if not item.get("enabled", True):
+        return False
+    if now is None:
+        now = datetime.now()
+    start = item.get("start_at")
+    if start:
+        try:
+            if now < datetime.fromisoformat(start):
+                return False
+        except ValueError:
+            pass
+    end = item.get("end_at")
+    if end:
+        try:
+            if now >= datetime.fromisoformat(end):
+                return False
+        except ValueError:
+            pass
+    ds, de = item.get("daily_start"), item.get("daily_end")
+    if ds and de:
+        cur = now.strftime("%H:%M")
+        if ds <= de:
+            if not (ds <= cur < de):
+                return False
+        else:  # overnight window, e.g. 22:00–06:00
+            if not (cur >= ds or cur < de):
+                return False
+    return True
+
+
+class _SignageLayer:
+    """One playlist entry rendered onto its own (h, w, 3) BGR canvas.
+
+    The signage loop keeps up to two of these alive at once — the item on
+    air and, during a crossfade, the outgoing one — and alpha-blends their
+    canvases into the shared BGRX frame buffer. item=None is the black idle
+    layer (canvas stays zeroed) shown when nothing is scheduled.
+    """
+
+    def __init__(self, item, out_w, out_h):
+        self.item = item or None
+        self.buf = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        self.ok = True
+        self.done = False      # video reached end-of-file
+        self.advanced = False  # frame() decoded a new video frame this call
+        self._vf = None
+        self._next_frame_time = None
+        if item is None:
+            return
+
+        kind = item.get("kind")
+        path = item.get("path", "")
+        if kind == "video":
+            self._vf = _VideoFile(path, out_w, out_h)
+            first = self._vf.read() if self._vf.ok else None
+            if first is None:
+                self._vf.release()
+                self._vf = None
+                self.ok = False
+                return
+            # _VideoFile.blit writes [..., :3], which selects all three
+            # channels of this BGR canvas — same letterbox math as the
+            # video source's BGRX buffer
+            self._vf.blit(first, self.buf)
+        else:  # image
+            import cv2
+            img = cv2.imread(path, cv2.IMREAD_COLOR)
+            if img is None:
+                self.ok = False
+                return
+            src_h, src_w = img.shape[:2]
+            scale = min(out_w / src_w, out_h / src_h)
+            fit_w = max(1, int(round(src_w * scale)))
+            fit_h = max(1, int(round(src_h * scale)))
+            if (fit_w, fit_h) != (src_w, src_h):
+                img = cv2.resize(img, (fit_w, fit_h), interpolation=cv2.INTER_AREA)
+            off_x = (out_w - fit_w) // 2
+            off_y = (out_h - fit_h) // 2
+            self.buf[off_y:off_y + fit_h, off_x:off_x + fit_w] = img
+
+    def start(self, now):
+        """Begin playback clock (videos advance from their first frame)."""
+        if self._vf is not None:
+            self._next_frame_time = now + self._vf.frame_interval
+
+    def frame(self, now):
+        """Current canvas, advancing video playback at the file's native FPS."""
+        self.advanced = False
+        if self._vf is not None and not self.done and self._next_frame_time is not None:
+            latest = None
+            decode_budget = 8
+            while now >= self._next_frame_time and decode_budget > 0:
+                decode_budget -= 1
+                f = self._vf.read()
+                if f is None:
+                    self.done = True
+                    break
+                latest = f
+                self._next_frame_time += self._vf.frame_interval
+            if latest is not None:
+                self._vf.blit(latest, self.buf)
+                self.advanced = True
+            if not self.done and self._next_frame_time < now:
+                # Fell behind (slow decode) — resync instead of spiraling
+                self._next_frame_time = now + self._vf.frame_interval
+        return self.buf
+
+    def release(self):
+        if self._vf is not None:
+            self._vf.release()
+            self._vf = None
+
 
 class WebcamGrabber(threading.Thread):
     """Reads frames from a V4L2 device on a background thread.
@@ -308,11 +458,14 @@ class NDIWorker:
         browser_recycle_hours: float = DEFAULT_RECYCLE_HOURS,
         text_settings: Optional[dict] = None,
         video_settings: Optional[dict] = None,
+        signage_settings: Optional[dict] = None,
         heartbeat: Optional[mp.Value] = None,
         video_cmd: Optional[mp.Value] = None,
         video_state: Optional[mp.Value] = None,
         video_path: Optional[mp.Array] = None,
         video_hold: Optional[mp.Value] = None,
+        signage_cmd: Optional[mp.Value] = None,
+        preview_boost: Optional[mp.Value] = None,
         preview_dir: Optional[str] = None,
         preview_interval: float = 2.0,
     ):
@@ -328,12 +481,15 @@ class NDIWorker:
         self.browser_recycle_hours = browser_recycle_hours
         self.text_settings = text_settings or {}
         self.video_settings = video_settings or {}
+        self.signage_settings = signage_settings or {}
         self._stop_event = mp.Event()
         self._heartbeat = heartbeat  # shared with parent process
         self._video_cmd = video_cmd  # play/stop/load commands from the API process
         self._video_state = video_state  # playback state reported to the API process
         self._video_path = video_path  # file path payload for load commands
         self._video_hold = video_hold  # per-command hold-frame override
+        self._signage_cmd = signage_cmd  # skip/reload bit flags from the API process
+        self._preview_boost = preview_boost  # monotonic deadline: HD previews until then
         self._preview_dir = preview_dir
         self._preview_interval = preview_interval
 
@@ -557,8 +713,19 @@ class NDIWorker:
     # Preview thumbnail
     # ------------------------------------------------------------------
 
-    def _save_preview(self, frame_buffer: np.ndarray):
-        """Save a small JPEG preview from the current frame buffer."""
+    def _preview_params(self, now: float):
+        """(save_interval, hd) — while a preview popup is streaming, the API
+        keeps the shared boost deadline ahead of now and previews are saved
+        larger and faster; otherwise the cheap list-view thumbnail cadence."""
+        if self._preview_boost is not None and now < self._preview_boost.value:
+            return PREVIEW_BOOST_INTERVAL, True
+        return self._preview_interval, False
+
+    def _save_preview(self, frame_buffer: np.ndarray, hd: bool = False):
+        """Save a JPEG preview from the current frame buffer.
+
+        hd=True writes a larger frame for the live preview popup stream;
+        the default is a small thumbnail for the instance list."""
         if not self._preview_dir:
             return
         try:
@@ -566,16 +733,16 @@ class NDIWorker:
             # materializes on resize/save so the zero-copy view is safe.
             rgb_view = frame_buffer[:, :, 2::-1]
             img = Image.fromarray(rgb_view, "RGB")
-            # Downscale to 320px wide, maintain aspect ratio
-            thumb_w = 320
-            thumb_h = int(self.height * (thumb_w / self.width))
+            # Downscale, maintaining aspect ratio
+            thumb_w = min(PREVIEW_BOOST_WIDTH, self.width) if hd else 320
+            thumb_h = max(1, int(self.height * (thumb_w / self.width)))
             img = img.resize((thumb_w, thumb_h), Image.Resampling.LANCZOS)
             # Atomic write: temp file then replace
             dest = os.path.join(self._preview_dir, f"{self.instance_id}.jpg")
             fd, tmp = tempfile.mkstemp(suffix=".jpg", dir=self._preview_dir)
             try:
                 with os.fdopen(fd, "wb") as f:
-                    img.save(f, "JPEG", quality=60)
+                    img.save(f, "JPEG", quality=70 if hd else 60)
                 os.replace(tmp, dest)
             except Exception:
                 try:
@@ -647,8 +814,9 @@ class NDIWorker:
                         frame_buffer[:, :, :3] = bgr
                         frame_ready = True
                         last_capture_time = frame_start
-                        if frame_start - last_preview_time >= self._preview_interval:
-                            self._save_preview(frame_buffer)
+                        pv_interval, pv_hd = self._preview_params(frame_start)
+                        if frame_start - last_preview_time >= pv_interval:
+                            self._save_preview(frame_buffer, hd=pv_hd)
                             last_preview_time = frame_start
 
                 # --- Send to NDI (duplicates last frame up to output_fps) ---
@@ -811,6 +979,7 @@ class NDIWorker:
 
         next_frame_time = time.monotonic()
         last_preview_time = 0.0
+        last_pv_hd = False
 
         try:
             while not self._stop_event.is_set():
@@ -893,10 +1062,14 @@ class NDIWorker:
 
                 # Only write a preview when the frame actually changed —
                 # while holding, rewriting an identical JPEG every 2s just
-                # wears the disk for nothing
-                if frame_dirty and now - last_preview_time >= self._preview_interval:
-                    self._save_preview(frame_buffer)
+                # wears the disk for nothing. A boost-state flip forces one
+                # write so a popup opened on a held frame still upgrades to HD.
+                pv_interval, pv_hd = self._preview_params(now)
+                if ((frame_dirty or pv_hd != last_pv_hd)
+                        and now - last_preview_time >= pv_interval):
+                    self._save_preview(frame_buffer, hd=pv_hd)
                     last_preview_time = now
+                    last_pv_hd = pv_hd
                     frame_dirty = False
 
                 self._update_heartbeat()
@@ -918,6 +1091,323 @@ class NDIWorker:
         except ImportError:
             logger.error(
                 "opencv-python-headless not installed — video source "
+                f"'{self.ndi_name}' cannot run. Install it and restart."
+            )
+            self._idle_until_stopped()
+        except Exception:
+            logger.exception(f"Worker crashed: {self.ndi_name}")
+
+    # ------------------------------------------------------------------
+    # Signage playlist loop
+    # ------------------------------------------------------------------
+
+    def _poll_signage_cmd(self) -> int:
+        """Read and clear pending signage command bits (skip / reload)."""
+        if self._signage_cmd is None:
+            return 0
+        with self._signage_cmd.get_lock():
+            cmds = self._signage_cmd.value
+            self._signage_cmd.value = 0
+        return cmds
+
+    def _write_signage_status(self, path, current_item, remaining_s, next_item):
+        """Atomically write the now-playing status JSON the API serves."""
+        if not path:
+            return
+        import json
+
+        def brief(it):
+            if not it:
+                return None
+            return {"id": it.get("id"), "name": it.get("name"),
+                    "media_id": it.get("media_id"), "kind": it.get("kind")}
+
+        try:
+            state_dir = os.path.dirname(path)
+            fd, tmp = tempfile.mkstemp(suffix=".json", dir=state_dir)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "current": brief(current_item),
+                        "remaining_s": round(max(0.0, remaining_s), 1) if current_item else None,
+                        "next": brief(next_item),
+                        "ts": time.time(),
+                    }, f)
+                os.replace(tmp, path)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            logger.debug(f"Signage status write failed for {self.ndi_name}: {e}")
+
+    def _run_signage_loop(self, frame_buffer, ndi=None, ndi_send=None, video_frame=None):
+        """Play a scheduled playlist of stills and videos with crossfades.
+
+        Pass ndi=None to run in dummy mode (preview thumbnails only).
+
+        Playback model:
+          - The playlist JSON (written by the API, schedule/timing already
+            resolved per item) defines play order. Items outside their
+            schedule window are skipped; when nothing is eligible the output
+            fades to black and re-checks every 0.5s.
+          - Each item is on air for its `duration` seconds measured from its
+            first visible frame. The crossfade into the NEXT item starts
+            `crossfade` seconds before that slot ends — so for a video the
+            transition begins before the file ends, exactly at
+            (duration - crossfade). crossfade=0 is a hard cut.
+          - The incoming layer starts playing (videos advance) as soon as
+            the fade begins; both layers are alpha-blended per output frame.
+          - A `skip` command starts the transition to the next item now; a
+            `reload` command re-reads the playlist without dropping the
+            stream (the current item keeps playing, its timing refreshed).
+          - An impression line is appended for an item the moment it first
+            becomes visible (fade-in start).
+          - A video whose duration wasn't explicitly set fades out when the
+            file actually ends, even if metadata said otherwise; with an
+            explicit duration longer than the file it holds its last frame
+            until the slot ends.
+        """
+        import cv2
+        from datetime import datetime
+
+        st = self.signage_settings
+        playlist_path = st.get("playlist_path")
+        status_path = st.get("status_path")
+        impressions_path = st.get("impressions_path")
+
+        output_interval = 1.0 / self.output_fps
+        blend_buf = np.empty((self.height, self.width, 3), dtype=np.uint8)
+
+        playlist = _load_signage_playlist(playlist_path) if playlist_path else []
+        logger.info(
+            f"Signage worker started: {self.ndi_name} | {len(playlist)} item(s) | "
+            f"{self.width}x{self.height} | output={self.output_fps}fps"
+        )
+
+        current = _SignageLayer(None, self.width, self.height)  # start on black
+        cur_index = -1
+        cur_start = time.monotonic()
+        cur_fade = 0.0            # outgoing crossfade of the current item
+        fade_start_t = 0.0        # when the next transition should begin (0 = ASAP)
+        fading_from = None        # outgoing layer during a crossfade
+        fade_t0 = 0.0
+        fade_dur = 0.0
+        buffer_synced = False     # steady-state still already copied to frame_buffer
+        frame_dirty = True
+        idle_recheck_t = 0.0
+        last_status_t = 0.0
+        last_preview_t = 0.0
+        last_pv_hd = False
+
+        def log_impression(item):
+            if not impressions_path or not item:
+                return
+            try:
+                # Open/append/close per event so the API can atomically
+                # rotate the log without losing later writes
+                with open(impressions_path, "a", encoding="utf-8") as f:
+                    f.write(f"{item['id']}\n")
+            except OSError:
+                pass
+
+        def slot_times(item, start_t):
+            """(fade_start, fade_len) for an item that went on air at start_t."""
+            dur = float(item.get("duration") or 8.0)
+            dur = max(0.5, dur)
+            fade = max(0.0, float(item.get("crossfade") or 0.0))
+            fade = min(fade, max(0.0, dur - 0.1))
+            return start_t + dur - fade, fade
+
+        def pick_next(from_index):
+            """Next eligible (index, item) after from_index, wrapping; (-1, None) if none."""
+            if not playlist:
+                return -1, None
+            n = len(playlist)
+            now_dt = datetime.now()
+            for step in range(1, n + 1):
+                j = (from_index + step) % n
+                if _signage_item_eligible(playlist[j], now_dt):
+                    return j, playlist[j]
+            return -1, None
+
+        def begin_transition(now):
+            """Fade from `current` to the next eligible item (or to black)."""
+            nonlocal current, cur_index, cur_start, cur_fade, fade_start_t
+            nonlocal fading_from, fade_t0, fade_dur, buffer_synced, frame_dirty
+
+            j, item = pick_next(cur_index)
+            layer = None
+            attempts = 0
+            while item is not None and attempts < len(playlist):
+                layer = _SignageLayer(item, self.width, self.height)
+                if layer.ok:
+                    break
+                logger.warning(
+                    f"Signage item unreadable, skipping: {item.get('path')} "
+                    f"({self.ndi_name})"
+                )
+                layer.release()
+                layer = None
+                item["_broken"] = True
+                j, item = pick_next(j)
+                attempts += 1
+
+            if item is None:
+                if current.item is None:
+                    fade_start_t = float("inf")  # already black, stay put
+                    return
+                layer = _SignageLayer(None, self.width, self.height)
+
+            # Outgoing item's crossfade paces the transition; fading in from
+            # black uses the incoming item's own crossfade instead
+            if current.item is not None:
+                fade = cur_fade
+            elif item is not None:
+                fade = max(0.0, float(item.get("crossfade") or 0.0))
+            else:
+                fade = 0.0
+
+            layer.start(now)
+            log_impression(item)
+            old = current
+            current = layer
+            cur_index = j if item is not None else cur_index
+            cur_start = now
+            if item is not None:
+                fade_start_t, cur_fade = slot_times(item, now)
+            else:
+                fade_start_t = float("inf")
+                cur_fade = 0.0
+            buffer_synced = False
+            frame_dirty = True
+
+            if fade > 0.02:
+                fading_from = old
+                fade_t0 = now
+                fade_dur = fade
+            else:
+                old.release()
+                fading_from = None
+
+        self._update_heartbeat()
+
+        try:
+            while not self._stop_event.is_set():
+                now = time.monotonic()
+
+                # --- Commands ---
+                cmds = self._poll_signage_cmd()
+                if cmds & SIGNAGE_CMD_RELOAD:
+                    playlist = _load_signage_playlist(playlist_path) if playlist_path else []
+                    if current.item is not None:
+                        cur_id = current.item.get("id")
+                        cur_index = next(
+                            (i for i, it in enumerate(playlist) if it.get("id") == cur_id), -1
+                        )
+                        if cur_index >= 0:
+                            # Keep the item on air but adopt its (possibly
+                            # edited) timing, measured from when it appeared
+                            current.item = playlist[cur_index]
+                            fade_start_t, cur_fade = slot_times(current.item, cur_start)
+                        else:
+                            fade_start_t = now  # removed from playlist — move on
+                    else:
+                        idle_recheck_t = 0.0  # black: look for content immediately
+                    logger.info(f"Signage playlist reloaded: {self.ndi_name} "
+                                f"({len(playlist)} items)")
+                if (cmds & SIGNAGE_CMD_SKIP) and fading_from is None:
+                    if current.item is not None:
+                        fade_start_t = now
+                    else:
+                        idle_recheck_t = 0.0
+
+                # --- Finish an active crossfade ---
+                if fading_from is not None and now >= fade_t0 + fade_dur:
+                    fading_from.release()
+                    fading_from = None
+                    buffer_synced = False
+
+                # --- Video without explicit duration finished → move on now ---
+                if (fading_from is None and current.done
+                        and not (current.item or {}).get("duration_explicit")
+                        and now < fade_start_t):
+                    fade_start_t = now
+
+                # --- Start next transition / leave idle ---
+                if fading_from is None:
+                    if current.item is None:
+                        if now >= idle_recheck_t:
+                            idle_recheck_t = now + 0.5
+                            begin_transition(now)
+                    elif now >= fade_start_t:
+                        begin_transition(now)
+
+                # --- Render ---
+                if fading_from is not None:
+                    a = min(1.0, (now - fade_t0) / fade_dur) if fade_dur > 0 else 1.0
+                    src_out = fading_from.frame(now)
+                    src_in = current.frame(now)
+                    cv2.addWeighted(src_out, 1.0 - a, src_in, a, 0.0, dst=blend_buf)
+                    frame_buffer[:, :, :3] = blend_buf
+                    frame_dirty = True
+                else:
+                    buf = current.frame(now)
+                    if current.advanced or not buffer_synced:
+                        frame_buffer[:, :, :3] = buf
+                        buffer_synced = True
+                        frame_dirty = True
+
+                # --- Send to NDI ---
+                if ndi is not None:
+                    video_frame.data = frame_buffer
+                    ndi.send_send_video_v2(ndi_send, video_frame)
+
+                # --- Once a second: expire check + status file ---
+                if now - last_status_t >= 1.0:
+                    last_status_t = now
+                    if (current.item is not None and fading_from is None
+                            and not _signage_item_eligible(current.item)):
+                        # Schedule window closed mid-slot — transition out now
+                        fade_start_t = min(fade_start_t, now)
+                    _, next_item = pick_next(cur_index)
+                    remaining = (fade_start_t + cur_fade - now) if current.item else 0.0
+                    self._write_signage_status(
+                        status_path, current.item, remaining, next_item
+                    )
+
+                # --- Preview (only when the frame changed, or on boost flip
+                # so a popup opened on a static still upgrades to HD) ---
+                pv_interval, pv_hd = self._preview_params(now)
+                if ((frame_dirty or pv_hd != last_pv_hd)
+                        and now - last_preview_t >= pv_interval):
+                    self._save_preview(frame_buffer, hd=pv_hd)
+                    last_preview_t = now
+                    last_pv_hd = pv_hd
+                    frame_dirty = False
+
+                self._update_heartbeat()
+
+                # --- Pace to output FPS ---
+                sleep_time = (now + output_interval) - time.monotonic()
+                if sleep_time > 0.001:
+                    time.sleep(sleep_time)
+        finally:
+            if fading_from is not None:
+                fading_from.release()
+            current.release()
+
+    def _run_signage_source(self, frame_buffer, ndi=None, ndi_send=None, video_frame=None):
+        """Run the signage loop with shared error handling (real or dummy mode)."""
+        try:
+            self._run_signage_loop(
+                frame_buffer, ndi=ndi, ndi_send=ndi_send, video_frame=video_frame
+            )
+        except ImportError:
+            logger.error(
+                "opencv-python-headless not installed — signage source "
                 f"'{self.ndi_name}' cannot run. Install it and restart."
             )
             self._idle_until_stopped()
@@ -997,6 +1487,17 @@ class NDIWorker:
                 self._destroy_ndi(ndi, ndi_send)
             return
 
+        # --- Signage source: scheduled playlist with crossfades, no browser ---
+        if self.source_type == "signage":
+            try:
+                self._run_signage_source(
+                    frame_buffer, ndi=ndi, ndi_send=ndi_send, video_frame=video_frame
+                )
+            finally:
+                logger.info(f"Stopping worker: {self.ndi_name}")
+                self._destroy_ndi(ndi, ndi_send)
+            return
+
         # --- Playwright setup ---
         pw = sync_playwright().start()
         browser = context = page = None
@@ -1038,8 +1539,9 @@ class NDIWorker:
                         frame_ready = True
                         last_capture_time = frame_start
                         # --- Save preview thumbnail ---
-                        if frame_start - last_preview_time >= self._preview_interval:
-                            self._save_preview(frame_buffer)
+                        pv_interval, pv_hd = self._preview_params(frame_start)
+                        if frame_start - last_preview_time >= pv_interval:
+                            self._save_preview(frame_buffer, hd=pv_hd)
                             last_preview_time = frame_start
 
                 # --- Send to NDI ---
@@ -1086,6 +1588,10 @@ class NDIWorker:
             self._run_video_source(frame_buffer)
             return
 
+        if self.source_type == "signage":
+            self._run_signage_source(frame_buffer)
+            return
+
         from playwright.sync_api import sync_playwright
 
         pw = sync_playwright().start()
@@ -1109,8 +1615,9 @@ class NDIWorker:
                     )
 
                 if self._capture_into_buffer(page, frame_buffer):
-                    if now - last_preview_time >= self._preview_interval:
-                        self._save_preview(frame_buffer)
+                    pv_interval, pv_hd = self._preview_params(now)
+                    if now - last_preview_time >= pv_interval:
+                        self._save_preview(frame_buffer, hd=pv_hd)
                         last_preview_time = now
                 self._update_heartbeat()
                 time.sleep(capture_interval)

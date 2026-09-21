@@ -24,6 +24,15 @@ class Config:
     IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "tiff"}
     VIDEO_EXTENSIONS = {"mp4", "mov", "m4v", "mkv", "webm", "avi", "mpg", "mpeg"}
     ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+    # Presentations accepted by the signage upload endpoint — converted to
+    # one image per slide/page (requires LibreOffice + poppler-utils)
+    PRESENTATION_EXTENSIONS = {"ppt", "pptx", "odp", "pdf"}
+    # DPI used when rasterizing presentation slides/PDF pages
+    PRESENTATION_RENDER_DPI = int(os.getenv("PRESENTATION_RENDER_DPI", "150"))
+
+    # Signage runtime state (playlist JSON handed to workers, now-playing
+    # status, impression logs) — generated files, not user content
+    SIGNAGE_STATE_FOLDER = os.path.join(BASE_DIR, "signage_state")
 
     # Browser recycling (hours) — restarts Chromium to prevent memory leaks
     BROWSER_RECYCLE_HOURS = float(os.getenv("BROWSER_RECYCLE_HOURS", "4"))

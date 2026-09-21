@@ -47,12 +47,19 @@ def create_app(config_class=Config):
     db.init_app(app)
     Migrate(app, db)
 
-    # Ensure upload and preview directories exist
+    # Ensure upload, preview, and signage state directories exist
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
     os.makedirs(app.config["PREVIEW_FOLDER"], exist_ok=True)
+    os.makedirs(app.config["SIGNAGE_STATE_FOLDER"], exist_ok=True)
 
     # Register API
     app.register_blueprint(api)
+
+    # Live preview popup window (one page for all instances; it reads the
+    # instance id from its own URL). Registered before the SPA catch-all.
+    @app.route("/preview/<int:instance_id>")
+    def preview_popup(instance_id):
+        return send_from_directory(app.static_folder, "preview.html")
 
     # Serve frontend SPA
     @app.route("/")

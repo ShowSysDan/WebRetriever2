@@ -3,13 +3,27 @@ REST API routes for NDI output instances, global settings, and media library.
 """
 
 import os
+import re
+import glob
+import json
+import time
 import uuid
+import shutil
 import logging
-from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file, abort
+import tempfile
+import threading
+import subprocess
+from datetime import datetime
+from collections import Counter
+
+from flask import Blueprint, Response, request, jsonify, current_app, send_from_directory, send_file, abort
 from werkzeug.utils import secure_filename
 from PIL import Image as PILImage
 
-from app.models import db, OutputInstance, GlobalSettings, MediaFile, generate_media_uid
+from app.models import (
+    db, OutputInstance, GlobalSettings, MediaFile, generate_media_uid,
+    SignageGroup, SignageItem,
+)
 from app.workers import manager
 from app.logging_config import log_event
 
@@ -43,6 +57,12 @@ def _start_worker(inst, settings=None):
         settings = GlobalSettings.query.first()
     text_settings = _build_text_settings(inst) if inst.source_type == "text" else None
     video_settings = _build_video_settings(inst) if inst.source_type == "video" else None
+    signage_settings = None
+    if inst.source_type == "signage":
+        # The worker never touches the DB — it reads the playlist from a
+        # JSON file we (re)write here and on every playlist mutation
+        _write_signage_playlist(inst)
+        signage_settings = _signage_paths(inst.id)
 
     # Resolve source value for media-backed images
     source_value = inst.source_value
@@ -67,9 +87,227 @@ def _start_worker(inst, settings=None):
         browser_recycle_hours=current_app.config.get("BROWSER_RECYCLE_HOURS", 4),
         text_settings=text_settings,
         video_settings=video_settings,
+        signage_settings=signage_settings,
         preview_dir=current_app.config.get("PREVIEW_FOLDER"),
         preview_interval=current_app.config.get("PREVIEW_INTERVAL", 2.0),
     )
+
+
+# =========================================================================
+# Signage plumbing — playlist file, schedule resolution, impression folding
+# =========================================================================
+
+def _signage_paths(instance_id):
+    """Filesystem paths for one signage instance's runtime state."""
+    state_dir = current_app.config["SIGNAGE_STATE_FOLDER"]
+    return {
+        "playlist_path": os.path.join(state_dir, f"playlist_{instance_id}.json"),
+        "status_path": os.path.join(state_dir, f"status_{instance_id}.json"),
+        "impressions_path": os.path.join(state_dir, f"impressions_{instance_id}.log"),
+    }
+
+
+def _signage_playlist_entries(inst):
+    """Flatten the playlist into play order: [(item, group_or_None), ...].
+
+    Top-level order interleaves groups and ungrouped items by sort_order; a
+    group expands to its items (by their sort_order within the group)."""
+    groups = sorted(inst.signage_groups, key=lambda g: (g.sort_order, g.id))
+    ungrouped = [i for i in inst.signage_items if i.group_id is None]
+    entries = sorted(
+        [("group", g) for g in groups] + [("item", i) for i in ungrouped],
+        key=lambda e: (e[1].sort_order, e[1].id),
+    )
+    out = []
+    for kind, obj in entries:
+        if kind == "group":
+            for it in sorted(obj.items, key=lambda i: (i.sort_order, i.id)):
+                out.append((it, obj))
+        else:
+            out.append((obj, None))
+    return out
+
+
+def _resolve_signage_item(item, group, inst):
+    """Bake one playlist item's effective settings into a plain dict for the
+    worker. Resolution rules:
+      - duration: item → group → (video's own length) → instance default.
+        A duration set on the item/group is "explicit": a video holds its
+        last frame to fill the slot instead of ending early.
+      - crossfade: item → group → instance default. This is the OUTGOING
+        fade — the transition into the next item starts this many seconds
+        before the slot ends (before a video file ends).
+      - date window: intersection of item and group windows.
+      - daily window: item's if set, else group's.
+      - enabled: item AND group.
+    """
+    media = item.media_file
+    if media is None:
+        return None
+    is_video = media.is_video
+
+    duration = item.duration_s
+    explicit = duration is not None
+    if duration is None and group is not None and group.duration_s is not None:
+        duration = group.duration_s
+        explicit = True
+    if duration is None and is_video and media.duration_s:
+        duration = media.duration_s
+    if duration is None:
+        duration = inst.signage_duration if inst.signage_duration is not None else 8.0
+
+    crossfade = item.crossfade_s
+    if crossfade is None and group is not None:
+        crossfade = group.crossfade_s
+    if crossfade is None:
+        crossfade = inst.signage_crossfade if inst.signage_crossfade is not None else 1.0
+
+    start = item.start_at
+    end = item.end_at
+    if group is not None:
+        if group.start_at and (start is None or group.start_at > start):
+            start = group.start_at
+        if group.end_at and (end is None or group.end_at < end):
+            end = group.end_at
+
+    if item.daily_start and item.daily_end:
+        daily_start, daily_end = item.daily_start, item.daily_end
+    elif group is not None and group.daily_start and group.daily_end:
+        daily_start, daily_end = group.daily_start, group.daily_end
+    else:
+        daily_start = daily_end = None
+
+    return {
+        "id": item.id,
+        "media_id": media.id,
+        "name": media.original_name,
+        "kind": "video" if is_video else "image",
+        "path": os.path.join(current_app.config["UPLOAD_FOLDER"], media.filename),
+        "duration": round(float(duration), 3),
+        "duration_explicit": explicit,
+        "crossfade": round(float(crossfade), 3),
+        "start_at": start.isoformat() if start else None,
+        "end_at": end.isoformat() if end else None,
+        "daily_start": daily_start,
+        "daily_end": daily_end,
+        "enabled": bool(item.enabled) and (bool(group.enabled) if group else True),
+    }
+
+
+def _write_signage_playlist(inst):
+    """Atomically (re)write the playlist JSON the worker reads."""
+    items = []
+    for item, group in _signage_playlist_entries(inst):
+        resolved = _resolve_signage_item(item, group, inst)
+        if resolved is not None:
+            items.append(resolved)
+
+    state_dir = current_app.config["SIGNAGE_STATE_FOLDER"]
+    os.makedirs(state_dir, exist_ok=True)
+    path = _signage_paths(inst.id)["playlist_path"]
+    fd, tmp = tempfile.mkstemp(suffix=".json", dir=state_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"instance_id": inst.id, "items": items}, f)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _sync_signage(inst):
+    """Push playlist changes to a running worker without restarting it."""
+    if inst.source_type != "signage":
+        return
+    _write_signage_playlist(inst)
+    if manager.is_running(inst.id):
+        manager.signage_command(inst.id, "reload")
+
+
+# The worker appends one line per impression (open/append/close per event);
+# folding atomically rotates the log so no append can be lost, then adds the
+# counts to the DB. The lock keeps concurrent API threads from double-folding.
+_impressions_lock = threading.Lock()
+
+
+def _fold_impressions(instance_id):
+    path = _signage_paths(instance_id)["impressions_path"]
+    with _impressions_lock:
+        if not os.path.exists(path):
+            return
+        rotated = path + ".folding"
+        try:
+            os.replace(path, rotated)
+        except OSError:
+            return
+        counts = Counter()
+        try:
+            with open(rotated, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.isdigit():
+                        counts[int(line)] += 1
+        finally:
+            try:
+                os.remove(rotated)
+            except OSError:
+                pass
+        if not counts:
+            return
+        for item_id, n in counts.items():
+            item = db.session.get(SignageItem, item_id)
+            if item is not None:
+                item.impressions = (item.impressions or 0) + n
+        db.session.commit()
+
+
+_DAILY_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _parse_dt(value, field):
+    """Parse an optional schedule datetime ('' / null clears it).
+
+    Accepts the datetime-local format (YYYY-MM-DDTHH:MM[:SS]); stored naive
+    and interpreted in the server's local timezone."""
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        abort(400, description=f"{field} must be an ISO datetime (YYYY-MM-DDTHH:MM)")
+
+
+def _parse_daily(value, field):
+    """Parse an optional 'HH:MM' daily-window bound ('' / null clears it)."""
+    if value in (None, ""):
+        return None
+    value = str(value)[:5]
+    if not _DAILY_RE.match(value):
+        abort(400, description=f"{field} must be HH:MM (24h)")
+    return value
+
+
+def _parse_opt_float(value, field, lo=0.0, hi=86400.0):
+    """Parse an optional non-negative float ('' / null clears the override)."""
+    if value in (None, ""):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        abort(400, description=f"{field} must be a number")
+    if not (lo <= f <= hi):
+        abort(400, description=f"{field} must be between {lo} and {hi}")
+    return f
+
+
+def _next_top_sort(inst):
+    """Sort key placing a new entry at the end of the top-level playlist."""
+    tops = [g.sort_order for g in inst.signage_groups] + \
+           [i.sort_order for i in inst.signage_items if i.group_id is None]
+    return (max(tops) + 10) if tops else 0
 
 
 # =========================================================================
@@ -197,6 +435,8 @@ def create_instance():
         video_loop=data.get("video_loop", False),
         video_hold=data.get("video_hold", "last"),
         video_autoplay=data.get("video_autoplay", False),
+        signage_duration=_parse_opt_float(data.get("signage_duration", 8.0), "signage_duration", 0.5),
+        signage_crossfade=_parse_opt_float(data.get("signage_crossfade", 1.0), "signage_crossfade", 0.0, 30.0),
         width=data.get("width", 1920),
         height=data.get("height", 1080),
         capture_fps=data.get("capture_fps", 30),
@@ -225,20 +465,32 @@ def update_instance(instance_id):
         return jsonify({"error": "JSON body required"}), 400
     was_running = manager.is_running(inst.id)
     needs_restart = False
+    signage_dirty = False
+
+    # Signage timing defaults are baked into the playlist file, so changing
+    # them needs a playlist rewrite + live reload — not a worker restart
+    signage_live_fields = {"signage_duration", "signage_crossfade"}
 
     for field in [
         "name", "source_type", "source_value", "media_file_id",
         "text_content", "text_font", "text_size", "text_color",
         "text_bg_color", "text_align",
         "video_loop", "video_hold", "video_autoplay",
+        "signage_duration", "signage_crossfade",
         "width", "height", "capture_fps", "refresh_interval", "enabled",
     ]:
         if field in data:
             old = getattr(inst, field)
             new = data[field]
+            if field == "signage_duration":
+                new = _parse_opt_float(new, field, 0.5)
+            elif field == "signage_crossfade":
+                new = _parse_opt_float(new, field, 0.0, 30.0)
             if old != new:
                 setattr(inst, field, new)
-                if field != "enabled":
+                if field in signage_live_fields:
+                    signage_dirty = True
+                elif field != "enabled":
                     needs_restart = True
 
     db.session.commit()
@@ -252,6 +504,8 @@ def update_instance(instance_id):
         else:
             inst.running = False
         db.session.commit()
+    elif signage_dirty:
+        _sync_signage(inst)
 
     return jsonify(inst.to_dict())
 
@@ -271,6 +525,15 @@ def delete_instance(instance_id):
     if preview_dir:
         try:
             os.remove(os.path.join(preview_dir, f"{instance_id}.jpg"))
+        except OSError:
+            pass
+
+    # Signage runtime state files (playlist/status/impressions) are keyed by
+    # instance id — clean them up so they can't leak or be inherited by a
+    # future instance that reuses the id
+    for path in _signage_paths(instance_id).values():
+        try:
+            os.remove(path)
         except OSError:
             pass
 
@@ -520,6 +783,88 @@ def instance_preview(instance_id):
     return "", 204
 
 
+# How the preview stream is paced. POLL is how often the generator checks
+# the preview file for a new frame; BOOST_HOLD is how far ahead it keeps the
+# worker's HD deadline (comfortably more than one poll); MAX_S caps a single
+# stream so an abandoned-but-connected popup can't hold a server thread
+# forever (the popup <img> auto-reconnects).
+PREVIEW_STREAM_POLL = 0.12
+PREVIEW_STREAM_BOOST_HOLD = 6.0
+PREVIEW_STREAM_MAX_S = 4 * 3600
+PREVIEW_STREAM_STOPPED_GRACE = 5.0
+
+
+@api.route("/instances/<ref>/preview/stream", methods=["GET"])
+def instance_preview_stream(ref):
+    """Live MJPEG preview (multipart/x-mixed-replace) for the popup viewer.
+
+    Pushes the instance's preview JPEG whenever the worker writes a new one.
+    While at least one stream is connected the worker is kept in "boost"
+    mode (854px @ ~4fps instead of the 320px/2s list thumbnails). The
+    stream ends shortly after the instance stops; the popup page reconnects
+    when it starts again."""
+    inst = _resolve_instance(ref)
+    preview_dir = current_app.config.get("PREVIEW_FOLDER")
+    if not preview_dir:
+        return jsonify({"error": "Previews not configured"}), 404
+    path = os.path.join(preview_dir, f"{inst.id}.jpg")
+    instance_id = inst.id
+
+    def generate():
+        last_mtime = None
+        last_frame = None
+        last_yield = 0.0
+        stopped_since = None
+        deadline = time.monotonic() + PREVIEW_STREAM_MAX_S
+
+        def part(frame):
+            return (b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    + f"Content-Length: {len(frame)}\r\n\r\n".encode()
+                    + frame + b"\r\n")
+
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            if manager.boost_preview(instance_id, PREVIEW_STREAM_BOOST_HOLD):
+                stopped_since = None
+            else:
+                # Not running: keep serving the last frame briefly (worker
+                # may be restarting), then end the stream
+                if stopped_since is None:
+                    stopped_since = now
+                elif now - stopped_since > PREVIEW_STREAM_STOPPED_GRACE:
+                    break
+            try:
+                mtime = os.stat(path).st_mtime
+            except OSError:
+                mtime = None
+            if mtime is not None and mtime != last_mtime:
+                last_mtime = mtime
+                try:
+                    with open(path, "rb") as f:
+                        frame = f.read()
+                except OSError:
+                    frame = None
+                if frame:
+                    last_frame = frame
+                    last_yield = now
+                    yield part(frame)
+            elif last_frame is not None and now - last_yield >= 2.0:
+                # Static content produces no new frames — re-send the last
+                # one as a keepalive so a closed popup's disconnect is
+                # noticed here (GeneratorExit on the failed write) instead
+                # of the thread idling until the stream deadline
+                last_yield = now
+                yield part(last_frame)
+            time.sleep(PREVIEW_STREAM_POLL)
+
+    resp = Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    resp.headers["Cache-Control"] = "no-store"
+    # The stream never ends at a content boundary — disable proxy buffering
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
+
+
 # =========================================================================
 # Media Library
 # =========================================================================
@@ -530,40 +875,9 @@ def list_media():
     return jsonify([f.to_dict() for f in files])
 
 
-@api.route("/media", methods=["POST"])
-def upload_media():
-    if "file" not in request.files:
-        return jsonify({"error": "No file provided"}), 400
-
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "No file selected"}), 400
-
-    if not _allowed_file(file.filename):
-        return jsonify({"error": "File type not allowed"}), 400
-
-    original_name = secure_filename(file.filename)
-    if not original_name or "." not in original_name:
-        return jsonify({"error": "Invalid filename"}), 400
-    ext = original_name.rsplit(".", 1)[1].lower()
-    unique_name = f"{uuid.uuid4().hex}.{ext}"
-
-    upload_dir = current_app.config["UPLOAD_FOLDER"]
-    os.makedirs(upload_dir, exist_ok=True)
-    filepath = os.path.join(upload_dir, unique_name)
-    file.save(filepath)
-
-    file_size = os.path.getsize(filepath)
-    width_px = None
-    height_px = None
-    duration_s = None
-    mime_type = file.content_type
-    if not mime_type or mime_type == "application/octet-stream":
-        # Some clients don't send a useful content type — guess from the
-        # extension so browsers can play videos served back to them
-        import mimetypes
-        mime_type = mimetypes.guess_type(original_name)[0] or mime_type
-
+def _probe_media(filepath, ext):
+    """(width, height, duration_s) probed from an image or video on disk."""
+    width_px = height_px = duration_s = None
     if ext in current_app.config.get("VIDEO_EXTENSIONS", set()):
         try:
             import cv2
@@ -584,6 +898,21 @@ def upload_media():
                 width_px, height_px = img.size
         except Exception:
             pass
+    return width_px, height_px, duration_s
+
+
+def _create_media_record(filepath, unique_name, original_name, ext, mime_type=None):
+    """Create + commit a MediaFile row for a file already in the uploads dir.
+    Returns (media, None) on success, (None, (response, status)) on failure —
+    the on-disk file is removed on failure so nothing is orphaned."""
+    if not mime_type or mime_type == "application/octet-stream":
+        # Some clients don't send a useful content type — guess from the
+        # extension so browsers can play videos served back to them
+        import mimetypes
+        mime_type = mimetypes.guess_type(original_name)[0] or mime_type
+
+    file_size = os.path.getsize(filepath)
+    width_px, height_px, duration_s = _probe_media(filepath, ext)
 
     media = MediaFile(
         uid=generate_media_uid(),
@@ -600,13 +929,46 @@ def upload_media():
         db.session.commit()
     except Exception:
         db.session.rollback()
-        # Remove orphaned file from disk
         try:
             os.remove(filepath)
         except OSError:
             pass
-        return jsonify({"error": "Failed to save media record"}), 500
+        return None, (jsonify({"error": "Failed to save media record"}), 500)
     log_event("MEDIA_UPLOADED", f"id={media.id} name='{original_name}' size={file_size}")
+    return media, None
+
+
+def _store_media_upload(file):
+    """Validate + store an uploaded image/video and create its MediaFile.
+    Returns (media, None) or (None, (response, status))."""
+    if file.filename == "":
+        return None, (jsonify({"error": "No file selected"}), 400)
+    if not _allowed_file(file.filename):
+        return None, (jsonify({"error": "File type not allowed"}), 400)
+
+    original_name = secure_filename(file.filename)
+    if not original_name or "." not in original_name:
+        return None, (jsonify({"error": "Invalid filename"}), 400)
+    ext = original_name.rsplit(".", 1)[1].lower()
+    unique_name = f"{uuid.uuid4().hex}.{ext}"
+
+    upload_dir = current_app.config["UPLOAD_FOLDER"]
+    os.makedirs(upload_dir, exist_ok=True)
+    filepath = os.path.join(upload_dir, unique_name)
+    file.save(filepath)
+
+    return _create_media_record(
+        filepath, unique_name, original_name, ext, mime_type=file.content_type
+    )
+
+
+@api.route("/media", methods=["POST"])
+def upload_media():
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    media, err = _store_media_upload(request.files["file"])
+    if err:
+        return err
     return jsonify(media.to_dict()), 201
 
 
@@ -644,6 +1006,21 @@ def delete_media(media_id):
     if stopped:
         log_event("MEDIA_IN_USE_STOPPED", f"media_id={media_id} stopped_instances={stopped}")
 
+    # Remove signage playlist items that reference this media. Running
+    # signage workers get a live playlist reload (no restart needed): if the
+    # deleted file is on air, the worker's open handle keeps the frames valid
+    # until it transitions to the next item.
+    sig_items = SignageItem.query.filter_by(media_file_id=media_id).all()
+    affected_signage = {it.instance_id for it in sig_items}
+    for it in sig_items:
+        db.session.delete(it)
+    if sig_items:
+        db.session.commit()
+        for iid in affected_signage:
+            sig_inst = db.session.get(OutputInstance, iid)
+            if sig_inst is not None:
+                _sync_signage(sig_inst)
+
     # Delete DB record first, then file (avoids orphaned DB records if file delete fails)
     original_name = media.original_name
     filename = media.filename
@@ -659,6 +1036,440 @@ def delete_media(media_id):
 
     log_event("MEDIA_DELETED", f"id={media_id} name='{original_name}'")
     return jsonify({"message": "Deleted", "unlinked_instances": [i.id for i in instances]})
+
+
+# =========================================================================
+# Signage — playlist management, presentation upload, live control
+# =========================================================================
+
+def _get_signage_instance(instance_id):
+    inst = OutputInstance.query.get_or_404(instance_id)
+    if inst.source_type != "signage":
+        abort(400, description=f"Instance '{inst.name}' is not a signage source")
+    return inst
+
+
+def _get_owned_item(item_id):
+    item = SignageItem.query.get_or_404(item_id)
+    return item, db.session.get(OutputInstance, item.instance_id)
+
+
+def _apply_item_fields(item, data):
+    """Apply editable SignageItem fields from a JSON body (validated)."""
+    if "duration_s" in data:
+        item.duration_s = _parse_opt_float(data["duration_s"], "duration_s", 0.5)
+    if "crossfade_s" in data:
+        item.crossfade_s = _parse_opt_float(data["crossfade_s"], "crossfade_s", 0.0, 30.0)
+    if "start_at" in data:
+        item.start_at = _parse_dt(data["start_at"], "start_at")
+    if "end_at" in data:
+        item.end_at = _parse_dt(data["end_at"], "end_at")
+    if "daily_start" in data:
+        item.daily_start = _parse_daily(data["daily_start"], "daily_start")
+    if "daily_end" in data:
+        item.daily_end = _parse_daily(data["daily_end"], "daily_end")
+    if "enabled" in data:
+        item.enabled = bool(data["enabled"])
+
+
+@api.route("/instances/<int:instance_id>/signage", methods=["GET"])
+def signage_playlist(instance_id):
+    """Full playlist state: groups, items (with folded impression counts),
+    and the instance's timing defaults."""
+    inst = _get_signage_instance(instance_id)
+    _fold_impressions(inst.id)
+    groups = sorted(inst.signage_groups, key=lambda g: (g.sort_order, g.id))
+    items = sorted(inst.signage_items, key=lambda i: (i.sort_order, i.id))
+    return jsonify({
+        "instance_id": inst.id,
+        "defaults": {
+            "duration": inst.signage_duration if inst.signage_duration is not None else 8.0,
+            "crossfade": inst.signage_crossfade if inst.signage_crossfade is not None else 1.0,
+        },
+        "groups": [g.to_dict() for g in groups],
+        "items": [i.to_dict() for i in items],
+        "running": manager.is_running(inst.id),
+    })
+
+
+@api.route("/instances/<int:instance_id>/signage/items", methods=["POST"])
+def signage_add_items(instance_id):
+    """Append media library files to the playlist.
+    Body: {"media_file_ids": [..], "group_id": optional}."""
+    inst = _get_signage_instance(instance_id)
+    data = request.get_json() or {}
+    media_ids = data.get("media_file_ids") or []
+    if not isinstance(media_ids, list) or not media_ids:
+        return jsonify({"error": "media_file_ids (non-empty list) required"}), 400
+
+    group = None
+    if data.get("group_id") is not None:
+        group = SignageGroup.query.get_or_404(data["group_id"])
+        if group.instance_id != inst.id:
+            return jsonify({"error": "Group belongs to a different instance"}), 400
+
+    if group is not None:
+        in_group = [i.sort_order for i in group.items]
+        next_sort = (max(in_group) + 10) if in_group else 0
+    else:
+        next_sort = _next_top_sort(inst)
+
+    created = []
+    for mid in media_ids:
+        media = db.session.get(MediaFile, mid)
+        if media is None:
+            db.session.rollback()
+            return jsonify({"error": f"No media file {mid}"}), 404
+        item = SignageItem(
+            instance_id=inst.id,
+            group_id=group.id if group else None,
+            media_file_id=media.id,
+            sort_order=next_sort,
+        )
+        next_sort += 10
+        db.session.add(item)
+        created.append(item)
+    db.session.commit()
+    _sync_signage(inst)
+    log_event("SIGNAGE_ITEMS_ADDED", f"instance={inst.id} count={len(created)}")
+    return jsonify([i.to_dict() for i in created]), 201
+
+
+@api.route("/signage/items/<int:item_id>", methods=["PUT"])
+def signage_update_item(item_id):
+    item, inst = _get_owned_item(item_id)
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
+    _apply_item_fields(item, data)
+    if "group_id" in data:
+        gid = data["group_id"]
+        if gid is not None:
+            group = SignageGroup.query.get_or_404(gid)
+            if group.instance_id != item.instance_id:
+                return jsonify({"error": "Group belongs to a different instance"}), 400
+        item.group_id = gid
+    db.session.commit()
+    if inst is not None:
+        _sync_signage(inst)
+    return jsonify(item.to_dict())
+
+
+@api.route("/signage/items/<int:item_id>", methods=["DELETE"])
+def signage_delete_item(item_id):
+    item, inst = _get_owned_item(item_id)
+    db.session.delete(item)
+    db.session.commit()
+    if inst is not None:
+        _sync_signage(inst)
+    log_event("SIGNAGE_ITEM_DELETED", f"id={item_id}")
+    return jsonify({"message": "Deleted"})
+
+
+@api.route("/instances/<int:instance_id>/signage/items/delete", methods=["POST"])
+def signage_delete_items(instance_id):
+    """Batch delete. Body: {"item_ids": [..]}."""
+    inst = _get_signage_instance(instance_id)
+    data = request.get_json() or {}
+    ids = data.get("item_ids") or []
+    deleted = 0
+    for iid in ids:
+        item = db.session.get(SignageItem, iid)
+        if item is not None and item.instance_id == inst.id:
+            db.session.delete(item)
+            deleted += 1
+    db.session.commit()
+    _sync_signage(inst)
+    log_event("SIGNAGE_ITEMS_DELETED", f"instance={inst.id} count={deleted}")
+    return jsonify({"deleted": deleted})
+
+
+@api.route("/instances/<int:instance_id>/signage/groups", methods=["POST"])
+def signage_create_group(instance_id):
+    """Create a group; optionally move existing items into it.
+    Body: {"name": str, "item_ids": optional [..]}."""
+    inst = _get_signage_instance(instance_id)
+    data = request.get_json() or {}
+    name = (data.get("name") or "Group").strip()[:128] or "Group"
+
+    group = SignageGroup(
+        instance_id=inst.id, name=name, sort_order=_next_top_sort(inst)
+    )
+    db.session.add(group)
+    db.session.flush()  # need group.id for the items
+
+    moved = 0
+    for idx, iid in enumerate(data.get("item_ids") or []):
+        item = db.session.get(SignageItem, iid)
+        if item is not None and item.instance_id == inst.id:
+            item.group_id = group.id
+            item.sort_order = idx * 10
+            moved += 1
+    db.session.commit()
+    _sync_signage(inst)
+    log_event("SIGNAGE_GROUP_CREATED", f"instance={inst.id} group={group.id} items={moved}")
+    return jsonify(group.to_dict()), 201
+
+
+@api.route("/signage/groups/<int:group_id>", methods=["PUT"])
+def signage_update_group(group_id):
+    group = SignageGroup.query.get_or_404(group_id)
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
+    if "name" in data:
+        group.name = (str(data["name"]).strip() or group.name)[:128]
+    _apply_item_fields(group, data)  # same schedule/timing field set
+    db.session.commit()
+    inst = db.session.get(OutputInstance, group.instance_id)
+    if inst is not None:
+        _sync_signage(inst)
+    return jsonify(group.to_dict())
+
+
+@api.route("/signage/groups/<int:group_id>", methods=["DELETE"])
+def signage_delete_group(group_id):
+    """Delete a group. Its items are deleted too, unless ?keep_items=1
+    detaches them back to the top level (ungroup)."""
+    group = SignageGroup.query.get_or_404(group_id)
+    inst = db.session.get(OutputInstance, group.instance_id)
+    keep = request.args.get("keep_items") in ("1", "true", "yes")
+
+    items = sorted(group.items, key=lambda i: (i.sort_order, i.id))
+    if keep:
+        # Detach in play order at the group's old position
+        for offset, item in enumerate(items):
+            item.group_id = None
+            item.sort_order = group.sort_order + offset
+    else:
+        for item in items:
+            db.session.delete(item)
+    db.session.delete(group)
+    db.session.commit()
+    if inst is not None:
+        _sync_signage(inst)
+    log_event("SIGNAGE_GROUP_DELETED",
+              f"id={group_id} items={'kept' if keep else 'deleted'} count={len(items)}")
+    return jsonify({"message": "Deleted", "items_kept": keep, "item_count": len(items)})
+
+
+@api.route("/instances/<int:instance_id>/signage/reorder", methods=["POST"])
+def signage_reorder(instance_id):
+    """Persist a full playlist ordering from the UI.
+    Body: {"order": [{"type": "item"|"group", "id": n}, ...],   # top level
+           "group_items": {"<group_id>": [item ids in order]}}."""
+    inst = _get_signage_instance(instance_id)
+    data = request.get_json() or {}
+
+    for idx, ent in enumerate(data.get("order") or []):
+        etype, eid = ent.get("type"), ent.get("id")
+        if etype == "group":
+            group = db.session.get(SignageGroup, eid)
+            if group is not None and group.instance_id == inst.id:
+                group.sort_order = idx * 10
+        elif etype == "item":
+            item = db.session.get(SignageItem, eid)
+            if item is not None and item.instance_id == inst.id:
+                item.group_id = None
+                item.sort_order = idx * 10
+
+    for gid, item_ids in (data.get("group_items") or {}).items():
+        try:
+            gid = int(gid)
+        except (TypeError, ValueError):
+            continue
+        group = db.session.get(SignageGroup, gid)
+        if group is None or group.instance_id != inst.id:
+            continue
+        for idx, iid in enumerate(item_ids or []):
+            item = db.session.get(SignageItem, iid)
+            if item is not None and item.instance_id == inst.id:
+                item.group_id = gid
+                item.sort_order = idx * 10
+
+    db.session.commit()
+    _sync_signage(inst)
+    return jsonify({"message": "Reordered"})
+
+
+def _convert_presentation(src_path, ext):
+    """Rasterize a presentation/PDF into one PNG per slide/page.
+
+    Returns (workdir, [png paths in slide order]). The caller must remove
+    workdir. Raises RuntimeError with a user-facing message when the
+    required tools are missing or conversion fails."""
+    workdir = tempfile.mkdtemp(prefix="signage_conv_")
+    try:
+        pdf_path = src_path
+        if ext != "pdf":
+            soffice = shutil.which("soffice") or shutil.which("libreoffice")
+            if not soffice:
+                raise RuntimeError(
+                    "LibreOffice is not installed — required to convert "
+                    "presentations. Install it (apt install libreoffice-impress) "
+                    "or upload a PDF export instead."
+                )
+            result = subprocess.run(
+                [soffice, "--headless", "--convert-to", "pdf",
+                 "--outdir", workdir, src_path],
+                capture_output=True, timeout=300,
+            )
+            pdfs = glob.glob(os.path.join(workdir, "*.pdf"))
+            if result.returncode != 0 or not pdfs:
+                logger.error(f"soffice conversion failed: {result.stderr[:500]}")
+                raise RuntimeError("Presentation conversion failed — is the file valid?")
+            pdf_path = pdfs[0]
+
+        if not shutil.which("pdftoppm"):
+            raise RuntimeError(
+                "pdftoppm is not installed — required to render slides. "
+                "Install poppler-utils (apt install poppler-utils)."
+            )
+        dpi = current_app.config.get("PRESENTATION_RENDER_DPI", 150)
+        result = subprocess.run(
+            ["pdftoppm", "-png", "-r", str(dpi), pdf_path,
+             os.path.join(workdir, "slide")],
+            capture_output=True, timeout=300,
+        )
+        pngs = sorted(glob.glob(os.path.join(workdir, "slide*.png")))
+        if result.returncode != 0 or not pngs:
+            logger.error(f"pdftoppm failed: {result.stderr[:500]}")
+            raise RuntimeError("Slide rendering failed — is the file valid?")
+        return workdir, pngs
+    except Exception:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
+
+
+@api.route("/instances/<int:instance_id>/signage/upload", methods=["POST"])
+def signage_upload(instance_id):
+    """Upload content straight into the playlist.
+
+    Images/videos become a single appended item. Presentations (ppt, pptx,
+    odp) and PDFs are rasterized into one image per slide and appended as a
+    ready-made group named after the file — schedule or delete the whole
+    deck as one unit."""
+    inst = _get_signage_instance(instance_id)
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    file = request.files["file"]
+
+    original_name = secure_filename(file.filename or "")
+    if not original_name or "." not in original_name:
+        return jsonify({"error": "Invalid filename"}), 400
+    ext = original_name.rsplit(".", 1)[1].lower()
+
+    # Plain image/video → media library + one playlist item
+    if ext in current_app.config.get("ALLOWED_EXTENSIONS", set()):
+        media, err = _store_media_upload(file)
+        if err:
+            return err
+        item = SignageItem(
+            instance_id=inst.id, media_file_id=media.id,
+            sort_order=_next_top_sort(inst),
+        )
+        db.session.add(item)
+        db.session.commit()
+        _sync_signage(inst)
+        return jsonify({"items": [item.to_dict()], "group": None}), 201
+
+    if ext not in current_app.config.get("PRESENTATION_EXTENSIONS", set()):
+        return jsonify({"error": "File type not allowed"}), 400
+
+    # Presentation/PDF → one PNG per slide, grouped
+    src_dir = tempfile.mkdtemp(prefix="signage_upload_")
+    workdir = None
+    try:
+        src_path = os.path.join(src_dir, original_name)
+        file.save(src_path)
+        try:
+            workdir, pngs = _convert_presentation(src_path, ext)
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 501
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": "Presentation conversion timed out"}), 504
+
+        upload_dir = current_app.config["UPLOAD_FOLDER"]
+        os.makedirs(upload_dir, exist_ok=True)
+        deck_name = original_name.rsplit(".", 1)[0]
+
+        # Register all slide images first (each commits its own MediaFile),
+        # then build the group + items in a single commit — so a failure
+        # mid-deck can't leave a half-populated group in the playlist
+        medias = []
+        for idx, png in enumerate(pngs, start=1):
+            unique_name = f"{uuid.uuid4().hex}.png"
+            dest = os.path.join(upload_dir, unique_name)
+            shutil.move(png, dest)
+            media, err = _create_media_record(
+                dest, unique_name,
+                f"{deck_name} — slide {idx:02d}.png", "png",
+                mime_type="image/png",
+            )
+            if err:
+                return err
+            medias.append(media)
+
+        group = SignageGroup(
+            instance_id=inst.id, name=deck_name[:128],
+            sort_order=_next_top_sort(inst),
+        )
+        db.session.add(group)
+        db.session.flush()
+
+        items = []
+        for idx, media in enumerate(medias):
+            item = SignageItem(
+                instance_id=inst.id, group_id=group.id,
+                media_file_id=media.id, sort_order=idx * 10,
+            )
+            db.session.add(item)
+            items.append(item)
+        db.session.commit()
+        _sync_signage(inst)
+        log_event("SIGNAGE_DECK_UPLOADED",
+                  f"instance={inst.id} deck='{deck_name}' slides={len(items)}")
+        return jsonify({
+            "group": group.to_dict(),
+            "items": [i.to_dict() for i in items],
+        }), 201
+    finally:
+        shutil.rmtree(src_dir, ignore_errors=True)
+        if workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
+@api.route("/instances/<ref>/signage/status", methods=["GET"])
+def signage_status(ref):
+    """Live now-playing / up-next state, read from the worker's status file."""
+    inst = _resolve_instance(ref)
+    if inst.source_type != "signage":
+        return jsonify({"error": f"Instance '{inst.name}' is not a signage source"}), 400
+    _fold_impressions(inst.id)
+    running = manager.is_running(inst.id)
+    status = None
+    if running:
+        try:
+            with open(_signage_paths(inst.id)["status_path"], "r", encoding="utf-8") as f:
+                status = json.load(f)
+        except (OSError, ValueError):
+            status = None
+    return jsonify({
+        "id": inst.id, "name": inst.name, "running": running, "status": status,
+    })
+
+
+@api.route("/instances/<ref>/signage/skip", methods=["GET", "POST"])
+def signage_skip(ref):
+    """Skip to the next playlist item now. GET is accepted alongside POST so
+    simple controllers can fire it with a bare URL, like the video API."""
+    inst = _resolve_instance(ref)
+    if inst.source_type != "signage":
+        return jsonify({"error": f"Instance '{inst.name}' is not a signage source"}), 400
+    if not manager.signage_command(inst.id, "skip"):
+        return jsonify({"error": "Instance not running"}), 409
+    log_event("SIGNAGE_SKIP", f"id={inst.id} name='{inst.name}'")
+    return jsonify({"id": inst.id, "name": inst.name, "message": "Skipping to next item"})
 
 
 # =========================================================================

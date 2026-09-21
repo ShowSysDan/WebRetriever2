@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0a0b0f; --surface:#12141a; --border:#2a2d38;
+    --text:#e4e6ed; --text-dim:#8b8fa3;
+    --accent:#22c55e; --accent-dim:#166534;
+    --danger:#ef4444; --danger-dim:#7f1d1d;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; }
+  body { font-family:'Outfit',sans-serif; background:var(--bg); color:var(--text); display:flex; flex-direction:column; overflow:hidden; }
+  .bar { display:flex; align-items:center; gap:10px; padding:8px 12px; background:var(--surface); border-bottom:1px solid var(--border); flex-shrink:0; }
+  .name { font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .meta { font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--text-dim); white-space:nowrap; }
+  .pill { font-size:10px; padding:2px 10px; border-radius:12px; font-family:'JetBrains Mono',monospace; background:var(--accent-dim); color:var(--accent); margin-left:auto; flex-shrink:0; }
+  .pill.off { background:var(--danger-dim); color:var(--danger); }
+  .stage { flex:1; position:relative; display:flex; align-items:center; justify-content:center; background:#000; min-height:0; }
+  .stage img { max-width:100%; max-height:100%; width:auto; height:auto; }
+  .overlay { position:absolute; inset:0; display:none; align-items:center; justify-content:center; flex-direction:column; gap:8px; background:rgba(10,11,15,.82); font-size:14px; color:var(--text-dim); text-align:center; padding:20px; }
+  .overlay.show { display:flex; }
+  .overlay .big { font-size:30px; opacity:.4; }
+  .foot { display:none; padding:7px 12px; background:var(--surface); border-top:1px solid var(--border); font-size:11px; color:var(--text-dim); flex-shrink:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .foot b { color:var(--text); font-weight:600; }
+  .foot .rem { font-family:'JetBrains Mono',monospace; color:#f59e0b; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <div class="name" id="name">Loading…</div>
+  <div class="meta" id="meta"></div>
+  <div class="pill off" id="pill">…</div>
+</div>
+<div class="stage">
+  <img id="stream" alt="">
+  <div class="overlay" id="overlay"><div class="big">◼</div><div id="overlay-text">Connecting…</div></div>
+</div>
+<div class="foot" id="foot"></div>
+<script>
+// The instance id (or URL-encoded name) comes from this page's own URL:
+// /preview/<id>
+const ref = decodeURIComponent(location.pathname.split('/').pop());
+const img = document.getElementById('stream');
+const overlay = document.getElementById('overlay');
+const overlayText = document.getElementById('overlay-text');
+const pill = document.getElementById('pill');
+const foot = document.getElementById('foot');
+let inst = null;
+let streamUp = false;
+
+function setOverlay(text) {
+  if (text) { overlayText.textContent = text; overlay.classList.add('show'); }
+  else overlay.classList.remove('show');
+}
+
+function connectStream() {
+  streamUp = false;
+  // Cache-busting param forces a fresh multipart connection on reconnect
+  img.src = `/api/instances/${encodeURIComponent(ref)}/preview/stream?t=${Date.now()}`;
+}
+
+img.addEventListener('load', () => { streamUp = true; setOverlay(null); });
+img.addEventListener('error', () => {
+  streamUp = false;
+  setOverlay(inst && !inst.running ? 'Instance stopped' : 'Reconnecting…');
+  setTimeout(connectStream, 2500);
+});
+
+async function poll() {
+  try {
+    const res = await fetch(`/api/instances/${encodeURIComponent(ref)}`);
+    if (!res.ok) { setOverlay('Instance not found'); pill.textContent='?'; return; }
+    const wasRunning = inst && inst.running;
+    inst = await res.json();
+    document.getElementById('name').textContent = inst.name;
+    document.title = `Preview — ${inst.name}`;
+    document.getElementById('meta').textContent =
+      `#${inst.id} · ${inst.width}×${inst.height} · ${inst.source_type}`;
+    pill.textContent = inst.running ? '● LIVE' : '○ STOPPED';
+    pill.classList.toggle('off', !inst.running);
+    if (!inst.running) {
+      setOverlay('Instance stopped');
+    } else if (!wasRunning || !streamUp) {
+      // Just started (or stream dropped) — (re)connect
+      setOverlay('Connecting…');
+      connectStream();
+    }
+    if (inst.source_type === 'signage') {
+      foot.style.display = 'block';
+      pollSignage();
+    } else if (inst.source_type === 'video' && inst.running) {
+      foot.style.display = 'block';
+      foot.innerHTML = '';
+      foot.appendChild(Object.assign(document.createElement('span'),
+        {textContent: inst.video_state === 'playing' ? '▶ playing' : '⏸ holding'}));
+    }
+  } catch (e) { /* transient network error — keep last state */ }
+}
+
+async function pollSignage() {
+  try {
+    const s = await (await fetch(`/api/instances/${encodeURIComponent(ref)}/signage/status`)).json();
+    foot.innerHTML = '';
+    const add = (tag, cls, text) => {
+      const el = document.createElement(tag);
+      if (cls) el.className = cls;
+      el.textContent = text;
+      foot.appendChild(el);
+    };
+    if (s.running && s.status) {
+      add('span', null, 'Now: ');
+      add('b', null, s.status.current ? s.status.current.name : 'Black');
+      if (s.status.remaining_s != null)
+        add('span', 'rem', `  ${Math.max(0, Math.round(s.status.remaining_s))}s  `);
+      add('span', null, ' · Next: ');
+      add('b', null, s.status.next ? s.status.next.name : '—');
+    } else {
+      add('span', null, s.running ? 'Starting…' : 'Not running');
+    }
+  } catch (e) {}
+}
+
+poll();
+setInterval(poll, 3000);
+setOverlay('Connecting…');
+connectStream();
+</script>
+</body>
+</html>
