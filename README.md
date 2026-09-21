@@ -1049,17 +1049,29 @@ streamed as a single uninterrupted NDI source.
 
 ### Playback model
 
-- Items play top-to-bottom and loop. Drag the `⠿` handle to reorder; drop an
-  item onto a group header to add it to that group.
-- **Duration** — how long an item is on air, measured from its first visible
-  frame. Stills default to the instance's *Default Still Duration*; videos
-  default to their own file length. An explicit duration on a video either
-  cuts it short or holds its last frame to fill the slot.
-- **Crossfade** — each item's crossfade is its *outgoing* transition: the
-  fade into the next item starts that many seconds **before the item's slot
-  (or video file) ends**, so a video is still moving as it dissolves away.
-  `0` = hard cut. The incoming item (and its impression count) starts the
-  moment it first becomes visible.
+- Items play top-to-bottom and loop. Drag the `⠿` handle to reorder — when
+  the dragged row is part of the current selection, the whole selection
+  moves together as a block, keeping its order. Drop items onto a group
+  header to add them to that group.
+- **Duration** — stills default to the instance's *Default Still Duration*;
+  videos default to their own file length. An explicit duration on a video
+  either cuts it short or holds its last frame to fill the slot.
+- **Crossfade** — each item's crossfade is its *outgoing* transition into
+  the next item (`0` = hard cut). The anchors differ by content type:
+  - **Video**: the fade starts `crossfade` seconds *before the file ends*,
+    so the picture is still moving as it dissolves away.
+  - **Still**: `duration` is time on screen *before* the outgoing fade
+    begins — a 5s still with a 3s fade does a 3s fade-in, holds ~2s clean,
+    then fades out over 3s.
+  The incoming item (and its impression count) starts the moment it first
+  becomes visible.
+- **Bulk editing** — *Select All* (or tick individual rows), then *Edit
+  Selected* applies duration, crossfade, schedule windows, or
+  enabled/disabled to every selected item in one shot; *Group Selected* and
+  *Delete Selected* work the same way. Rows are tinted by schedule state:
+  red-ish = expired or disabled, grey = upcoming (not started yet).
+- The header shows the **server's date & time** — the clock every schedule
+  runs on — so clock drift is visible at a glance.
 - If nothing is eligible to play (everything expired / outside its daily
   window / disabled), the output fades to black and re-checks twice a second.
 
@@ -1270,6 +1282,7 @@ Behavior notes:
 | `POST` | `/api/instances/:id/signage/items` | Append library files — `{"media_file_ids":[..], "group_id": optional}` |
 | `PUT` | `/api/signage/items/:id` | Update an item — `duration_s`, `crossfade_s`, `start_at`, `end_at`, `daily_start`, `daily_end`, `enabled`, `group_id` (null clears any of them) |
 | `DELETE` | `/api/signage/items/:id` | Remove an item from the playlist |
+| `POST` | `/api/instances/:id/signage/items/update` | Batch edit — `{"item_ids":[..], "set":{fields}}` (same fields as item PUT; null clears) |
 | `POST` | `/api/instances/:id/signage/items/delete` | Batch remove — `{"item_ids":[..]}` |
 | `POST` | `/api/instances/:id/signage/groups` | Create group — `{"name": str, "item_ids": optional}` |
 | `PUT` | `/api/signage/groups/:id` | Update group (same fields as items, plus `name`) |
@@ -1374,6 +1387,36 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.2.0
+
+**Signage timing fix + bulk editing + server clock.**
+
+- **Fixed: still images never held with a long crossfade.** Fade timing was
+  anchored the same way for stills and videos (fade-out began at
+  `duration − crossfade` measured from first visibility), so a 5s still
+  with a 3s fade chained its fade-in straight into its fade-out and never
+  held. Stills now hold for their full `duration` before the outgoing fade
+  starts (5s + 3s fade = 3s fade-in, ~2s clean hold, 3s fade-out). Videos
+  keep the previous behavior — the fade overlaps the file's tail so it's
+  still moving as it dissolves.
+- **Select All / bulk edit** — select every item (or tick rows) and apply
+  duration, crossfade, start/expire, daily window, or enabled/disabled to
+  all of them at once (new `POST .../signage/items/update` batch endpoint,
+  one playlist reload for the whole change).
+- **Multi-drag** — dragging any selected row moves the entire selection as
+  a block (keeping its order): reorder together, drop into a group
+  together, or drag out of groups together.
+- **Schedule state at a glance** — playlist rows are tinted red-ish when an
+  item can no longer play (expired or disabled, with an EXPIRED/DISABLED
+  tag) and grey when it hasn't started yet (UPCOMING). Computed against
+  the server's clock, not the browser's.
+- **Server clock in the header** — live date/time/timezone readout of the
+  clock schedules actually run on, ticked every second and synced from the
+  API, so a wrong system clock is immediately visible.
+- **Readable date/time pickers** — the app now declares `color-scheme:
+  dark`, so the native calendar/time popups and their icons render in
+  their dark variants instead of dark-on-dark.
 
 #### 1.1.0
 

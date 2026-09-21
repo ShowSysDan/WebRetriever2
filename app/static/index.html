@@ -15,6 +15,9 @@
     --warning: #f59e0b; --blue: #3b82f6;
     --radius: 8px;
   }
+  /* Dark-only app: makes native widgets (datetime/time pickers, their
+     calendar icons, scrollbars) render in their dark variants */
+  :root { color-scheme: dark; }
   * { margin:0; padding:0; box-sizing:border-box; }
   body { font-family:'Outfit',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
 
@@ -26,7 +29,8 @@
   .version { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; background:var(--surface2); padding:2px 8px; border-radius:10px; }
   .status-pill { font-size:11px; padding:4px 12px; border-radius:20px; font-family:'JetBrains Mono',monospace; background:var(--accent-dim); color:var(--accent); }
   .status-pill.stopped { background:var(--danger-dim); color:var(--danger); }
-  .header-actions { display:flex; gap:8px; }
+  .header-actions { display:flex; gap:12px; align-items:center; }
+  .server-clock { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text-dim); white-space:nowrap; padding:4px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); cursor:default; }
 
   /* Buttons */
   button { font-family:'Outfit',sans-serif; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface2); color:var(--text); padding:7px 14px; cursor:pointer; font-size:13px; font-weight:500; transition:all .15s; }
@@ -136,7 +140,16 @@
   .sg-row { display:grid; grid-template-columns:22px 18px 74px 1fr 130px 190px 62px 150px; align-items:center; gap:10px; padding:7px 12px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); }
   .sg-row.grouped { margin-left:30px; grid-template-columns:22px 18px 74px 1fr 130px 190px 62px 150px; }
   .sg-row.dragover { border-color:var(--accent); box-shadow:0 -2px 0 var(--accent); }
-  .sg-row.off { opacity:.45; }
+  /* Schedule state: red-ish = can't play (expired or disabled), grey = not started yet */
+  .sg-row.expired { border-color:#5b1a1a; background:#1a0f11; }
+  .sg-row.expired .sg-thumb, .sg-row.expired .sg-name { opacity:.55; }
+  .sg-row.expired .sg-sched, .sg-row.expired .sg-status-tag { color:var(--danger); }
+  .sg-row.upcoming { opacity:.55; }
+  .sg-row.upcoming .sg-sched, .sg-row.upcoming .sg-status-tag { color:var(--text-dim); }
+  .sg-status-tag { font-weight:700; text-transform:uppercase; letter-spacing:.5px; }
+  .sg-row.sel { border-color:var(--blue); background:#131b2b; }
+  .sg-row.expired.sel, .sg-row.upcoming.sel { border-color:var(--blue); }
+  .sg-row.dragging { opacity:.35; }
   .sg-group-row { background:var(--surface2); border-left:3px solid var(--blue); }
   .sg-thumb { width:70px; height:40px; object-fit:cover; border-radius:3px; background:#000; border:1px solid var(--border); }
   .sg-name { font-size:12px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -199,11 +212,42 @@ async function api(path, opts={}) {
 
 let settingsEditing = false;
 let lastDataSig = '';
+let serverClock = null; // {epochMs, offsetMin, tz, receivedAt} — from /settings
+
+// Format the SERVER's wall clock (schedules run on it, not the browser's)
+function serverClockText() {
+  if (!serverClock) return '';
+  const wall = new Date(serverClock.epochMs + (Date.now() - serverClock.receivedAt)
+                        + serverClock.offsetMin * 60000);
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const p = n => String(n).padStart(2,'0');
+  return `${days[wall.getUTCDay()]} ${wall.getUTCMonth()+1}/${wall.getUTCDate()} `
+       + `${p(wall.getUTCHours())}:${p(wall.getUTCMinutes())}:${p(wall.getUTCSeconds())}`
+       + (serverClock.tz ? ` ${serverClock.tz}` : '');
+}
+function tickServerClock() {
+  const el = document.getElementById('server-clock');
+  if (el) el.textContent = serverClockText();
+}
 
 async function loadData(force=false) {
   const [settings, instances, media] = await Promise.all([
     api('/settings'), api('/instances'), api('/media'),
   ]);
+  // Pull the server clock out of the settings payload BEFORE it feeds the
+  // change signature — it changes every poll and must not force re-renders.
+  // The header ticks it forward locally between polls.
+  if (settings.server_time_ms != null) {
+    serverClock = {
+      epochMs: settings.server_time_ms,
+      offsetMin: settings.server_tz_offset_min || 0,
+      tz: settings.server_tz || '',
+      receivedAt: Date.now(),
+    };
+    delete settings.server_time_ms;
+    delete settings.server_tz;
+    delete settings.server_tz_offset_min;
+  }
   state.settings = settings;
   state.instances = instances;
   state.media = media;
@@ -439,6 +483,7 @@ function openPreviewPopup(inst) {
 function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
   if(attrs) for(const [k,v] of Object.entries(attrs)) {
+    if(v==null||v===false) continue; // null/false = attribute absent (setAttribute would stringify it — a disabled="null" button is still disabled)
     if(k.startsWith('on')) el.addEventListener(k.slice(2).toLowerCase(),v);
     else if(k==='className') el.className=v;
     else if(k==='style'&&typeof v==='object') Object.assign(el.style,v);
@@ -453,10 +498,13 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v1.1.0'),
+      h('span',{className:'version'},'v1.2.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
+      h('div',{className:'server-clock',id:'server-clock',
+               title:'Server date & time — signage schedules run on this clock'},
+        serverClockText()),
       h('button',{className:'primary',onClick:startAll},'▶ Start All'),
       h('button',{className:'danger',onClick:stopAll},'■ Stop All'),
     ),
@@ -616,7 +664,26 @@ function sgEntries() {
 }
 const sgGroupItems = gid => sgSorted(state.signage.items.filter(i=>i.group_id===gid));
 
-let sgDrag = null; // {type:'item'|'group', id, groupId}
+let sgDrag = null; // {type:'item'|'group', id, groupId} | {type:'multi', ids:[...]}
+
+// All item ids in playlist (play) order — used to keep a multi-drag block
+// in its existing relative order wherever it lands
+function sgFlatItemIds() {
+  const out = [];
+  for (const e of sgEntries()) {
+    if (e.type==='group') sgGroupItems(e.obj.id).forEach(i=>out.push(i.id));
+    else out.push(e.obj.id);
+  }
+  return out;
+}
+
+// True when `rowDrag`'s row is (part of) what's being dragged — such rows
+// can't be drop targets for their own drag
+function sgIsSelfDrop(rowDrag) {
+  if (!sgDrag) return true;
+  if (sgDrag.type==='multi') return rowDrag.type==='item' && sgDrag.ids.includes(rowDrag.id);
+  return sgDrag.type===rowDrag.type && sgDrag.id===rowDrag.id;
+}
 
 function sgOrderPayload() {
   return {
@@ -627,25 +694,37 @@ function sgOrderPayload() {
 }
 
 async function sgApplyMove(drag, target) {
+  // drag: single entry or {type:'multi', ids} — a selection moved as a block
   // target: {kind:'row', type, id, groupId} | {kind:'group-append', groupId} | {kind:'end'}
   const p = sgOrderPayload();
-  p.order = p.order.filter(e=>!(e.type===drag.type&&e.id===drag.id));
-  if (drag.type==='item') {
-    for (const k in p.group_items) p.group_items[k] = p.group_items[k].filter(id=>id!==drag.id);
+  const movedIds = drag.type==='multi' ? drag.ids : [drag.id];
+  const movedEntries = drag.type==='group'
+    ? [{type:'group',id:drag.id}]
+    : movedIds.map(id=>({type:'item',id}));
+
+  // Remove everything being moved from its current position(s)
+  if (drag.type==='group') {
+    p.order = p.order.filter(e=>!(e.type==='group'&&e.id===drag.id));
+  } else {
+    p.order = p.order.filter(e=>!(e.type==='item'&&movedIds.includes(e.id)));
+    for (const k in p.group_items) {
+      p.group_items[k] = p.group_items[k].filter(id=>!movedIds.includes(id));
+    }
   }
+
   if (target.kind==='end') {
-    p.order.push({type:drag.type,id:drag.id});
+    p.order.push(...movedEntries);
   } else if (target.kind==='group-append') {
-    if (drag.type!=='item') return;
-    p.group_items[target.groupId].push(drag.id);
+    if (drag.type==='group') return;    // groups can't nest
+    p.group_items[target.groupId].push(...movedIds);
   } else if (target.groupId) {          // dropping onto an item inside a group
-    if (drag.type!=='item') return;     // groups can't nest
+    if (drag.type==='group') return;
     const arr = p.group_items[target.groupId];
     const idx = arr.indexOf(target.id);
-    arr.splice(idx<0?arr.length:idx, 0, drag.id);
+    arr.splice(idx<0?arr.length:idx, 0, ...movedIds);
   } else {                              // dropping onto a top-level entry
     const idx = p.order.findIndex(e=>e.type===target.type&&e.id===target.id);
-    p.order.splice(idx<0?p.order.length:idx, 0, {type:drag.type,id:drag.id});
+    p.order.splice(idx<0?p.order.length:idx, 0, ...movedEntries);
   }
   await api(`/instances/${state.signageInstId}/signage/reorder`,{method:'POST',body:p});
   await loadData(true);
@@ -653,22 +732,64 @@ async function sgApplyMove(drag, target) {
 
 function sgMakeDraggable(row, drag, target) {
   row.setAttribute('draggable','true');
-  row.addEventListener('dragstart', e=>{ sgDrag = drag; e.dataTransfer.effectAllowed='move'; });
-  row.addEventListener('dragend', ()=>{ sgDrag = null; });
+  row.addEventListener('dragstart', e=>{
+    // Dragging a SELECTED item moves the whole selection as a block,
+    // preserving its play order; unselected rows drag alone as before
+    if (drag.type==='item' && sgSel.has(drag.id) && sgSel.size>1) {
+      sgDrag = {type:'multi', ids: sgFlatItemIds().filter(id=>sgSel.has(id))};
+      document.querySelectorAll('.sg-row.sel').forEach(r=>r.classList.add('dragging'));
+    } else {
+      sgDrag = drag;
+    }
+    e.dataTransfer.effectAllowed='move';
+  });
+  row.addEventListener('dragend', ()=>{
+    sgDrag = null;
+    document.querySelectorAll('.sg-row.dragging').forEach(r=>r.classList.remove('dragging'));
+  });
   row.addEventListener('dragover', e=>{
-    if(!sgDrag) return;
-    if(sgDrag.type===drag.type && sgDrag.id===drag.id) return;
+    if(!sgDrag || sgIsSelfDrop(drag)) return;
     e.preventDefault(); row.classList.add('dragover');
   });
   row.addEventListener('dragleave', ()=>row.classList.remove('dragover'));
   row.addEventListener('drop', e=>{
     e.preventDefault(); row.classList.remove('dragover');
-    if(sgDrag && !(sgDrag.type===drag.type&&sgDrag.id===drag.id)) {
+    if(sgDrag && !sgIsSelfDrop(drag)) {
       // target may depend on what's being dragged (e.g. group headers accept
       // items INTO the group but groups reorder AROUND it) — resolve at drop
       sgApplyMove(sgDrag, typeof target==='function' ? target() : target);
     }
   });
+}
+
+// Server "now" as a naive ISO string ("2026-09-21T14:35:07"). Schedule
+// datetimes are stored the same way, so lexicographic comparison is exact
+// and immune to the browser being in a different timezone than the server.
+function sgServerNowStr() {
+  let wall;
+  if (serverClock) {
+    wall = new Date(serverClock.epochMs + (Date.now() - serverClock.receivedAt)
+                    + serverClock.offsetMin * 60000);
+  } else {
+    const d = new Date();
+    wall = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+  }
+  return wall.toISOString().substring(0, 19);
+}
+
+// Schedule state for a row: red-ish when it can't play anymore (expired or
+// switched off), grey when it hasn't started yet.
+// Returns {cls:''|'expired'|'upcoming', label}
+function sgItemStatus(obj, group) {
+  const enabled = obj.enabled && (!group || group.enabled);
+  if (!enabled) return {cls:'expired', label:'disabled'};
+  const now = sgServerNowStr();
+  if ((obj.end_at && obj.end_at <= now) || (group && group.end_at && group.end_at <= now))
+    return {cls:'expired', label:'expired'};
+  const starts = [obj.start_at, group && group.start_at].filter(Boolean);
+  if (starts.some(s => s > now))
+    return {cls:'upcoming', label:'upcoming'};
+  return {cls:'', label:''};
 }
 
 function sgFmtDT(iso) {
@@ -698,10 +819,15 @@ function sgItemRow(item, group) {
   const sched = sgSchedSummary(item);
   const cb = h('input',{type:'checkbox',style:{width:'auto'}});
   cb.checked = sgSel.has(item.id);
-  cb.addEventListener('change',()=>{ if(cb.checked) sgSel.add(item.id); else sgSel.delete(item.id); sgUpdateToolbar(); });
+  cb.addEventListener('change',()=>{
+    if(cb.checked) sgSel.add(item.id); else sgSel.delete(item.id);
+    row.classList.toggle('sel', cb.checked);
+    sgUpdateToolbar();
+  });
   cb.addEventListener('click',e=>e.stopPropagation());
 
-  const row = h('div',{className:`sg-row ${group?'grouped':''} ${item.enabled&&(group?group.enabled:true)?'':'off'}`},
+  const status = sgItemStatus(item, group);
+  const row = h('div',{className:`sg-row ${group?'grouped':''} ${sgSel.has(item.id)?'sel':''} ${status.cls}`},
     h('div',{className:'drag-handle',title:'Drag to reorder'},'⠿'),
     cb,
     m.is_video
@@ -712,7 +838,9 @@ function sgItemRow(item, group) {
       h('div',{className:'sg-sub'},`#${item.id}${m.is_video&&m.duration_s?` · file ${Math.round(m.duration_s)}s`:''}`),
     ),
     h('div',{className:'sg-timing'},`▦ ${sgFmtSecs(t.dur)}${t.inherited?'*':''} · fade ${sgFmtSecs(t.fade)}`),
-    h('div',{className:'sg-sched',title:sched},sched||'always'),
+    h('div',{className:'sg-sched',title:`${status.label?status.label+' · ':''}${sched||'always'}`},
+      status.label ? h('span',{className:'sg-status-tag'},status.label+' ') : null,
+      sched||'always'),
     h('div',{className:'sg-imp',title:'Impressions (times shown)'},`👁 ${item.impressions||0}`),
     h('div',{className:'sg-actions'},
       h('div',{className:`toggle ${item.enabled?'on':''}`,onClick:()=>sgToggleItem(item),title:item.enabled?'Enabled':'Disabled'}),
@@ -730,7 +858,8 @@ function sgGroupRow(g) {
   const items = sgGroupItems(g.id);
   const collapsed = !!state.sgCollapsed[g.id];
   const sched = sgSchedSummary(g);
-  const row = h('div',{className:`sg-row sg-group-row ${g.enabled?'':'off'}`},
+  const status = sgItemStatus(g, null);
+  const row = h('div',{className:`sg-row sg-group-row ${status.cls}`},
     h('div',{className:'drag-handle',title:'Drag to reorder'},'⠿'),
     h('div',{style:{cursor:'pointer'},onClick:()=>{state.sgCollapsed[g.id]=!collapsed;render();}},collapsed?'▸':'▾'),
     h('div',{style:{fontSize:'20px',textAlign:'center'}},'🗂'),
@@ -741,7 +870,9 @@ function sgGroupRow(g) {
     h('div',{className:'sg-timing'},
       (g.duration_s!=null||g.crossfade_s!=null)
         ? `▦ ${g.duration_s!=null?sgFmtSecs(g.duration_s):'—'} · fade ${g.crossfade_s!=null?sgFmtSecs(g.crossfade_s):'—'}` : ''),
-    h('div',{className:'sg-sched',title:sched},sched||'always'),
+    h('div',{className:'sg-sched',title:`${status.label?status.label+' · ':''}${sched||'always'}`},
+      status.label ? h('span',{className:'sg-status-tag'},status.label+' ') : null,
+      sched||'always'),
     h('div',{className:'sg-imp'},''),
     h('div',{className:'sg-actions'},
       h('div',{className:`toggle ${g.enabled?'on':''}`,onClick:()=>sgToggleGroup(g),title:g.enabled?'Enabled':'Disabled'}),
@@ -752,17 +883,32 @@ function sgGroupRow(g) {
   // Dropping an item on the header appends it to the group; dropping a
   // group on it reorders at the top level
   sgMakeDraggable(row, {type:'group', id:g.id, groupId:null},
-    ()=> sgDrag && sgDrag.type==='item'
+    ()=> sgDrag && (sgDrag.type==='item' || sgDrag.type==='multi')
       ? {kind:'group-append', groupId:g.id}
       : {kind:'row', type:'group', id:g.id, groupId:null});
   return row;
 }
 
 function sgUpdateToolbar() {
-  const gb = document.getElementById('sg-group-btn');
-  const db = document.getElementById('sg-del-btn');
-  if (gb) gb.disabled = !sgSel.size;
-  if (db) db.disabled = !sgSel.size;
+  const n = sgSel.size;
+  for (const id of ['sg-group-btn','sg-del-btn','sg-edit-btn']) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !n;
+  }
+  const eb = document.getElementById('sg-edit-btn');
+  if (eb) eb.textContent = n ? `✎ Edit Selected (${n})` : '✎ Edit Selected';
+  const sa = document.getElementById('sg-selall-btn');
+  if (sa) {
+    const total = state.signage ? state.signage.items.length : 0;
+    sa.textContent = (total && n >= total) ? '☐ Select None' : '☑ Select All';
+  }
+}
+
+function sgToggleSelectAll() {
+  const all = state.signage.items.map(i=>i.id);
+  if (sgSel.size >= all.length) sgSel.clear();
+  else all.forEach(id=>sgSel.add(id));
+  render();
 }
 
 async function updateSignageStatus() {
@@ -856,12 +1002,17 @@ function renderSignagePage() {
 
   // Toolbar
   main.appendChild(h('div',{className:'sg-toolbar'},
+    h('button',{className:'sm',id:'sg-selall-btn',onClick:sgToggleSelectAll},
+      (state.signage.items.length && sgSel.size >= state.signage.items.length) ? '☐ Select None' : '☑ Select All'),
     h('button',{className:'sm',onClick:()=>{state.sgModal={type:'library'};render();}},'+ Add from Library'),
     h('button',{className:'sm',onClick:sgNewGroup},'🗂 New Group'),
     h('button',{className:'sm',id:'sg-group-btn',disabled:sgSel.size?null:'true',onClick:sgGroupSelected},'Group Selected'),
+    h('button',{className:'sm',id:'sg-edit-btn',disabled:sgSel.size?null:'true',
+      onClick:()=>{state.sgModal={type:'bulk'};render();}},
+      sgSel.size?`✎ Edit Selected (${sgSel.size})`:'✎ Edit Selected'),
     h('button',{className:'sm danger',id:'sg-del-btn',disabled:sgSel.size?null:'true',onClick:sgDeleteSelected},'Delete Selected'),
     h('div',{className:'form-hint',style:{marginLeft:'auto'}},
-      `Defaults: ${sgFmtSecs(state.signage.defaults.duration)} / fade ${sgFmtSecs(state.signage.defaults.crossfade)} (* = inherited) · drag ⠿ to reorder, drop items on a group to add`),
+      `Defaults: ${sgFmtSecs(state.signage.defaults.duration)} / fade ${sgFmtSecs(state.signage.defaults.crossfade)} (* = inherited) · drag ⠿ to reorder (selected rows move together) · drop items on a group to add`),
   ));
 
   // Playlist
@@ -923,6 +1074,89 @@ function renderSignageModal() {
             if(picked.size) await sgAddFromLibrary([...picked]);
             close();
           }},'Add Selected'),
+        ),
+      ));
+  }
+
+  if (type==='bulk') {
+    // Batch edit: each field only changes when its "apply" box is ticked;
+    // ticked + left blank resets that field to inherited/none
+    const d = state.signage ? state.signage.defaults : {duration:8,crossfade:1};
+    const n = sgSel.size;
+    function applyField(label, input, hint) {
+      const chk = h('input',{type:'checkbox',style:{width:'auto'}});
+      input.disabled = true;
+      chk.addEventListener('change',()=>{ input.disabled = !chk.checked; });
+      return h('div',{className:'form-group'},
+        h('label',{style:{display:'flex',alignItems:'center',gap:'7px',textTransform:'none'}},
+          chk, label),
+        input,
+        hint ? h('div',{className:'form-hint'},hint) : null,
+      );
+    }
+    const durInput = h('input',{type:'number',step:'0.5',min:'0.5',placeholder:`blank = inherit (${d.duration}s / video length)`});
+    const fadeInput = h('input',{type:'number',step:'0.1',min:'0',max:'30',placeholder:`blank = inherit (${d.crossfade}s)`});
+    const startInput = h('input',{type:'datetime-local'});
+    const endInput = h('input',{type:'datetime-local'});
+    const dsInput = h('input',{type:'time'});
+    const deInput = h('input',{type:'time'});
+    const enSel = h('select',null,h('option',{value:'1'},'Enabled'),h('option',{value:'0'},'Disabled'));
+    const fDur = applyField('Set Duration (s)', durInput);
+    const fFade = applyField('Set Crossfade (s)', fadeInput);
+    const fStart = applyField('Set Start Showing', startInput, 'Blank = clear (no start restriction)');
+    const fEnd = applyField('Set Expire', endInput, 'Blank = clear (never expires)');
+    const fDaily = (()=>{ // one apply box covers both daily bounds
+      const chk = h('input',{type:'checkbox',style:{width:'auto'}});
+      dsInput.disabled = deInput.disabled = true;
+      chk.addEventListener('change',()=>{ dsInput.disabled = deInput.disabled = !chk.checked; });
+      return h('div',{className:'form-group'},
+        h('label',{style:{display:'flex',alignItems:'center',gap:'7px',textTransform:'none'}},chk,'Set Daily Window'),
+        h('div',{className:'form-row'},
+          h('div',{className:'form-group'},h('label',null,'From'),dsInput),
+          h('div',{className:'form-group'},h('label',null,'Until'),deInput)),
+        h('div',{className:'form-hint'},'Both blank = clear the daily window'),
+      );})();
+    const fEn = applyField('Set Enabled/Disabled', enSel);
+
+    async function saveBulk() {
+      const set = {};
+      if (fDur.querySelector('input[type=checkbox]').checked)
+        set.duration_s = durInput.value===''?null:parseFloat(durInput.value);
+      if (fFade.querySelector('input[type=checkbox]').checked)
+        set.crossfade_s = fadeInput.value===''?null:parseFloat(fadeInput.value);
+      if (fStart.querySelector('input[type=checkbox]').checked)
+        set.start_at = startInput.value||null;
+      if (fEnd.querySelector('input[type=checkbox]').checked)
+        set.end_at = endInput.value||null;
+      if (fDaily.querySelector('input[type=checkbox]').checked) {
+        set.daily_start = dsInput.value?dsInput.value.substring(0,5):null;
+        set.daily_end = deInput.value?deInput.value.substring(0,5):null;
+      }
+      if (fEn.querySelector('input[type=checkbox]').checked)
+        set.enabled = enSel.value==='1';
+      if (Object.keys(set).length) {
+        const res = await api(`/instances/${state.signageInstId}/signage/items/update`,
+          {method:'POST',body:{item_ids:[...sgSel], set}});
+        if (res && res.error) { alert(res.error); return; }
+      }
+      state.sgModal = null;
+      await loadData(true);
+    }
+
+    return h('div',{className:'modal-overlay',onClick:e=>{if(e.target.className==='modal-overlay')close();}},
+      h('div',{className:'modal'},
+        h('h2',null,`Edit ${n} Selected Item${n===1?'':'s'}`),
+        h('div',{className:'form-hint',style:{marginBottom:'10px'}},
+          'Tick a field to apply it to every selected item; unticked fields are left as they are.'),
+        h('div',{className:'form-row'},fDur,fFade),
+        h('div',{className:'text-settings'},
+          h('div',{className:'form-row'},fStart,fEnd),
+          fDaily,
+        ),
+        fEn,
+        h('div',{className:'modal-actions'},
+          h('button',{onClick:close},'Cancel'),
+          h('button',{className:'primary',onClick:saveBulk},`Apply to ${n} Item${n===1?'':'s'}`),
         ),
       ));
   }
@@ -1266,6 +1500,7 @@ loadData();
 setInterval(() => { if (!uiBusy() && !document.hidden) loadData(); }, 5000);
 setInterval(updatePreviews, 2000);
 setInterval(updateSignageStatus, 2000);
+setInterval(tickServerClock, 1000);
 // Catch up immediately when the tab becomes visible again
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && !uiBusy()) { loadData(); updatePreviews(); }
