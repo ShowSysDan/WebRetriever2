@@ -13,6 +13,7 @@ import os
 import time
 import ctypes
 import signal
+import socket
 import logging
 import threading
 import multiprocessing as mp
@@ -43,6 +44,86 @@ DEFAULT_RECYCLE_HOURS = 4
 # relaunching Chromium) every watchdog tick forever.
 RESTART_BACKOFF_MAX = 300.0
 RESTART_STABLE_RESET = 120.0
+
+
+# --- Receiver identification (socket level) --------------------------------
+# The NDI send API reports HOW MANY receivers are connected but not WHO.
+# The OS knows: each worker process owns its NDI sender's listening TCP
+# socket, and every receiver holds at least one established connection to it
+# (the reliable control/metadata connection exists even when video travels
+# over UDP or multicast). Enumerating the worker's sockets gives peer IPs;
+# reverse DNS turns those into hostnames.
+
+_HOSTNAME_TTL = 300.0  # seconds a reverse-DNS answer (or miss) is cached
+_hostname_cache: Dict[str, tuple] = {}  # ip -> (hostname|None, expires_at)
+_hostname_pending: set = set()
+_hostname_lock = threading.Lock()
+
+
+def _resolve_hostname(ip: str) -> Optional[str]:
+    """Cached, non-blocking reverse DNS.
+
+    Returns the cached name immediately (None while unknown) and kicks off a
+    background lookup on a cache miss — gethostbyaddr can block for seconds
+    on an unresponsive DNS server, which must never stall an API request.
+    The name typically fills in by the caller's next poll."""
+    now = time.monotonic()
+    with _hostname_lock:
+        hit = _hostname_cache.get(ip)
+        if hit is not None and hit[1] > now:
+            return hit[0]
+        if ip in _hostname_pending:
+            return hit[0] if hit else None
+        _hostname_pending.add(ip)
+
+    def lookup():
+        try:
+            name = socket.gethostbyaddr(ip)[0]
+        except OSError:
+            name = None
+        with _hostname_lock:
+            _hostname_cache[ip] = (name, time.monotonic() + _HOSTNAME_TTL)
+            _hostname_pending.discard(ip)
+
+    threading.Thread(target=lookup, daemon=True, name="rdns-lookup").start()
+    return hit[0] if hit else None
+
+
+def _receiver_endpoints_for_pid(pid: int) -> dict:
+    """Socket-level receiver list for one worker process.
+
+    Finds the process's TCP LISTEN ports (its NDI sender's port(s)) and
+    returns the unique peer IPs of ESTABLISHED connections to them, with a
+    per-IP connection count (one receiver typically holds several NDI
+    connections: video/audio/metadata). Needs psutil; degrades to
+    {'supported': False, 'reason': ...} without it or on access errors."""
+    try:
+        import psutil
+    except ImportError:
+        return {"supported": False,
+                "reason": "psutil not installed — pip install psutil"}
+    try:
+        proc = psutil.Process(pid)
+        # .connections() was renamed .net_connections() in psutil 6
+        get_conns = getattr(proc, "net_connections", None) or proc.connections
+        conns = get_conns(kind="tcp")
+    except (psutil.Error, OSError) as e:
+        return {"supported": False, "reason": str(e)}
+
+    listen_ports = {c.laddr.port for c in conns
+                    if c.status == psutil.CONN_LISTEN and c.laddr}
+    peers: Dict[str, int] = {}
+    for c in conns:
+        if (c.status == psutil.CONN_ESTABLISHED and c.laddr and c.raddr
+                and c.laddr.port in listen_ports):
+            peers[c.raddr.ip] = peers.get(c.raddr.ip, 0) + 1
+    return {
+        "supported": True,
+        "receivers": [
+            {"ip": ip, "hostname": _resolve_hostname(ip), "connections": n}
+            for ip, n in sorted(peers.items())
+        ],
+    }
 
 
 def _kill_process_tree(process: mp.Process):
@@ -356,6 +437,15 @@ class WorkerManager:
             "on_program": bool(flags & TALLY_PROGRAM),
             "on_preview": bool(flags & TALLY_PREVIEW),
         }
+
+    def get_receiver_endpoints(self, instance_id: int) -> Optional[dict]:
+        """Socket-level receiver identification for a running worker: the
+        peer IPs (and cached hostnames) of established TCP connections to
+        the worker's NDI listening ports. None when not running."""
+        proc = self._processes.get(instance_id)
+        if proc is None or not proc.is_alive() or proc.pid is None:
+            return None
+        return _receiver_endpoints_for_pid(proc.pid)
 
     def get_video_state(self, instance_id: int) -> Optional[str]:
         """Playback state of a running video worker, or None if not applicable."""

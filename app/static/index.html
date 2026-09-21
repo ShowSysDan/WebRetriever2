@@ -40,6 +40,12 @@
   .tally { font-family:'JetBrains Mono',monospace; font-size:9px; font-weight:700; letter-spacing:.5px; border-radius:3px; padding:1px 5px; }
   .tally.pgm { background:var(--danger); color:#fff; }
   .tally.pvw { background:var(--accent); color:#000; }
+
+  /* Receivers modal (who is pulling a source) */
+  .rx-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .rx-table th { text-align:left; font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; padding:4px 8px; border-bottom:1px solid var(--border); }
+  .rx-table td { padding:6px 8px; border-bottom:1px solid var(--border); }
+  .rx-table td.mono { font-family:'JetBrains Mono',monospace; font-size:12px; }
   .header-actions { display:flex; gap:12px; align-items:center; }
   .server-clock { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text-dim); white-space:nowrap; padding:4px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); cursor:default; }
 
@@ -249,6 +255,7 @@ let state = {
   signage: null,        // GET /instances/<id>/signage payload
   sgModal: null,        // {type:'item'|'group'|'library', obj}
   sgCollapsed: {},      // group id -> collapsed
+  rxModal: null,        // {instId, name, data} — receiver list popup
 };
 const sgSel = new Set(); // selected signage item ids (multi-select actions)
 
@@ -620,6 +627,61 @@ async function videoStop(id) {
   await api(`/instances/${id}/video/stop`,{method:'POST'}); await loadData();
 }
 
+// --- Receivers popup (who is pulling a source) ---------------------------
+async function openRxModal(inst) {
+  state.rxModal = {instId: inst.id, name: inst.name, data: null};
+  render();
+  await refreshRxModal();
+}
+async function refreshRxModal() {
+  if (!state.rxModal) return;
+  try {
+    const d = await api(`/instances/${state.rxModal.instId}/receivers`);
+    if (state.rxModal && state.rxModal.instId === d.id) {
+      state.rxModal.data = d;
+      render();
+    }
+  } catch(e) {}
+}
+
+function renderRxModal() {
+  if (!state.rxModal) return null;
+  const {name, data} = state.rxModal;
+  const close = ()=>{state.rxModal=null;render();};
+  let body;
+  if (!data) {
+    body = h('div',{className:'form-hint'},'Looking up connections…');
+  } else if (!data.supported) {
+    body = h('div',{className:'form-hint'},`Not available: ${data.reason||'unsupported'}`);
+  } else if (!data.receivers || !data.receivers.length) {
+    body = h('div',{className:'form-hint'},
+      data.running===false ? 'Instance not running.' : 'No receivers connected.');
+  } else {
+    body = h('table',{className:'rx-table'},
+      h('thead',null,h('tr',null,
+        h('th',null,'Hostname'),h('th',null,'IP Address'),h('th',null,'Connections'))),
+      h('tbody',null, ...data.receivers.map(r=>h('tr',null,
+        h('td',null,r.hostname||'—'),
+        h('td',{className:'mono'},r.ip),
+        h('td',null,String(r.connections)),
+      ))),
+    );
+  }
+  const sdkNote = data && data.sdk_receivers!=null ? ` The NDI SDK reports ${data.sdk_receivers}.` : '';
+  return h('div',{className:'modal-overlay',onClick:e=>{if(e.target.className==='modal-overlay')close();}},
+    h('div',{className:'modal',style:{width:'480px'}},
+      h('h2',null,`Receivers — ${name}`),
+      h('div',{className:'form-hint',style:{marginBottom:'10px'}},
+        `Established NDI connections to this source, from the worker's sockets.${sdkNote} `+
+        `Hostnames come from reverse DNS and can take a moment to fill in. Auto-refreshes while open.`),
+      body,
+      h('div',{className:'modal-actions'},
+        h('button',{onClick:refreshRxModal},'↻ Refresh'),
+        h('button',{onClick:close},'Close'),
+      ),
+    ));
+}
+
 // Live preview popup — one window per instance (reused on re-click). Sized
 // to the output aspect ratio plus room for the header/footer bars.
 function openPreviewPopup(inst) {
@@ -760,7 +822,9 @@ function renderInstanceCard(inst) {
         ? h('div',{className:'rx-line'},
             inst.ndi.receivers!=null
               ? h('span',{className:`rx-count ${inst.ndi.receivers?'active':''}`,
-                          title:'NDI receivers currently connected to this source'},
+                          style:{cursor:'pointer'},
+                          title:'NDI receivers connected — click to list hostnames & IPs',
+                          onClick:()=>openRxModal(inst)},
                   `◉ ${inst.ndi.receivers} RX`)
               : null,
             inst.ndi.on_program ? h('span',{className:'tally pgm',title:'On program (downstream tally)'},'PGM') : null,
@@ -1354,7 +1418,9 @@ function renderSignagePage() {
         h('div',{className:'val dim',id:'sg-next'},'—')),
       inst.running && inst.ndi && inst.ndi.receivers!=null
         ? h('div',null,h('div',{className:'label'},'Receivers'),
-            h('div',{className:'val dim',title:'NDI receivers pulling this source'},`◉ ${inst.ndi.receivers}`))
+            h('div',{className:'val dim',style:{cursor:'pointer'},
+                     title:'NDI receivers pulling this source — click to list hostnames & IPs',
+                     onClick:()=>openRxModal(inst)},`◉ ${inst.ndi.receivers}`))
         : null,
     ),
     h('div',{className:'sg-live-actions'},
@@ -1877,6 +1943,8 @@ function render() {
   if(modal) root.appendChild(modal);
   const sgModal = renderSignageModal();
   if(sgModal) root.appendChild(sgModal);
+  const rxModal = renderRxModal();
+  if(rxModal) root.appendChild(rxModal);
   syncRoute();
   syncSignageEvents();
 }
@@ -1890,6 +1958,7 @@ setInterval(() => { if (!uiBusy() && !document.hidden) loadData(); }, 5000);
 setInterval(updatePreviews, 2000);
 setInterval(updateSignageStatus, 2000);
 setInterval(tickServerClock, 1000);
+setInterval(() => { if (state.rxModal && !document.hidden) refreshRxModal(); }, 3000);
 // Catch up immediately when the tab becomes visible again; hidden tabs
 // also drop their signage event stream (reopened on return) so idle
 // sessions never hold server connections
