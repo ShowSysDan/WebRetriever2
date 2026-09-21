@@ -30,9 +30,17 @@ class Config:
     # DPI used when rasterizing presentation slides/PDF pages
     PRESENTATION_RENDER_DPI = int(os.getenv("PRESENTATION_RENDER_DPI", "150"))
 
-    # Signage runtime state (playlist JSON handed to workers, now-playing
-    # status, impression logs) — generated files, not user content
+    # Signage state that must SURVIVE a reboot (playlist JSON handed to
+    # workers, impression logs) — generated files, not user content
     SIGNAGE_STATE_FOLDER = os.path.join(BASE_DIR, "signage_state")
+
+    # Throwaway runtime files rewritten constantly — the now-playing status
+    # JSON (1 write/s per signage instance). Defaults to tmpfs (/dev/shm)
+    # where available so these writes land in RAM instead of wearing the
+    # SSD; falls back to the persistent state folder (e.g. on Windows).
+    _rt_default = ("/dev/shm/webretriever2_runtime"
+                   if os.path.isdir("/dev/shm") else SIGNAGE_STATE_FOLDER)
+    SIGNAGE_RUNTIME_FOLDER = os.getenv("SIGNAGE_RUNTIME_FOLDER", _rt_default)
 
     # Video optimization: background one-time transcode (ffmpeg) into the
     # cheapest-to-decode playback format — H.264/yuv420p MP4, tuned
@@ -57,8 +65,13 @@ class Config:
     # Browser recycling (hours) — restarts Chromium to prevent memory leaks
     BROWSER_RECYCLE_HOURS = float(os.getenv("BROWSER_RECYCLE_HOURS", "4"))
 
-    # Preview thumbnails for the web UI
-    PREVIEW_FOLDER = os.path.join(BASE_DIR, "previews")
+    # Preview thumbnails for the web UI — pure throwaway state, rewritten up
+    # to every 2s per running instance (4/s while a popup preview streams),
+    # so they default to tmpfs (/dev/shm) where available: the constant
+    # small writes land in RAM, not on the SSD.
+    _pv_default = ("/dev/shm/webretriever2_previews"
+                   if os.path.isdir("/dev/shm") else os.path.join(BASE_DIR, "previews"))
+    PREVIEW_FOLDER = os.getenv("PREVIEW_FOLDER", _pv_default)
     PREVIEW_INTERVAL = 2.0  # seconds between preview saves
 
     # Media library poster thumbnails (server-generated JPEGs — the UI never

@@ -108,7 +108,14 @@ SIGNAGE_CMD_RELOAD = 2  # re-read the playlist JSON from disk
 # transition, on a background thread. Stills are fully decoded into a RAM
 # canvas and videos get their file opened (first frame decoded, page cache
 # warmed), so going on air never waits on the disk inside the send loop.
+# Slots shorter than the lead just preload right after the previous
+# transition — the busy/already-preloaded guard in preload_next() means at
+# most ONE build ever runs per upcoming item, however often the loop asks.
 SIGNAGE_PRELOAD_LEAD = 6.0
+
+# RAM budget for decoded signage stills (MB). Canvases are kept across
+# rotations, so a still that already played never touches the disk again.
+SIGNAGE_STILL_CACHE_MB = int(os.getenv("SIGNAGE_STILL_CACHE_MB", "256"))
 
 # Preview boost: while a live preview popup is streaming, the API keeps a
 # shared monotonic deadline refreshed; until it passes, previews are saved
@@ -191,6 +198,66 @@ def _signage_item_eligible(item, now=None):
     return True
 
 
+class _StillCache:
+    """Decoded, letterboxed still canvases kept in RAM across rotations.
+
+    A signage playlist replays the same files for hours; without this every
+    rotation re-reads and re-decodes each image from disk. Canvases are
+    keyed by (path, mtime, size) — replacing a file on disk naturally
+    invalidates its entry — and evicted LRU once the byte budget is hit.
+    Cached arrays are shared between plays and marked read-only: an image
+    layer never writes its canvas after construction, so sharing is safe
+    (and skips even the memcpy a fresh decode would need).
+
+    Thread-safe: layers are built both inline (send loop) and by the
+    preload thread.
+    """
+
+    def __init__(self, max_bytes):
+        from collections import OrderedDict
+        self._entries = OrderedDict()  # key -> canvas
+        self._bytes = 0
+        self._max = max_bytes
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key(path, out_w, out_h):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (path, st.st_mtime_ns, st.st_size, out_w, out_h)
+
+    def get(self, path, out_w, out_h):
+        key = self._key(path, out_w, out_h)
+        if key is None:
+            return None
+        with self._lock:
+            buf = self._entries.get(key)
+            if buf is not None:
+                self._entries.move_to_end(key)
+            return buf
+
+    def put(self, path, out_w, out_h, buf):
+        if buf.nbytes > self._max:
+            return
+        key = self._key(path, out_w, out_h)
+        if key is None:
+            return
+        buf.setflags(write=False)
+        with self._lock:
+            if key in self._entries:
+                return
+            self._entries[key] = buf
+            self._bytes += buf.nbytes
+            while self._bytes > self._max and len(self._entries) > 1:
+                _, old = self._entries.popitem(last=False)
+                self._bytes -= old.nbytes
+
+
+_STILL_CACHE = _StillCache(SIGNAGE_STILL_CACHE_MB * 1024 * 1024)
+
+
 class _SignageLayer:
     """One playlist entry rendered onto its own (h, w, 3) BGR canvas.
 
@@ -198,22 +265,28 @@ class _SignageLayer:
     air and, during a crossfade, the outgoing one — and alpha-blends their
     canvases into the shared BGRX frame buffer. item=None is the black idle
     layer (canvas stays zeroed) shown when nothing is scheduled.
+
+    Still canvases come from / go into _STILL_CACHE, so an image that has
+    played once lives in RAM and is never read from disk again (until the
+    file changes or the cache budget evicts it).
     """
 
     def __init__(self, item, out_w, out_h):
         self.item = item or None
-        self.buf = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        self.buf = None
         self.ok = True
         self.done = False      # video reached end-of-file
         self.advanced = False  # frame() decoded a new video frame this call
         self._vf = None
         self._next_frame_time = None
         if item is None:
+            self.buf = np.zeros((out_h, out_w, 3), dtype=np.uint8)
             return
 
         kind = item.get("kind")
         path = item.get("path", "")
         if kind == "video":
+            self.buf = np.zeros((out_h, out_w, 3), dtype=np.uint8)
             self._vf = _VideoFile(path, out_w, out_h)
             first = self._vf.read() if self._vf.ok else None
             if first is None:
@@ -226,7 +299,13 @@ class _SignageLayer:
             # video source's BGRX buffer
             self._vf.blit(first, self.buf)
         else:  # image
+            cached = _STILL_CACHE.get(path, out_w, out_h)
+            if cached is not None:
+                # Shared read-only canvas — zero disk I/O, zero decode
+                self.buf = cached
+                return
             import cv2
+            self.buf = np.zeros((out_h, out_w, 3), dtype=np.uint8)
             img = cv2.imread(path, cv2.IMREAD_COLOR)
             if img is None:
                 self.ok = False
@@ -240,6 +319,7 @@ class _SignageLayer:
             off_x = (out_w - fit_w) // 2
             off_y = (out_h - fit_h) // 2
             self.buf[off_y:off_y + fit_h, off_x:off_x + fit_w] = img
+            _STILL_CACHE.put(path, out_w, out_h, self.buf)
 
     def start(self, now):
         """Begin playback clock (videos advance from their first frame)."""
@@ -1368,6 +1448,7 @@ class NDIWorker:
             """Fade from `current` to the next eligible item (or to black)."""
             nonlocal current, cur_index, cur_start, cur_fade, fade_start_t
             nonlocal fading_from, fade_t0, fade_dur, buffer_synced, frame_dirty
+            nonlocal last_status_t
 
             j, item = pick_next(cur_index)
             layer = take_preloaded(item)
@@ -1423,6 +1504,9 @@ class NDIWorker:
             else:
                 old.release()
                 fading_from = None
+            # Status file updates this same iteration — the event stream
+            # pushes item changes to browsers in real time
+            last_status_t = 0.0
 
         self._update_heartbeat()
 

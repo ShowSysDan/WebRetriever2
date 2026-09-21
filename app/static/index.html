@@ -1232,24 +1232,64 @@ function sgApplyPlayingHighlight() {
   });
 }
 
+let sgLastStatus = null; // last payload — re-applied after re-renders
+
+function applySignageStatus(s) {
+  sgLastStatus = s;
+  const set = (id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
+  if (s.running && s.status) {
+    set('sg-now', s.status.current ? s.status.current.name : 'Black (nothing scheduled)');
+    set('sg-remaining', s.status.current && s.status.remaining_s!=null
+      ? `${Math.max(0,Math.round(s.status.remaining_s))}s left` : '');
+    set('sg-next', s.status.next ? s.status.next.name : '—');
+    sgNowPlayingId = s.status.current ? s.status.current.id : null;
+  } else {
+    set('sg-now', s.running ? 'Starting…' : 'Not running');
+    set('sg-next','—'); set('sg-remaining','');
+    sgNowPlayingId = null;
+  }
+  sgApplyPlayingHighlight();
+}
+
+// --- Real-time signage status (Server-Sent Events) ----------------------
+// The server pushes the now-playing payload the moment it changes (item
+// transitions land in ~200ms, the countdown ticks each second). While the
+// stream is delivering, the interval poll below becomes a no-op; if the
+// stream drops, EventSource reconnects on its own and the poll covers the
+// gap in the meantime.
+let sgEvt = null, sgEvtInstId = null, sgEvtLive = false;
+
+function syncSignageEvents() {
+  // One stream per visible signage view — hidden tabs and other pages hold
+  // no server connection, so any number of browser sessions can stay open
+  const wanted = state.tab==='signage' && state.signageInstId && !document.hidden;
+  if (!wanted) {
+    if (sgEvt) { sgEvt.close(); sgEvt=null; sgEvtInstId=null; sgEvtLive=false; }
+    return;
+  }
+  if (sgEvt && sgEvtInstId === state.signageInstId) return;
+  if (sgEvt) sgEvt.close();
+  sgEvtInstId = state.signageInstId;
+  sgEvtLive = false;
+  sgEvt = new EventSource(`${API}/instances/${sgEvtInstId}/signage/events`);
+  sgEvt.onmessage = e => {
+    sgEvtLive = true;
+    try { applySignageStatus(JSON.parse(e.data)); } catch(err) {}
+  };
+  sgEvt.onerror = () => { sgEvtLive = false; };
+}
+
 async function updateSignageStatus() {
   if (state.tab!=='signage' || !state.signageInstId || document.hidden) return;
+  if (sgEvtLive && sgEvtInstId === state.signageInstId) {
+    // Stream is live — just re-apply the last payload (a re-render may
+    // have rebuilt the DOM since the last push)
+    if (sgLastStatus) applySignageStatus(sgLastStatus);
+    return;
+  }
   try {
-    const s = await api(`/instances/${state.signageInstId}/signage/status`);
-    const set = (id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
-    if (s.running && s.status) {
-      set('sg-now', s.status.current ? s.status.current.name : 'Black (nothing scheduled)');
-      set('sg-remaining', s.status.current && s.status.remaining_s!=null
-        ? `${Math.max(0,Math.round(s.status.remaining_s))}s left` : '');
-      set('sg-next', s.status.next ? s.status.next.name : '—');
-      sgNowPlayingId = s.status.current ? s.status.current.id : null;
-    } else {
-      set('sg-now', s.running ? 'Starting…' : 'Not running');
-      set('sg-next','—'); set('sg-remaining','');
-      sgNowPlayingId = null;
-    }
+    applySignageStatus(await api(`/instances/${state.signageInstId}/signage/status`));
   } catch(e) {}
-  sgApplyPlayingHighlight();
 }
 
 function renderSignagePage() {
@@ -1812,6 +1852,7 @@ function render() {
   const sgModal = renderSignageModal();
   if(sgModal) root.appendChild(sgModal);
   syncRoute();
+  syncSignageEvents();
 }
 
 // A modal open or a drag in progress must not be clobbered by a poll re-render
@@ -1823,8 +1864,11 @@ setInterval(() => { if (!uiBusy() && !document.hidden) loadData(); }, 5000);
 setInterval(updatePreviews, 2000);
 setInterval(updateSignageStatus, 2000);
 setInterval(tickServerClock, 1000);
-// Catch up immediately when the tab becomes visible again
+// Catch up immediately when the tab becomes visible again; hidden tabs
+// also drop their signage event stream (reopened on return) so idle
+// sessions never hold server connections
 document.addEventListener('visibilitychange', () => {
+  syncSignageEvents();
   if (!document.hidden && !uiBusy()) { loadData(); updatePreviews(); }
 });
 </script>

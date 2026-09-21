@@ -47,11 +47,30 @@ def create_app(config_class=Config):
     db.init_app(app)
     Migrate(app, db)
 
+    # SQLite multi-user hardening: with several people using the UI at once
+    # (each browser polls + edits), the default rollback journal makes
+    # concurrent writes fail fast with "database is locked". WAL lets
+    # readers and a writer coexist, and busy_timeout makes a second writer
+    # wait its turn instead of erroring. No-op for PostgreSQL.
+    if app.config["SQLALCHEMY_DATABASE_URI"].startswith("sqlite"):
+        from sqlalchemy import event
+        with app.app_context():
+            engine = db.engine
+
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragmas(dbapi_conn, _record):
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=5000")
+            cur.execute("PRAGMA synchronous=NORMAL")
+            cur.close()
+
     # Ensure upload, preview, thumbnail, and signage state directories exist
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
     os.makedirs(app.config["PREVIEW_FOLDER"], exist_ok=True)
     os.makedirs(app.config["THUMB_FOLDER"], exist_ok=True)
     os.makedirs(app.config["SIGNAGE_STATE_FOLDER"], exist_ok=True)
+    os.makedirs(app.config["SIGNAGE_RUNTIME_FOLDER"], exist_ok=True)
 
     # Register API
     app.register_blueprint(api)

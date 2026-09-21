@@ -1302,6 +1302,7 @@ Behavior notes:
 | `POST` | `/api/instances/:id/signage/reorder` | Persist a full ordering — `{"order":[{"type":"item"\|"group","id":n},..], "group_items":{"<gid>":[item ids]}}` |
 | `POST` | `/api/instances/:id/signage/upload` | Upload straight into the playlist (multipart); ppt/pptx/odp/pdf become a group of slide images |
 | `GET`/`POST` | `/api/instances/:ref/signage/status` | Now playing / up next / seconds remaining (`:ref` = id or name) |
+| `GET` | `/api/instances/:ref/signage/events` | Real-time now-playing stream (Server-Sent Events) — pushes the status payload on every change; usable from any `EventSource` client |
 | `GET`/`POST` | `/api/instances/:ref/signage/skip` | Crossfade to the next item now |
 
 Schedule datetimes use the HTML `datetime-local` format (`2026-10-01T07:00`)
@@ -1411,7 +1412,32 @@ Current version is tracked in the `VERSION` file at the project root.
   cache (`posix_fadvise WILLNEED`). Transitions no longer touch the disk
   inside the send loop, so going on air can't drop frames on slow storage
   or large images. If the schedule changes between preload and transition,
-  the worker falls back to the previous inline load.
+  the worker falls back to the previous inline load. Slots shorter than
+  the lead are safe: the preload guard builds each upcoming item exactly
+  once, however often the loop checks.
+- **Stills live in RAM across rotations.** Decoded, letterboxed canvases
+  are kept in an LRU cache (`SIGNAGE_STILL_CACHE_MB`, default 256) keyed by
+  file mtime — an image that has played once is never read from disk again
+  until the file changes or the budget evicts it.
+- **Constant small writes moved off the SSD.** Preview JPEGs (rewritten up
+  to every 2s per running instance) and the signage now-playing status
+  (1 write/s) now default to tmpfs (`/dev/shm`) on Linux, so they land in
+  RAM. Playlist JSON and impression logs stay on disk — they must survive
+  a reboot. Overridable via `PREVIEW_FOLDER` / `SIGNAGE_RUNTIME_FOLDER`;
+  non-Linux platforms fall back to the previous app-folder paths.
+- **Real-time now-playing updates (Server-Sent Events).** New
+  `/api/instances/:ref/signage/events` endpoint streams the status payload
+  the moment it changes — the worker writes its status file the same frame
+  a transition starts, so the green on-air highlight and Now Playing text
+  move within ~200ms instead of a 2s poll. The UI falls back to polling
+  automatically if the stream drops, closes the stream on hidden tabs, and
+  `EventSource` reconnects on its own. SSE was chosen over WebSockets
+  because the flow is one-directional (commands stay on plain HTTP) and it
+  needs no extra dependencies or proxy configuration.
+- **Multi-user hardening.** SQLite now runs in WAL mode with a 5s busy
+  timeout — several people can use the UI at once (each browser polls and
+  edits) without "database is locked" errors; readers no longer block the
+  writer. No-op when running on PostgreSQL.
 - **Full-page upload progress.** Uploads now open a full-screen overlay
   with large per-file progress bars (% sent, then a processing pulse while
   the server probes/converts, then done/error) and an m-of-n summary. A
@@ -1420,8 +1446,9 @@ Current version is tracked in the `VERSION` file at the project root.
 - **On-air highlight in the Signage playlist.** The now-playing preview
   image is gone from the Signage tab; instead the item currently on air is
   highlighted green in the playlist with an `ON AIR` badge (its group
-  header too), updated live from the status poll. The slimmer live bar
-  keeps Now Playing / countdown / Up Next and the transport buttons.
+  header too), updated in real time from the event stream. The slimmer
+  live bar keeps Now Playing / countdown / Up Next and the transport
+  buttons.
 - **Larger UI text across the board** — instance FPS/refresh/resolution
   readouts, playlist rows, media cards, filter chips, tabs, section titles
   and form hints all stepped up for readability on production monitors.
