@@ -59,6 +59,13 @@ from typing import Optional
 import numpy as np
 from PIL import Image
 
+# OpenCV's FFmpeg capture decodes single-threaded by default, which is what
+# makes 4K sources stutter on otherwise capable machines. "threads;auto"
+# lets FFmpeg spread software decode across cores. Read when a capture is
+# opened, and inherited by worker child processes; setdefault so an operator
+# can still override it from the environment.
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "threads;auto")
+
 logger = logging.getLogger(__name__)
 
 # Default: recycle browser every 4 hours
@@ -392,7 +399,22 @@ class _VideoFile:
         self._needs_resize = False
         self._resize_buf = None
 
-        self.cap = cv2.VideoCapture(path)
+        # Ask for hardware-accelerated decode (VAAPI/QSV/NVDEC/...) when the
+        # machine has it — VIDEO_ACCELERATION_ANY falls back to software
+        # decoding internally, and we fall back to a plain open if this
+        # OpenCV build predates the API entirely
+        self.cap = None
+        try:
+            self.cap = cv2.VideoCapture(
+                path, cv2.CAP_FFMPEG,
+                [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY],
+            )
+        except Exception:
+            self.cap = None
+        if self.cap is None or not self.cap.isOpened():
+            if self.cap is not None:
+                self.cap.release()
+            self.cap = cv2.VideoCapture(path)
         self.ok = self.cap.isOpened()
         if not self.ok:
             self.cap.release()

@@ -138,6 +138,13 @@ if ! command -v soffice &>/dev/null || ! command -v pdftoppm &>/dev/null; then
     warn "    sudo apt install libreoffice-impress poppler-utils"
 fi
 
+# Optional: ffmpeg for background video optimization (4K uploads get a light
+# 1080p playback copy so playback never chokes on CPU decode).
+if ! command -v ffmpeg &>/dev/null; then
+    warn "Optional: install ffmpeg so oversized (4K) videos are auto-optimized for smooth playback:"
+    warn "    sudo apt install ffmpeg"
+fi
+
 # ------------------------------------------------------------------
 # 5. NDI SDK detection + system install
 # ------------------------------------------------------------------

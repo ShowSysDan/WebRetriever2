@@ -121,6 +121,10 @@
   .chip:hover { border-color:var(--border-hover); }
   .chip.active { background:var(--accent-dim); color:var(--accent); border-color:var(--accent-dim); font-weight:600; }
   .media-origin { font-size:10px; color:var(--text-dim); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .media-opt { font-size:10px; margin-top:2px; font-family:'JetBrains Mono',monospace; }
+  .media-opt.done { color:var(--accent); }
+  .media-opt.busy { color:var(--blue); animation:up-pulse 1.2s ease-in-out infinite; }
+  .media-opt.warn { color:var(--warning); }
 
   .upload-zone { border:2px dashed var(--border); border-radius:var(--radius); padding:32px; text-align:center; color:var(--text-dim); cursor:pointer; transition:border-color .15s; }
   .upload-zone:hover { border-color:var(--accent); color:var(--text); }
@@ -467,6 +471,11 @@ async function sgToggleGroup(g) {
   await api(`/signage/groups/${g.id}`,{method:'PUT',body:{enabled:!g.enabled}});
   await loadData(true);
 }
+async function optimizeMedia(id) {
+  const res = await api(`/media/${id}/optimize`,{method:'POST'});
+  if (res && res.error) alert(res.error);
+  await loadData(true);
+}
 async function sgAddFromLibrary(mediaIds) {
   await api(`/instances/${state.signageInstId}/signage/items`,
             {method:'POST',body:{media_file_ids:mediaIds}});
@@ -508,7 +517,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v1.3.0'),
+      h('span',{className:'version'},'v1.4.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
@@ -652,10 +661,26 @@ function renderMediaCard(m) {
       h('div',{className:'media-card-meta',title:'Permanent ID for API playback URLs — never reused, even after deletes'},
         `id ${m.id}${m.uid?` · uid ${m.uid}`:''}`),
       h('div',{className:'media-origin',title:'How this file was added'},originLabel),
+      (()=>{ // background-optimization state for videos
+        const s = m.optimize_status;
+        if (s==='done') return h('div',{className:'media-opt done',
+          title:'A light H.264 playback copy is used on air; ?original=1 fetches the upload'},
+          `⚡ optimized → ${m.optimized_width||'?'}×${m.optimized_height||'?'}`);
+        if (s==='pending'||s==='processing') return h('div',{className:'media-opt busy'},'⚙ optimizing…');
+        if (s==='failed') return h('div',{className:'media-opt warn'},'⚠ optimize failed');
+        if (s==='skipped') return h('div',{className:'media-opt warn',
+          title:'Install ffmpeg on the server (apt install ffmpeg) and click Optimize'},
+          '⚠ heavy video — ffmpeg missing');
+        return null;
+      })(),
       usedBy.length ? h('div',{className:'media-usage'},`Source for: ${usedBy.map(i=>i.name).join(', ')}`) : null,
       suLabels.length ? h('div',{className:'media-usage'},`Playlist: ${suLabels.join(' · ')}`) : null,
     ),
     h('div',{className:'media-card-actions'},
+      m.can_optimize
+        ? h('button',{className:'sm',title:'Create a light playback copy sized for the outputs',
+            onClick:(e)=>{e.stopPropagation();optimizeMedia(m.id);}},'⚡')
+        : null,
       h('button',{className:'sm danger',onClick:(e)=>{e.stopPropagation();deleteMedia(m.id);}},'✕'),
     ),
   );

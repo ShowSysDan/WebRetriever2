@@ -19,6 +19,7 @@ A self-hosted Flask application that captures webpages, images, or text via head
 - **Impression counters** — every item counts how many times it went on air
 - **Live signage control** — see what's playing and what's next, and skip ahead with one click or a bare URL (`/api/instances/<id-or-name>/signage/skip`)
 - **Upload progress** — per-file progress readout with % uploaded, server-processing state, and clear error messages
+- **4K-safe video pipeline** — workers decode with all cores (and the box's hardware decoder when present), and oversized uploads are automatically transcoded once, in the background, into a light H.264 playback copy sized for the outputs (originals kept; `VIDEO_OPTIMIZE=all` normalizes every upload, `off` disables)
 - **Live preview popups** — pop any output into its own confidence-monitor window (click a thumbnail or the ⧉ button): an MJPEG stream that automatically switches the worker to larger, faster preview frames (854px @ ~4fps) while the window is open, with live state, and now/next for signage
 - **Video playback as NDI** — upload a video (mp4, mov, mkv, webm…) and play it out as an NDI source: play once or loop, hold the last or first frame while stopped, optional autoplay on start
 - **Show-control friendly playback API** — trigger video play/stop/load with a plain GET or POST URL on the same port as the web UI (works from Companion, Crestron, QLab, or a browser bookmark), addressing instances by id or by name
@@ -1185,8 +1186,9 @@ thumbnail or the ⧉ button) or bookmark the URL directly.
 | `GET` | `/api/media` | List all uploaded files |
 | `POST` | `/api/media` | Upload a file (multipart) |
 | `GET` | `/api/media/:id` | Get file metadata |
-| `GET` | `/api/media/:id/file` | Serve the actual file |
-| `DELETE` | `/api/media/:id` | Delete file (unlinks from instances) |
+| `GET` | `/api/media/:id/file` | Serve the playback file (optimized copy when one exists; `?original=1` for the untouched upload) |
+| `POST` | `/api/media/:id/optimize` | Queue a video for background optimization (202; 501 when ffmpeg is missing) |
+| `DELETE` | `/api/media/:id` | Delete file (unlinks from instances, removes the optimized copy too) |
 
 Each entry in the listing carries its **origin** — `library` (Media Library
 upload), `signage` (Signage tab upload), or `deck` (a slide rasterized from
@@ -1395,6 +1397,35 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.4.0
+
+**4K playback** — faster native decode plus a built-in background converter.
+
+- **Multithreaded + hardware decode in the workers.** OpenCV's FFmpeg
+  capture decoded on a single thread; workers now request `threads=auto`
+  (override via `OPENCV_FFMPEG_CAPTURE_OPTIONS`) and hardware-accelerated
+  decode (VAAPI/QSV/NVDEC, automatic software fallback) — native 4K is
+  viable on capable machines.
+- **Background video optimizer.** Uploads larger than the target box
+  (default 1920×1080) are transcoded once, in the background, into the
+  cheapest-to-decode playback format: H.264/yuv420p MP4, `-tune
+  fastdecode`, audio stripped, `faststart`, sized to the box (per-frame
+  resize in the worker disappears too). One `nice`d ffmpeg at a time so
+  live outputs keep priority; never realtime transcoding during playback.
+- Originals stay on disk untouched (`/api/media/:id/file?original=1`);
+  everything else — workers, signage playlists, video play/load commands,
+  browser previews — uses the optimized copy automatically. Signage
+  players hot-reload onto it when the transcode finishes; video instances
+  pick it up on their next play/load/start.
+- Modes via `VIDEO_OPTIMIZE`: `oversized` (default), `all` (normalize
+  every upload to the standard playback format), `off`. Target box,
+  CRF and preset configurable in `.env`.
+- Media cards show the optimization state (⚙ optimizing / ⚡ optimized →
+  1920×1080 / ⚠ failed / ⚠ ffmpeg missing) and an ⚡ button to queue
+  eligible videos manually — including files uploaded before 1.4.0. New
+  endpoint: `POST /api/media/:id/optimize`. Interrupted transcodes
+  re-queue automatically on service restart.
 
 #### 1.3.0
 

@@ -34,6 +34,24 @@ class Config:
     # status, impression logs) — generated files, not user content
     SIGNAGE_STATE_FOLDER = os.path.join(BASE_DIR, "signage_state")
 
+    # Video optimization: background one-time transcode (ffmpeg) into the
+    # cheapest-to-decode playback format — H.264/yuv420p MP4, tuned
+    # fastdecode, sized to the target box, audio stripped. Originals stay on
+    # disk. Modes:
+    #   "oversized" (default) — only videos larger than the target box
+    #                           (the 4K-chokes-playback case)
+    #   "all"                 — normalize every uploaded video to the
+    #                           standard playback format
+    #   "off"                 — never transcode
+    _vo = os.getenv("VIDEO_OPTIMIZE", "oversized").lower()
+    VIDEO_OPTIMIZE = {"true": "oversized", "false": "off"}.get(_vo, _vo)
+    if VIDEO_OPTIMIZE not in ("oversized", "all", "off"):
+        VIDEO_OPTIMIZE = "oversized"
+    VIDEO_TARGET_WIDTH = int(os.getenv("VIDEO_TARGET_WIDTH", "1920"))
+    VIDEO_TARGET_HEIGHT = int(os.getenv("VIDEO_TARGET_HEIGHT", "1080"))
+    VIDEO_CRF = int(os.getenv("VIDEO_CRF", "20"))          # x264 quality (lower = better)
+    VIDEO_PRESET = os.getenv("VIDEO_PRESET", "veryfast")   # x264 speed/size tradeoff
+
     # Browser recycling (hours) — restarts Chromium to prevent memory leaks
     BROWSER_RECYCLE_HOURS = float(os.getenv("BROWSER_RECYCLE_HOURS", "4"))
 
