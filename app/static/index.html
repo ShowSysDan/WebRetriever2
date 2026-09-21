@@ -1984,6 +1984,11 @@ function renderModal() {
 
 function render() {
   const root = document.getElementById('app');
+  // A re-render while a modal is open (e.g. the receivers popup's 3s
+  // auto-refresh) rebuilds the DOM — carry the modal's scroll position
+  // over so refreshing data doesn't yank the view back to the top
+  const prevModal = document.querySelector('.modal');
+  const modalScroll = prevModal ? prevModal.scrollTop : 0;
   root.innerHTML = '';
   root.appendChild(renderHeader());
   root.appendChild(renderTabs());
@@ -2001,6 +2006,10 @@ function render() {
   if(sgModal) root.appendChild(sgModal);
   const rxModal = renderRxModal();
   if(rxModal) root.appendChild(rxModal);
+  if (modalScroll) {
+    const nm = document.querySelector('.modal');
+    if (nm) nm.scrollTop = modalScroll;
+  }
   syncRoute();
   syncSignageEvents();
 }
