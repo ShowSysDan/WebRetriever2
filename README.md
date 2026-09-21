@@ -19,6 +19,7 @@ A self-hosted Flask application that captures webpages, images, or text via head
 - **Impression counters** — every item counts how many times it went on air
 - **Live signage control** — see what's playing and what's next, and skip ahead with one click or a bare URL (`/api/instances/<id-or-name>/signage/skip`)
 - **Upload progress** — per-file progress readout with % uploaded, server-processing state, and clear error messages
+- **Live preview popups** — pop any output into its own confidence-monitor window (click a thumbnail or the ⧉ button): an MJPEG stream that automatically switches the worker to larger, faster preview frames (854px @ ~4fps) while the window is open, with live state, and now/next for signage
 - **Video playback as NDI** — upload a video (mp4, mov, mkv, webm…) and play it out as an NDI source: play once or loop, hold the last or first frame while stopped, optional autoplay on start
 - **Show-control friendly playback API** — trigger video play/stop/load with a plain GET or POST URL on the same port as the web UI (works from Companion, Crestron, QLab, or a browser bookmark), addressing instances by id or by name
 - **Instant video switching & cueing** — swap the video playing on a running output with a single URL (hot-swap inside the worker, the NDI stream never drops), or pre-load ("cue") the next video on its first frame so the play cue fires with zero latency
@@ -1157,6 +1158,13 @@ curl http://<host>:5000/api/instances/1/signage/skip
 | `POST` | `/api/instances/:id/start` | Start instance |
 | `POST` | `/api/instances/:id/stop` | Stop instance |
 | `POST` | `/api/instances/:id/refresh` | Reload content |
+| `GET` | `/api/instances/:id/preview` | Latest preview JPEG (list thumbnail) |
+| `GET` | `/api/instances/:ref/preview/stream` | Live MJPEG preview stream (`:ref` = id or name) — boosts the worker to 854px @ ~4fps while connected; also embeddable in any `<img>` tag |
+
+The built-in popup viewer at `/preview/:id` wraps the stream with the
+instance's name, live/stopped state, auto-reconnect, and — for signage —
+a now-playing / up-next footer. Open it from the UI (click any preview
+thumbnail or the ⧉ button) or bookmark the URL directly.
 
 ### Media Library
 
@@ -1366,6 +1374,31 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.1.0
+
+**Live preview popups** — pop any output into its own window for confidence
+monitoring.
+
+- **Popup viewer** at `/preview/:id` — instance name, resolution and
+  live/stopped state, the live picture, auto-reconnect when the instance
+  restarts, and a now-playing / up-next footer for signage (playback state
+  for video sources). Opened from the UI by clicking any preview thumbnail
+  or the new ⧉ button on instance cards and the signage live panel.
+- **MJPEG preview stream** — `GET /api/instances/:ref/preview/stream`
+  (instance by id or name) pushes a new JPEG whenever the worker saves one
+  (`multipart/x-mixed-replace`, works in a plain `<img>` tag, so it can be
+  embedded in dashboards too).
+- **Automatic preview boost** — while at least one stream is connected the
+  worker saves previews at 854px @ ~4fps instead of the 320px / 2s list
+  thumbnails, then drops back automatically a few seconds after the last
+  viewer disconnects. Boost is requested through a shared deadline value,
+  works for every source type, and overlapping viewers extend rather than
+  shorten each other.
+- Static content (held video frame, single still) re-sends the last frame
+  every 2s as a stream keepalive, so closed popups are detected promptly
+  and reverse proxies don't time the stream out. Streams end gracefully
+  ~5s after an instance stops and are capped at 4h (the popup reconnects).
 
 #### 1.0.1
 

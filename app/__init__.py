@@ -55,6 +55,12 @@ def create_app(config_class=Config):
     # Register API
     app.register_blueprint(api)
 
+    # Live preview popup window (one page for all instances; it reads the
+    # instance id from its own URL). Registered before the SPA catch-all.
+    @app.route("/preview/<int:instance_id>")
+    def preview_popup(instance_id):
+        return send_from_directory(app.static_folder, "preview.html")
+
     # Serve frontend SPA
     @app.route("/")
     @app.route("/<path:path>")

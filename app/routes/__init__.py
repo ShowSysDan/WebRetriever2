@@ -6,6 +6,7 @@ import os
 import re
 import glob
 import json
+import time
 import uuid
 import shutil
 import logging
@@ -15,7 +16,7 @@ import subprocess
 from datetime import datetime
 from collections import Counter
 
-from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file, abort
+from flask import Blueprint, Response, request, jsonify, current_app, send_from_directory, send_file, abort
 from werkzeug.utils import secure_filename
 from PIL import Image as PILImage
 
@@ -780,6 +781,88 @@ def instance_preview(instance_id):
     if os.path.exists(preview_path):
         return send_file(preview_path, mimetype="image/jpeg")
     return "", 204
+
+
+# How the preview stream is paced. POLL is how often the generator checks
+# the preview file for a new frame; BOOST_HOLD is how far ahead it keeps the
+# worker's HD deadline (comfortably more than one poll); MAX_S caps a single
+# stream so an abandoned-but-connected popup can't hold a server thread
+# forever (the popup <img> auto-reconnects).
+PREVIEW_STREAM_POLL = 0.12
+PREVIEW_STREAM_BOOST_HOLD = 6.0
+PREVIEW_STREAM_MAX_S = 4 * 3600
+PREVIEW_STREAM_STOPPED_GRACE = 5.0
+
+
+@api.route("/instances/<ref>/preview/stream", methods=["GET"])
+def instance_preview_stream(ref):
+    """Live MJPEG preview (multipart/x-mixed-replace) for the popup viewer.
+
+    Pushes the instance's preview JPEG whenever the worker writes a new one.
+    While at least one stream is connected the worker is kept in "boost"
+    mode (854px @ ~4fps instead of the 320px/2s list thumbnails). The
+    stream ends shortly after the instance stops; the popup page reconnects
+    when it starts again."""
+    inst = _resolve_instance(ref)
+    preview_dir = current_app.config.get("PREVIEW_FOLDER")
+    if not preview_dir:
+        return jsonify({"error": "Previews not configured"}), 404
+    path = os.path.join(preview_dir, f"{inst.id}.jpg")
+    instance_id = inst.id
+
+    def generate():
+        last_mtime = None
+        last_frame = None
+        last_yield = 0.0
+        stopped_since = None
+        deadline = time.monotonic() + PREVIEW_STREAM_MAX_S
+
+        def part(frame):
+            return (b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    + f"Content-Length: {len(frame)}\r\n\r\n".encode()
+                    + frame + b"\r\n")
+
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            if manager.boost_preview(instance_id, PREVIEW_STREAM_BOOST_HOLD):
+                stopped_since = None
+            else:
+                # Not running: keep serving the last frame briefly (worker
+                # may be restarting), then end the stream
+                if stopped_since is None:
+                    stopped_since = now
+                elif now - stopped_since > PREVIEW_STREAM_STOPPED_GRACE:
+                    break
+            try:
+                mtime = os.stat(path).st_mtime
+            except OSError:
+                mtime = None
+            if mtime is not None and mtime != last_mtime:
+                last_mtime = mtime
+                try:
+                    with open(path, "rb") as f:
+                        frame = f.read()
+                except OSError:
+                    frame = None
+                if frame:
+                    last_frame = frame
+                    last_yield = now
+                    yield part(frame)
+            elif last_frame is not None and now - last_yield >= 2.0:
+                # Static content produces no new frames — re-send the last
+                # one as a keepalive so a closed popup's disconnect is
+                # noticed here (GeneratorExit on the failed write) instead
+                # of the thread idling until the stream deadline
+                last_yield = now
+                yield part(last_frame)
+            time.sleep(PREVIEW_STREAM_POLL)
+
+    resp = Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    resp.headers["Cache-Control"] = "no-store"
+    # The stream never ends at a content boundary — disable proxy buffering
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
 
 
 # =========================================================================

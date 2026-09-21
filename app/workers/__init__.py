@@ -69,6 +69,7 @@ class WorkerManager:
         self._video_paths: Dict[int, mp.Array] = {}
         self._video_holds: Dict[int, mp.Value] = {}
         self._signage_cmds: Dict[int, mp.Value] = {}
+        self._preview_boosts: Dict[int, mp.Value] = {}
         self._configs: Dict[int, dict] = {}
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
@@ -83,7 +84,12 @@ class WorkerManager:
         """Create a fresh heartbeat + worker + process from a stored config
         and register them. Shared by initial start and watchdog restart."""
         heartbeat = mp.Value(ctypes.c_double, time.monotonic())
-        extra = {}
+        # Preview boost deadline (monotonic, comparable across processes on
+        # Linux) — every source type gets one so any output can be popped
+        # out into a live preview window
+        preview_boost = mp.Value(ctypes.c_double, 0.0)
+        self._preview_boosts[instance_id] = preview_boost
+        extra = {"preview_boost": preview_boost}
         if config.get("source_type") == "video":
             # Shared control channel for play/stop/load commands, the file
             # path payload for loads, hold-frame overrides, and playback state
@@ -95,13 +101,13 @@ class WorkerManager:
             self._video_states[instance_id] = video_state
             self._video_paths[instance_id] = video_path
             self._video_holds[instance_id] = video_hold
-            extra = {"video_cmd": video_cmd, "video_state": video_state,
-                     "video_path": video_path, "video_hold": video_hold}
+            extra.update(video_cmd=video_cmd, video_state=video_state,
+                         video_path=video_path, video_hold=video_hold)
         elif config.get("source_type") == "signage":
             # Shared bit-flag channel for skip / playlist-reload commands
             signage_cmd = mp.Value(ctypes.c_int, 0)
             self._signage_cmds[instance_id] = signage_cmd
-            extra = {"signage_cmd": signage_cmd}
+            extra.update(signage_cmd=signage_cmd)
         worker = NDIWorker(**config, heartbeat=heartbeat, **extra)
         process = mp.Process(
             target=worker_entry, args=(worker,),
@@ -187,6 +193,7 @@ class WorkerManager:
             self._video_paths.pop(instance_id, None)
             self._video_holds.pop(instance_id, None)
             self._signage_cmds.pop(instance_id, None)
+            self._preview_boosts.pop(instance_id, None)
             self._configs.pop(instance_id, None)
             self._restart_meta.pop(instance_id, None)
             log_event("INSTANCE_STOPPED", f"id={instance_id}")
@@ -204,6 +211,20 @@ class WorkerManager:
 
     def get_running_ids(self) -> list:
         return [iid for iid, proc in self._processes.items() if proc.is_alive()]
+
+    def boost_preview(self, instance_id: int, seconds: float = 6.0) -> bool:
+        """Ask a running worker for larger, faster preview saves until
+        `seconds` from now. Called repeatedly by the preview stream endpoint
+        while a popup is connected; the deadline only ever extends, so
+        overlapping viewers can't shorten each other's boost."""
+        boost = self._preview_boosts.get(instance_id)
+        if boost is None or not self.is_running(instance_id):
+            return False
+        until = time.monotonic() + seconds
+        with boost.get_lock():
+            if until > boost.value:
+                boost.value = until
+        return True
 
     def get_instance_health(self, instance_id: int) -> Optional[dict]:
         """Return health info for a running instance."""
@@ -357,6 +378,7 @@ class WorkerManager:
             self._video_paths.pop(iid, None)
             self._video_holds.pop(iid, None)
             self._signage_cmds.pop(iid, None)
+            self._preview_boosts.pop(iid, None)
 
             process = self._spawn(iid, config)
             log_event("INSTANCE_RESTARTED", f"id={iid} reason={reason} new_pid={process.pid}")
@@ -434,6 +456,7 @@ class WorkerManager:
             self._video_paths.pop(iid, None)
             self._video_holds.pop(iid, None)
             self._signage_cmds.pop(iid, None)
+            self._preview_boosts.pop(iid, None)
         return dead
 
 

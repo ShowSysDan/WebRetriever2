@@ -426,6 +426,15 @@ async function deleteMedia(id) {
 async function videoPlay(id) { await api(`/instances/${id}/video/play`,{method:'POST'}); await loadData(); }
 async function videoStop(id) { await api(`/instances/${id}/video/stop`,{method:'POST'}); await loadData(); }
 
+// Live preview popup — one window per instance (reused on re-click). Sized
+// to the output aspect ratio plus room for the header/footer bars.
+function openPreviewPopup(inst) {
+  const w = 720;
+  const h = Math.round(w * (inst.height / inst.width)) + 70;
+  window.open(`/preview/${inst.id}`, `wr2-preview-${inst.id}`,
+    `width=${w},height=${h},resizable=yes,scrollbars=no,location=no,toolbar=no,menubar=no`);
+}
+
 // DOM helper
 function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
@@ -444,7 +453,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v1.0.1'),
+      h('span',{className:'version'},'v1.1.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
@@ -491,6 +500,10 @@ function renderInstanceCard(inst) {
         ? h('img',{className:'instance-preview','data-preview':inst.id,src:previewCache[inst.id],alt:'Preview'})
         : h('div',{className:'instance-preview-empty','data-preview-slot':inst.id},'Loading…'))
     : h('div',{className:'instance-preview-empty'},'No preview');
+  // Thumbnail doubles as the popup opener
+  preview.style.cursor = 'pointer';
+  preview.title = 'Open live preview window';
+  preview.addEventListener('click', ()=>openPreviewPopup(inst));
 
   return h('div',{className:`instance-card ${inst.running?'running':'stopped'}`},
     h('div',{className:`instance-status ${inst.running?'on':''}`}),
@@ -513,6 +526,7 @@ function renderInstanceCard(inst) {
             ? h('button',{className:'sm',onClick:()=>videoStop(inst.id),title:'Stop video playback'},'⏹')
             : h('button',{className:'sm',onClick:()=>videoPlay(inst.id),title:'Play video from start'},'⏵'))
         : null,
+      h('button',{className:'sm',onClick:()=>openPreviewPopup(inst),title:'Open live preview window'},'⧉'),
       h('div',{className:`toggle ${inst.enabled?'on':''}`,onClick:()=>toggleEnabled(inst),title:inst.enabled?'Enabled':'Disabled'}),
       inst.running
         ? h('button',{className:'sm danger',onClick:()=>stopInstance(inst.id)},'■')
@@ -803,6 +817,9 @@ function renderSignagePage() {
         ? h('img',{'data-preview':inst.id,src:previewCache[inst.id],alt:'Live'})
         : h('div',{className:'instance-preview-empty','data-preview-slot':inst.id,style:{width:'180px',height:'101px'}},'Loading…'))
     : h('div',{className:'instance-preview-empty',style:{width:'180px',height:'101px'}},'Not running');
+  preview.style.cursor = 'pointer';
+  preview.title = 'Open live preview window';
+  preview.addEventListener('click', ()=>openPreviewPopup(inst));
   main.appendChild(h('div',{className:'sg-live'},
     preview,
     h('div',{className:'sg-live-info'},
@@ -819,6 +836,7 @@ function renderSignagePage() {
       inst.running
         ? h('button',{className:'danger',onClick:()=>stopInstance(inst.id)},'■ Stop')
         : null,
+      h('button',{className:'sm',onClick:()=>openPreviewPopup(inst),title:'Open live preview window'},'⧉ Popup Preview'),
       h('button',{className:'sm',onClick:()=>{state.modal=inst;render();}},'✎ Instance Settings'),
     ),
   ));

@@ -97,6 +97,12 @@ VIDEO_PATH_MAX = 4096
 SIGNAGE_CMD_SKIP = 1    # start transitioning to the next item now
 SIGNAGE_CMD_RELOAD = 2  # re-read the playlist JSON from disk
 
+# Preview boost: while a live preview popup is streaming, the API keeps a
+# shared monotonic deadline refreshed; until it passes, previews are saved
+# larger and faster than the list-view thumbnails
+PREVIEW_BOOST_WIDTH = 854      # px (16:9 → 854x480); clamped to output width
+PREVIEW_BOOST_INTERVAL = 0.25  # seconds between saves while boosted (~4fps)
+
 
 def _load_signage_playlist(path):
     """Read the playlist JSON the API writes for this instance.
@@ -459,6 +465,7 @@ class NDIWorker:
         video_path: Optional[mp.Array] = None,
         video_hold: Optional[mp.Value] = None,
         signage_cmd: Optional[mp.Value] = None,
+        preview_boost: Optional[mp.Value] = None,
         preview_dir: Optional[str] = None,
         preview_interval: float = 2.0,
     ):
@@ -482,6 +489,7 @@ class NDIWorker:
         self._video_path = video_path  # file path payload for load commands
         self._video_hold = video_hold  # per-command hold-frame override
         self._signage_cmd = signage_cmd  # skip/reload bit flags from the API process
+        self._preview_boost = preview_boost  # monotonic deadline: HD previews until then
         self._preview_dir = preview_dir
         self._preview_interval = preview_interval
 
@@ -705,8 +713,19 @@ class NDIWorker:
     # Preview thumbnail
     # ------------------------------------------------------------------
 
-    def _save_preview(self, frame_buffer: np.ndarray):
-        """Save a small JPEG preview from the current frame buffer."""
+    def _preview_params(self, now: float):
+        """(save_interval, hd) — while a preview popup is streaming, the API
+        keeps the shared boost deadline ahead of now and previews are saved
+        larger and faster; otherwise the cheap list-view thumbnail cadence."""
+        if self._preview_boost is not None and now < self._preview_boost.value:
+            return PREVIEW_BOOST_INTERVAL, True
+        return self._preview_interval, False
+
+    def _save_preview(self, frame_buffer: np.ndarray, hd: bool = False):
+        """Save a JPEG preview from the current frame buffer.
+
+        hd=True writes a larger frame for the live preview popup stream;
+        the default is a small thumbnail for the instance list."""
         if not self._preview_dir:
             return
         try:
@@ -714,16 +733,16 @@ class NDIWorker:
             # materializes on resize/save so the zero-copy view is safe.
             rgb_view = frame_buffer[:, :, 2::-1]
             img = Image.fromarray(rgb_view, "RGB")
-            # Downscale to 320px wide, maintain aspect ratio
-            thumb_w = 320
-            thumb_h = int(self.height * (thumb_w / self.width))
+            # Downscale, maintaining aspect ratio
+            thumb_w = min(PREVIEW_BOOST_WIDTH, self.width) if hd else 320
+            thumb_h = max(1, int(self.height * (thumb_w / self.width)))
             img = img.resize((thumb_w, thumb_h), Image.Resampling.LANCZOS)
             # Atomic write: temp file then replace
             dest = os.path.join(self._preview_dir, f"{self.instance_id}.jpg")
             fd, tmp = tempfile.mkstemp(suffix=".jpg", dir=self._preview_dir)
             try:
                 with os.fdopen(fd, "wb") as f:
-                    img.save(f, "JPEG", quality=60)
+                    img.save(f, "JPEG", quality=70 if hd else 60)
                 os.replace(tmp, dest)
             except Exception:
                 try:
@@ -795,8 +814,9 @@ class NDIWorker:
                         frame_buffer[:, :, :3] = bgr
                         frame_ready = True
                         last_capture_time = frame_start
-                        if frame_start - last_preview_time >= self._preview_interval:
-                            self._save_preview(frame_buffer)
+                        pv_interval, pv_hd = self._preview_params(frame_start)
+                        if frame_start - last_preview_time >= pv_interval:
+                            self._save_preview(frame_buffer, hd=pv_hd)
                             last_preview_time = frame_start
 
                 # --- Send to NDI (duplicates last frame up to output_fps) ---
@@ -959,6 +979,7 @@ class NDIWorker:
 
         next_frame_time = time.monotonic()
         last_preview_time = 0.0
+        last_pv_hd = False
 
         try:
             while not self._stop_event.is_set():
@@ -1041,10 +1062,14 @@ class NDIWorker:
 
                 # Only write a preview when the frame actually changed —
                 # while holding, rewriting an identical JPEG every 2s just
-                # wears the disk for nothing
-                if frame_dirty and now - last_preview_time >= self._preview_interval:
-                    self._save_preview(frame_buffer)
+                # wears the disk for nothing. A boost-state flip forces one
+                # write so a popup opened on a held frame still upgrades to HD.
+                pv_interval, pv_hd = self._preview_params(now)
+                if ((frame_dirty or pv_hd != last_pv_hd)
+                        and now - last_preview_time >= pv_interval):
+                    self._save_preview(frame_buffer, hd=pv_hd)
                     last_preview_time = now
+                    last_pv_hd = pv_hd
                     frame_dirty = False
 
                 self._update_heartbeat()
@@ -1175,6 +1200,7 @@ class NDIWorker:
         idle_recheck_t = 0.0
         last_status_t = 0.0
         last_preview_t = 0.0
+        last_pv_hd = False
 
         def log_impression(item):
             if not impressions_path or not item:
@@ -1352,10 +1378,14 @@ class NDIWorker:
                         status_path, current.item, remaining, next_item
                     )
 
-                # --- Preview thumbnail (only when the frame changed) ---
-                if frame_dirty and now - last_preview_t >= self._preview_interval:
-                    self._save_preview(frame_buffer)
+                # --- Preview (only when the frame changed, or on boost flip
+                # so a popup opened on a static still upgrades to HD) ---
+                pv_interval, pv_hd = self._preview_params(now)
+                if ((frame_dirty or pv_hd != last_pv_hd)
+                        and now - last_preview_t >= pv_interval):
+                    self._save_preview(frame_buffer, hd=pv_hd)
                     last_preview_t = now
+                    last_pv_hd = pv_hd
                     frame_dirty = False
 
                 self._update_heartbeat()
@@ -1509,8 +1539,9 @@ class NDIWorker:
                         frame_ready = True
                         last_capture_time = frame_start
                         # --- Save preview thumbnail ---
-                        if frame_start - last_preview_time >= self._preview_interval:
-                            self._save_preview(frame_buffer)
+                        pv_interval, pv_hd = self._preview_params(frame_start)
+                        if frame_start - last_preview_time >= pv_interval:
+                            self._save_preview(frame_buffer, hd=pv_hd)
                             last_preview_time = frame_start
 
                 # --- Send to NDI ---
@@ -1584,8 +1615,9 @@ class NDIWorker:
                     )
 
                 if self._capture_into_buffer(page, frame_buffer):
-                    if now - last_preview_time >= self._preview_interval:
-                        self._save_preview(frame_buffer)
+                    pv_interval, pv_hd = self._preview_params(now)
+                    if now - last_preview_time >= pv_interval:
+                        self._save_preview(frame_buffer, hd=pv_hd)
                         last_preview_time = now
                 self._update_heartbeat()
                 time.sleep(capture_interval)
