@@ -59,6 +59,15 @@ class MediaFile(db.Model):
     # Video files only — probed with OpenCV on upload (nullable: added after
     # 0.2.0, and images have no duration)
     duration_s = db.Column(db.Float, nullable=True)
+    # How the file got here (nullable for ADD COLUMN auto-migration; NULL =
+    # uploaded before 1.3.0, treated as "library"):
+    #   "library" — Media Library upload zone
+    #   "signage" — Signage tab upload zone
+    #   "deck"    — rasterized slide from a presentation/PDF upload
+    origin = db.Column(db.String(16), nullable=True)
+    # For deck slides: the source deck's filename, so a deck's slides can be
+    # filtered/grouped together in the library
+    origin_name = db.Column(db.String(256), nullable=True)
     uploaded_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     @property
@@ -80,6 +89,8 @@ class MediaFile(db.Model):
             "height_px": self.height_px,
             "duration_s": self.duration_s,
             "is_video": self.is_video,
+            "origin": self.origin or "library",
+            "origin_name": self.origin_name,
             "url": f"/api/media/{self.id}/file",
             "uploaded_at": self.uploaded_at.isoformat() if self.uploaded_at else None,
         }

@@ -1188,6 +1188,14 @@ thumbnail or the ⧉ button) or bookmark the URL directly.
 | `GET` | `/api/media/:id/file` | Serve the actual file |
 | `DELETE` | `/api/media/:id` | Delete file (unlinks from instances) |
 
+Each entry in the listing carries its **origin** — `library` (Media Library
+upload), `signage` (Signage tab upload), or `deck` (a slide rasterized from
+an uploaded presentation, with `origin_name` naming the source deck) — plus
+`signage_usage`: every playlist appearance with the instance and, when the
+item sits in one, the signage group. The Media Library tab uses these for
+its filter bar (type / source / usage, including "in a signage group" and
+"unused") and a per-deck view of converted slides.
+
 Every uploaded file gets a permanent `uid` (short random token, e.g.
 `9f3c21ab`) alongside its numeric `id`. Numeric ids of existing files never
 change, but SQLite can hand a deleted file's id to the next upload — the
@@ -1387,6 +1395,25 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.3.0
+
+**Media Library filters** — find files by how they arrived and where they're
+used.
+
+- Files now record their **origin**: Media Library upload, Signage tab
+  upload, or deck slide (with the source deck's filename). Existing files
+  auto-migrate and count as Library uploads.
+- **Filter bar** on the Media Library tab: Type (images/videos), Source
+  (library / signage upload / deck slides), and Usage (in a signage group /
+  in any playlist / unused). Chip counts reflect the other active filters,
+  so they always show what clicking would display.
+- Filtering to **Deck slides** switches to a per-deck view — one section
+  per source presentation with its slides in order.
+- Cards show an origin badge and their playlist usage
+  (`Instance › Group`), alongside the existing "source for instance" line;
+  the media listing API now returns `origin`, `origin_name`, and
+  `signage_usage` per file.
 
 #### 1.2.0
 
