@@ -25,6 +25,9 @@ app/uploads/*
 # Preview thumbnails (generated at runtime)
 app/previews/
 
+# Signage runtime state (playlists, status, impression logs)
+app/signage_state/
+
 # IDE
 .vscode/
 .idea/

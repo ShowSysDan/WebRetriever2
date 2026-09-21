@@ -25,6 +25,7 @@ from app.workers.ndi_worker import (
     VIDEO_STATE_PLAYING,
     VIDEO_HOLD_UNSET, VIDEO_HOLD_FIRST, VIDEO_HOLD_LAST,
     VIDEO_PATH_MAX,
+    SIGNAGE_CMD_SKIP, SIGNAGE_CMD_RELOAD,
 )
 from app.logging_config import log_event
 
@@ -67,6 +68,7 @@ class WorkerManager:
         self._video_states: Dict[int, mp.Value] = {}
         self._video_paths: Dict[int, mp.Array] = {}
         self._video_holds: Dict[int, mp.Value] = {}
+        self._signage_cmds: Dict[int, mp.Value] = {}
         self._configs: Dict[int, dict] = {}
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
@@ -95,6 +97,11 @@ class WorkerManager:
             self._video_holds[instance_id] = video_hold
             extra = {"video_cmd": video_cmd, "video_state": video_state,
                      "video_path": video_path, "video_hold": video_hold}
+        elif config.get("source_type") == "signage":
+            # Shared bit-flag channel for skip / playlist-reload commands
+            signage_cmd = mp.Value(ctypes.c_int, 0)
+            self._signage_cmds[instance_id] = signage_cmd
+            extra = {"signage_cmd": signage_cmd}
         worker = NDIWorker(**config, heartbeat=heartbeat, **extra)
         process = mp.Process(
             target=worker_entry, args=(worker,),
@@ -121,6 +128,7 @@ class WorkerManager:
         browser_recycle_hours: float = DEFAULT_RECYCLE_HOURS,
         text_settings: Optional[dict] = None,
         video_settings: Optional[dict] = None,
+        signage_settings: Optional[dict] = None,
         preview_dir: Optional[str] = None,
         preview_interval: float = 2.0,
     ) -> bool:
@@ -138,6 +146,7 @@ class WorkerManager:
                 browser_recycle_hours=browser_recycle_hours,
                 text_settings=text_settings,
                 video_settings=video_settings,
+                signage_settings=signage_settings,
                 preview_dir=preview_dir,
                 preview_interval=preview_interval,
             )
@@ -177,6 +186,7 @@ class WorkerManager:
             self._video_states.pop(instance_id, None)
             self._video_paths.pop(instance_id, None)
             self._video_holds.pop(instance_id, None)
+            self._signage_cmds.pop(instance_id, None)
             self._configs.pop(instance_id, None)
             self._restart_meta.pop(instance_id, None)
             log_event("INSTANCE_STOPPED", f"id={instance_id}")
@@ -274,6 +284,29 @@ class WorkerManager:
                   + (f" hold={hold}" if hold else ""))
         return True
 
+    # ------------------------------------------------------------------
+    # Signage playlist control
+    # ------------------------------------------------------------------
+
+    _SIGNAGE_COMMANDS = {
+        "skip": SIGNAGE_CMD_SKIP,
+        "reload": SIGNAGE_CMD_RELOAD,
+    }
+
+    def signage_command(self, instance_id: int, command: str) -> bool:
+        """Send a skip or playlist-reload command to a running signage worker.
+
+        Commands are bit flags OR-ed into a shared value, so a skip and a
+        reload arriving between two worker polls are both delivered."""
+        bit = self._SIGNAGE_COMMANDS.get(command)
+        cmd_value = self._signage_cmds.get(instance_id)
+        if bit is None or cmd_value is None or not self.is_running(instance_id):
+            return False
+        with cmd_value.get_lock():
+            cmd_value.value |= bit
+        log_event("SIGNAGE_COMMAND", f"id={instance_id} cmd={command}")
+        return True
+
     def get_video_state(self, instance_id: int) -> Optional[str]:
         """Playback state of a running video worker, or None if not applicable."""
         state_value = self._video_states.get(instance_id)
@@ -315,7 +348,7 @@ class WorkerManager:
                     _kill_process_tree(proc)
                     proc.join(timeout=3)
 
-            # Clean up old refs (_spawn recreates video control values as needed)
+            # Clean up old refs (_spawn recreates control values as needed)
             self._workers.pop(iid, None)
             self._processes.pop(iid, None)
             self._heartbeats.pop(iid, None)
@@ -323,6 +356,7 @@ class WorkerManager:
             self._video_states.pop(iid, None)
             self._video_paths.pop(iid, None)
             self._video_holds.pop(iid, None)
+            self._signage_cmds.pop(iid, None)
 
             process = self._spawn(iid, config)
             log_event("INSTANCE_RESTARTED", f"id={iid} reason={reason} new_pid={process.pid}")
@@ -399,6 +433,7 @@ class WorkerManager:
             self._video_states.pop(iid, None)
             self._video_paths.pop(iid, None)
             self._video_holds.pop(iid, None)
+            self._signage_cmds.pop(iid, None)
         return dead
 
 

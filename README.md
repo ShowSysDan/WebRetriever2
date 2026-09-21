@@ -11,7 +11,14 @@ A self-hosted Flask application that captures webpages, images, or text via head
 ## Features
 
 - **Multiple NDI output instances** — each with its own stream name, resolution, and capture rate
-- **Five source types** — webpage URL, uploaded image, custom styled text, a connected webcam, or an uploaded video file
+- **Six source types** — webpage URL, uploaded image, custom styled text, a connected webcam, an uploaded video file, or a scheduled signage playlist
+- **Digital signage playlists** — turn an output into a signage player: stills and videos play in order with real crossfade transitions (for videos the fade starts before the file ends), all rendered in the worker and streamed as one rock-steady NDI source
+- **Content scheduling** — per item or per group: go-live date/time, expiry date/time, and a daily time-of-day window (e.g. breakfast menu 07:00–11:00, overnight loop 22:00–06:00); out-of-window content is skipped automatically and the playlist updates live, no restarts
+- **Content groups** — bundle items (e.g. 10 uploaded slides) into one unit that is ordered, scheduled, transitioned, and deleted together
+- **PowerPoint / PDF decks** — upload a .ppt/.pptx/.odp/.pdf straight into a playlist; every slide is rasterized to an image and arrives as a ready-made group (requires LibreOffice + poppler-utils)
+- **Impression counters** — every item counts how many times it went on air
+- **Live signage control** — see what's playing and what's next, and skip ahead with one click or a bare URL (`/api/instances/<id-or-name>/signage/skip`)
+- **Upload progress** — per-file progress readout with % uploaded, server-processing state, and clear error messages
 - **Video playback as NDI** — upload a video (mp4, mov, mkv, webm…) and play it out as an NDI source: play once or loop, hold the last or first frame while stopped, optional autoplay on start
 - **Show-control friendly playback API** — trigger video play/stop/load with a plain GET or POST URL on the same port as the web UI (works from Companion, Crestron, QLab, or a browser bookmark), addressing instances by id or by name
 - **Instant video switching & cueing** — swap the video playing on a running output with a single URL (hot-swap inside the worker, the NDI stream never drops), or pre-load ("cue") the next video on its first frame so the play cue fires with zero latency
@@ -44,11 +51,12 @@ A self-hosted Flask application that captures webpages, images, or text via head
 11. [Syslog Configuration](#syslog-configuration)
 12. [Architecture](#architecture)
 13. [24/7 Production Reliability](#247-production-reliability)
-14. [API Reference](#api-reference)
-15. [Performance Notes](#performance-notes)
-16. [Versioning](#versioning)
-17. [Development](#development)
-18. [Troubleshooting](#troubleshooting)
+14. [Digital Signage](#digital-signage)
+15. [API Reference](#api-reference)
+16. [Performance Notes](#performance-notes)
+17. [Versioning](#versioning)
+18. [Development](#development)
+19. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -61,6 +69,7 @@ A self-hosted Flask application that captures webpages, images, or text via head
 | **NDI SDK** | 5.x or 6.x | Free runtime from [ndi.video](https://ndi.video/tools/ndi-sdk/) |
 | **Chromium** | (auto-installed) | Managed by Playwright |
 | **Git** | Any | Windows: [git-scm.com](https://git-scm.com/download/win) |
+| **LibreOffice + poppler-utils** | Any recent | *Optional* — only needed to upload PowerPoint/PDF decks into signage playlists (`sudo apt install libreoffice-impress poppler-utils`) |
 
 ### System packages (Debian 11/12, Ubuntu 22.04+)
 
@@ -1020,6 +1029,106 @@ print(f'OK: {len([d for d in data if d.get(\"running\")])} instances healthy')
 
 ---
 
+## Digital Signage
+
+A **signage** instance turns an NDI output into a self-contained signage
+player: a playlist of stills and videos that plays in order, with crossfade
+transitions, per-item scheduling, grouping, and impression counting. The
+whole thing is rendered inside the worker process (OpenCV, no browser) and
+streamed as a single uninterrupted NDI source.
+
+### Getting started
+
+1. Create an instance with source type **Signage Playlist** (or use the
+   *+ New Signage Instance* button on the **Signage** tab).
+2. Open the **Signage** tab, pick the instance, and drop content onto the
+   upload zone — images, videos, or whole PowerPoint/PDF decks.
+3. Start the instance. The live panel shows what's on air, what's next, a
+   countdown, and a **Skip Next** button.
+
+### Playback model
+
+- Items play top-to-bottom and loop. Drag the `⠿` handle to reorder; drop an
+  item onto a group header to add it to that group.
+- **Duration** — how long an item is on air, measured from its first visible
+  frame. Stills default to the instance's *Default Still Duration*; videos
+  default to their own file length. An explicit duration on a video either
+  cuts it short or holds its last frame to fill the slot.
+- **Crossfade** — each item's crossfade is its *outgoing* transition: the
+  fade into the next item starts that many seconds **before the item's slot
+  (or video file) ends**, so a video is still moving as it dissolves away.
+  `0` = hard cut. The incoming item (and its impression count) starts the
+  moment it first becomes visible.
+- If nothing is eligible to play (everything expired / outside its daily
+  window / disabled), the output fades to black and re-checks twice a second.
+
+### Scheduling
+
+Every item and every group can carry:
+
+| Setting | Meaning |
+|---------|---------|
+| **Start showing** | Date + time the content goes live |
+| **Expire** | Date + time it stops playing |
+| **Daily from / until** | Time-of-day window, every day (`07:00–11:00`; `22:00–06:00` wraps past midnight) |
+| **Enabled** | Master switch — off means skipped |
+
+Group settings apply to all items inside: the date windows *intersect*
+(an item plays only when both its own and its group's window are open), the
+daily window and duration/crossfade act as inheritable defaults an item can
+override, and a disabled group silences all its items. Schedule changes
+apply to a running player within a second — the playlist is hot-reloaded
+into the worker without dropping the NDI stream.
+
+All schedule times are the **server's local wall-clock**.
+
+### Groups
+
+Select items with their checkboxes and hit **Group Selected** (or create an
+empty group and drag items in). A group occupies one slot in the top-level
+order and its items play consecutively — order, schedule, transition, enable,
+and delete them as a single unit. Deleting a group asks whether to delete or
+keep its items; *ungrouping* returns them to the top level.
+
+### PowerPoint / PDF decks
+
+Uploading a `.ppt`, `.pptx`, `.odp`, or `.pdf` through the Signage tab
+rasterizes every slide/page to a PNG (via LibreOffice + `pdftoppm`) and
+appends them as a group named after the file. Requires:
+
+```bash
+sudo apt install -y libreoffice-impress poppler-utils
+```
+
+Render resolution is controlled by `PRESENTATION_RENDER_DPI` in `.env`
+(default 150 — a 16:9 slide comes out around 2000×1125).
+
+### Impressions
+
+Every time an item goes on air the worker logs an impression; counts appear
+next to each item in the playlist (👁). Counting survives worker restarts —
+impressions are appended to a log the API folds into the database.
+
+### Show-control URLs
+
+Like the video API, the signage endpoints accept `GET` as well as `POST`, so
+anything that can hit a URL (Companion, Crestron, a browser bookmark) can
+drive them, addressing the instance by numeric id or by name:
+
+```bash
+# What's playing / what's next
+curl http://<host>:5000/api/instances/Lobby%20Signage/signage/status
+# → {"id":1,"name":"Lobby Signage","running":true,"status":{
+#      "current":{"id":12,"name":"promo.mp4","kind":"video",...},
+#      "remaining_s":8.5,
+#      "next":{"id":13,"name":"menu.png","kind":"image",...}}}
+
+# Crossfade to the next item right now
+curl http://<host>:5000/api/instances/1/signage/skip
+```
+
+---
+
 ## API Reference
 
 ### Global Settings
@@ -1145,6 +1254,28 @@ Behavior notes:
   resolution); NDI output stays at the global output FPS. Audio is not output —
   playback is video-only.
 
+### Signage
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/instances/:id/signage` | Full playlist: groups, items (with impression counts), defaults |
+| `POST` | `/api/instances/:id/signage/items` | Append library files — `{"media_file_ids":[..], "group_id": optional}` |
+| `PUT` | `/api/signage/items/:id` | Update an item — `duration_s`, `crossfade_s`, `start_at`, `end_at`, `daily_start`, `daily_end`, `enabled`, `group_id` (null clears any of them) |
+| `DELETE` | `/api/signage/items/:id` | Remove an item from the playlist |
+| `POST` | `/api/instances/:id/signage/items/delete` | Batch remove — `{"item_ids":[..]}` |
+| `POST` | `/api/instances/:id/signage/groups` | Create group — `{"name": str, "item_ids": optional}` |
+| `PUT` | `/api/signage/groups/:id` | Update group (same fields as items, plus `name`) |
+| `DELETE` | `/api/signage/groups/:id` | Delete group + its items; `?keep_items=1` ungroups instead |
+| `POST` | `/api/instances/:id/signage/reorder` | Persist a full ordering — `{"order":[{"type":"item"\|"group","id":n},..], "group_items":{"<gid>":[item ids]}}` |
+| `POST` | `/api/instances/:id/signage/upload` | Upload straight into the playlist (multipart); ppt/pptx/odp/pdf become a group of slide images |
+| `GET`/`POST` | `/api/instances/:ref/signage/status` | Now playing / up next / seconds remaining (`:ref` = id or name) |
+| `GET`/`POST` | `/api/instances/:ref/signage/skip` | Crossfade to the next item now |
+
+Schedule datetimes use the HTML `datetime-local` format (`2026-10-01T07:00`)
+and are interpreted in the server's local timezone; daily windows are `HH:MM`
+strings. Playlist mutations apply to a running player within a second via a
+live reload — the NDI stream never drops.
+
 ### System
 
 | Method | Endpoint | Description |
@@ -1235,6 +1366,53 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.0.1
+
+**Digital signage** — a sixth source type that turns an output into a
+scheduled signage player, plus a friendlier upload experience.
+
+- **New `signage` source type** — plays a playlist of stills and videos as a
+  single uninterrupted NDI stream, rendered entirely in the worker process
+  (OpenCV, no browser). When nothing is scheduled the output holds black.
+- **Crossfade transitions** — per-item crossfade duration, alpha-blended per
+  output frame; for videos the fade into the next item starts *before* the
+  file ends (`duration − crossfade`), so motion dissolves into the next
+  item. `0` = hard cut. The incoming item starts playing the moment it
+  becomes visible.
+- **Scheduling** — per item and per group: go-live datetime, expiry
+  datetime, and a daily time-of-day window (overnight ranges wrap past
+  midnight). Out-of-window content is skipped; expiry mid-item transitions
+  out gracefully. All times are server-local wall-clock.
+- **Groups** — bundle items into one unit for ordering, scheduling,
+  transitions, enable/disable, and deletion (with an "ungroup, keep items"
+  option). Group date windows intersect with item windows; group
+  duration/crossfade/daily-window act as inheritable defaults.
+- **PowerPoint / PDF deck upload** — .ppt/.pptx/.odp/.pdf uploaded into a
+  playlist is rasterized (LibreOffice → PDF → `pdftoppm`) into one image per
+  slide and appended as a ready-made group named after the file. Requires
+  `libreoffice-impress` + `poppler-utils`; a clear error is returned when
+  they're missing. Render DPI configurable via `PRESENTATION_RENDER_DPI`.
+- **Impression counters** — each item counts how many times it went on air.
+  The worker appends to a per-instance log (atomic rotation, no lost
+  counts) that the API folds into the database.
+- **Live control** — new **Signage** tab with drag-to-reorder playlist,
+  multi-select group/delete, per-item/group settings modals, a live
+  now-playing panel (preview, countdown, up-next) and a **Skip Next**
+  button. Skip and status are also plain-URL show-control endpoints
+  (`/api/instances/<id-or-name>/signage/skip`, `.../signage/status`).
+- **Hot playlist reload** — every playlist mutation (add, edit, reorder,
+  schedule change, media delete) is pushed to a running worker via a shared
+  command channel and picked up within a second — no restart, the NDI
+  stream never drops. Watchdog restarts resume with the current playlist.
+- **Upload progress readouts** — uploads now go through XHR with a per-file
+  progress panel: % uploaded, a "processing" state while the server
+  probes/converts, done/error status with server error messages, for both
+  the Media Library and Signage upload zones.
+- New DB tables `signage_items` and `signage_groups` (auto-created), new
+  nullable `output_instances` columns `signage_duration` /
+  `signage_crossfade` (auto-migrated). Signage runtime state lives in
+  `app/signage_state/` (git-ignored) and is cleaned up on instance delete.
 
 #### 0.4.0
 

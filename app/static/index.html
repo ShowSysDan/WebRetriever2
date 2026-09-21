@@ -122,6 +122,49 @@
   .media-picker-item:hover { border-color:var(--border-hover); }
   .media-picker-item.selected { border-color:var(--accent); }
   .media-picker-item img, .media-picker-item video { width:100%; height:60px; object-fit:cover; display:block; background:#000; }
+
+  /* Signage */
+  .sg-live { display:flex; gap:18px; align-items:center; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:14px 18px; margin-bottom:14px; flex-wrap:wrap; }
+  .sg-live img { width:180px; height:101px; object-fit:cover; border-radius:4px; background:#000; border:1px solid var(--border); }
+  .sg-live-info { display:flex; flex-direction:column; gap:8px; min-width:220px; flex:1; }
+  .sg-live .label { font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; }
+  .sg-live .val { font-size:14px; font-weight:600; }
+  .sg-live .val.dim { color:var(--text-dim); font-weight:400; }
+  .sg-remaining { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--warning); }
+  .sg-toolbar { display:flex; gap:8px; align-items:center; margin:14px 0 10px; flex-wrap:wrap; }
+  .sg-list { display:flex; flex-direction:column; gap:4px; }
+  .sg-row { display:grid; grid-template-columns:22px 18px 74px 1fr 130px 190px 62px 150px; align-items:center; gap:10px; padding:7px 12px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); }
+  .sg-row.grouped { margin-left:30px; grid-template-columns:22px 18px 74px 1fr 130px 190px 62px 150px; }
+  .sg-row.dragover { border-color:var(--accent); box-shadow:0 -2px 0 var(--accent); }
+  .sg-row.off { opacity:.45; }
+  .sg-group-row { background:var(--surface2); border-left:3px solid var(--blue); }
+  .sg-thumb { width:70px; height:40px; object-fit:cover; border-radius:3px; background:#000; border:1px solid var(--border); }
+  .sg-name { font-size:12px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sg-sub { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+  .sg-timing { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text-dim); }
+  .sg-sched { font-size:10px; color:var(--warning); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sg-imp { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--blue); text-align:right; }
+  .sg-actions { display:flex; gap:4px; justify-content:flex-end; }
+  .drag-handle { cursor:grab; color:var(--text-dim); text-align:center; user-select:none; }
+  .sg-dropzone { border:1px dashed var(--border); border-radius:var(--radius); padding:10px; text-align:center; color:var(--text-dim); font-size:11px; margin-top:4px; }
+  .sg-dropzone.dragover { border-color:var(--accent); background:var(--accent-dim); }
+
+  /* Upload progress panel (fixed, survives re-renders) */
+  #upload-panel { position:fixed; bottom:16px; right:16px; z-index:300; display:flex; flex-direction:column; gap:6px; width:300px; }
+  .up-item { background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); padding:9px 11px; font-size:11px; box-shadow:0 4px 16px rgba(0,0,0,.45); }
+  .up-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; }
+  .up-name { font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .up-status { color:var(--text-dim); font-family:'JetBrains Mono',monospace; flex-shrink:0; }
+  .up-item.done .up-status { color:var(--accent); }
+  .up-item.error .up-status { color:var(--danger); }
+  .up-bar { height:4px; background:var(--bg); border-radius:2px; overflow:hidden; }
+  .up-fill { height:100%; background:var(--accent); transition:width .15s; }
+  .up-item.error .up-fill { background:var(--danger); }
+  .up-item.processing .up-fill { animation:up-pulse 1.2s ease-in-out infinite; }
+  @keyframes up-pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+  .up-err { color:var(--danger); margin-top:5px; }
+  .up-close { cursor:pointer; color:var(--text-dim); flex-shrink:0; }
+  .up-close:hover { color:var(--text); }
 </style>
 </head>
 <body>
@@ -135,7 +178,13 @@ let state = {
   modal: null,
   tab: 'instances',
   fpsInput: '60',
+  // Signage tab
+  signageInstId: null,
+  signage: null,        // GET /instances/<id>/signage payload
+  sgModal: null,        // {type:'item'|'group'|'library', obj}
+  sgCollapsed: {},      // group id -> collapsed
 };
+const sgSel = new Set(); // selected signage item ids (multi-select actions)
 
 async function api(path, opts={}) {
   const headers = {};
@@ -161,6 +210,17 @@ async function loadData(force=false) {
   if (!settingsEditing) {
     state.fpsInput = String(settings.output_fps);
   }
+  // Signage: keep a valid selection and load the selected playlist
+  const sgInsts = instances.filter(i => i.source_type === 'signage');
+  if (!sgInsts.some(i => i.id === state.signageInstId)) {
+    state.signageInstId = sgInsts.length ? sgInsts[0].id : null;
+  }
+  if (state.signageInstId) {
+    try { state.signage = await api(`/instances/${state.signageInstId}/signage`); }
+    catch(e) { state.signage = null; }
+  } else {
+    state.signage = null;
+  }
   // Drop cached previews for instances that are no longer running
   for (const id of Object.keys(previewCache)) {
     if (!instances.some(i => String(i.id) === id && i.running)) {
@@ -170,7 +230,7 @@ async function loadData(force=false) {
   }
   // Only rebuild the DOM when the data actually changed — a full re-render
   // every poll recreates every element and makes images flash
-  const sig = JSON.stringify([settings, instances, media]);
+  const sig = JSON.stringify([settings, instances, media, state.signage]);
   if (force || sig !== lastDataSig) {
     lastDataSig = sig;
     render();
@@ -234,12 +294,129 @@ async function toggleEnabled(inst) { await api(`/instances/${inst.id}`,{method:'
 async function saveInstance(data, id) {
   if(id) await api(`/instances/${id}`,{method:'PUT',body:data});
   else await api('/instances',{method:'POST',body:data});
-  state.modal=null; await loadData(true);
+  state.modal=null; state.modalDefaults=null; await loadData(true);
 }
+// --- Uploads with progress ---------------------------------------------
+// fetch() can't report upload progress, so uploads go through XHR. Each
+// file gets a card in a fixed bottom-right panel (outside the re-rendered
+// app root) showing % sent, then a "processing" pulse while the server
+// probes/converts, then done/error.
+const uploads = [];
+let uploadSeq = 0;
+
+function updateUploadPanel() {
+  let panel = document.getElementById('upload-panel');
+  if (!uploads.length) { if (panel) panel.remove(); return; }
+  if (!panel) {
+    panel = h('div',{id:'upload-panel'});
+    document.body.appendChild(panel);
+  }
+  panel.innerHTML = '';
+  for (const u of uploads) {
+    const statusText = u.status==='uploading' ? `${u.pct}%`
+      : u.status==='processing' ? 'processing…'
+      : u.status==='done' ? '✓ done' : '✗ failed';
+    panel.appendChild(h('div',{className:`up-item ${u.status}`},
+      h('div',{className:'up-head'},
+        h('div',{className:'up-name',title:u.name},u.name),
+        h('div',{className:'up-status'},statusText),
+        (u.status==='done'||u.status==='error')
+          ? h('div',{className:'up-close',onClick:()=>{removeUpload(u.id);}},'✕') : null,
+      ),
+      h('div',{className:'up-bar'},h('div',{className:'up-fill',style:{width:`${u.pct}%`}})),
+      u.status==='error'&&u.msg ? h('div',{className:'up-err'},u.msg) : null,
+    ));
+  }
+}
+
+function removeUpload(id) {
+  const i = uploads.findIndex(u=>u.id===id);
+  if (i>=0) uploads.splice(i,1);
+  updateUploadPanel();
+}
+
+function uploadWithProgress(url, file) {
+  return new Promise(resolve => {
+    const u = {id:++uploadSeq, name:file.name, pct:0, status:'uploading', msg:''};
+    uploads.push(u); updateUploadPanel();
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) {
+        u.pct = Math.round(e.loaded / e.total * 100);
+        // Bytes are all sent — now the server is probing/converting
+        if (u.pct >= 100) u.status = 'processing';
+        updateUploadPanel();
+      }
+    };
+    const finish = ok => { updateUploadPanel(); if(ok) setTimeout(()=>removeUpload(u.id), 4000); resolve(ok); };
+    xhr.onload = () => {
+      let body = {}; try { body = JSON.parse(xhr.responseText); } catch(e) {}
+      if (xhr.status >= 200 && xhr.status < 300) { u.status='done'; u.pct=100; finish(true); }
+      else { u.status='error'; u.msg = body.error || `HTTP ${xhr.status}`; finish(false); }
+    };
+    xhr.onerror = () => { u.status='error'; u.msg='Network error'; finish(false); };
+    xhr.ontimeout = () => { u.status='error'; u.msg='Timed out'; finish(false); };
+    const fd = new FormData(); fd.append('file', file);
+    xhr.send(fd);
+  });
+}
+
 async function uploadFile(file) {
-  const fd = new FormData(); fd.append('file', file);
-  await api('/media',{method:'POST',body:fd});
+  await uploadWithProgress(`${API}/media`, file);
   await loadData();
+}
+
+// --- Signage actions ----------------------------------------------------
+async function sgUploadFile(file) {
+  await uploadWithProgress(`${API}/instances/${state.signageInstId}/signage/upload`, file);
+  await loadData(true);
+}
+async function sgSkip() { await api(`/instances/${state.signageInstId}/signage/skip`,{method:'POST'}); }
+async function sgDeleteItem(id) {
+  if(!confirm('Remove this item from the playlist?')) return;
+  await api(`/signage/items/${id}`,{method:'DELETE'}); sgSel.delete(id); await loadData(true);
+}
+async function sgDeleteSelected() {
+  if(!sgSel.size || !confirm(`Remove ${sgSel.size} item(s) from the playlist?`)) return;
+  await api(`/instances/${state.signageInstId}/signage/items/delete`,
+            {method:'POST',body:{item_ids:[...sgSel]}});
+  sgSel.clear(); await loadData(true);
+}
+async function sgGroupSelected() {
+  if(!sgSel.size) return;
+  const name = prompt('Group name:','Group');
+  if(name===null) return;
+  await api(`/instances/${state.signageInstId}/signage/groups`,
+            {method:'POST',body:{name, item_ids:[...sgSel]}});
+  sgSel.clear(); await loadData(true);
+}
+async function sgNewGroup() {
+  const name = prompt('Group name:','Group');
+  if(name===null) return;
+  await api(`/instances/${state.signageInstId}/signage/groups`,{method:'POST',body:{name}});
+  await loadData(true);
+}
+async function sgDeleteGroup(g) {
+  const keep = g.item_count
+    ? !confirm(`Delete group "${g.name}" AND its ${g.item_count} item(s)?\n\nOK = delete items too · Cancel = ask to keep them`)
+    : false;
+  if (keep && !confirm(`Ungroup "${g.name}" and keep its items in the playlist?`)) return;
+  await api(`/signage/groups/${g.id}?keep_items=${keep?1:0}`,{method:'DELETE'});
+  await loadData(true);
+}
+async function sgToggleItem(item) {
+  await api(`/signage/items/${item.id}`,{method:'PUT',body:{enabled:!item.enabled}});
+  await loadData(true);
+}
+async function sgToggleGroup(g) {
+  await api(`/signage/groups/${g.id}`,{method:'PUT',body:{enabled:!g.enabled}});
+  await loadData(true);
+}
+async function sgAddFromLibrary(mediaIds) {
+  await api(`/instances/${state.signageInstId}/signage/items`,
+            {method:'POST',body:{media_file_ids:mediaIds}});
+  await loadData(true);
 }
 async function deleteMedia(id) {
   if(!confirm('Delete this file? It will be unlinked from any instances using it.'))return;
@@ -267,7 +444,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v0.3.2'),
+      h('span',{className:'version'},'v1.0.1'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
     ),
     h('div',{className:'header-actions'},
@@ -278,7 +455,7 @@ function renderHeader() {
 }
 
 function renderTabs() {
-  const tabs = [['instances','Instances'],['media','Media Library']];
+  const tabs = [['instances','Instances'],['signage','Signage'],['media','Media Library']];
   return h('div',{className:'tabs'}, ...tabs.map(([id,label])=>
     h('div',{className:`tab ${state.tab===id?'active':''}`,onClick:()=>{state.tab=id;render();}},label)
   ));
@@ -302,6 +479,7 @@ function renderInstanceCard(inst) {
     text:'📝 '+(inst.text_content||'—').substring(0,30),
     webcam:'📷 '+((inst.source_value||'—').split('/').pop()),
     video:'🎞 '+(inst.media_file ? inst.media_file.original_name : '—')+(inst.video_loop?' ⟳':''),
+    signage:`📺 Playlist · ${inst.signage_item_count||0} item${inst.signage_item_count===1?'':'s'}`,
   }[inst.source_type]||inst.source_value;
 
   const refreshLabel = inst.refresh_interval > 0
@@ -350,7 +528,7 @@ function renderInstancesPage() {
   const main = h('div',{className:'main'},
     h('div',{className:'section-header'},
       h('div',{className:'section-title'},`Output Instances (${state.instances.length})`),
-      h('button',{className:'primary',onClick:()=>{state.modal='create';render();}},`+ New Instance`),
+      h('button',{className:'primary',onClick:()=>{state.modal='create';state.modalDefaults=null;render();}},`+ New Instance`),
     ),
   );
   if(!state.instances.length) {
@@ -414,11 +592,397 @@ function renderMediaPage() {
   return main;
 }
 
+// --- Signage tab ---------------------------------------------------------
+
+const sgSorted = arr => arr.slice().sort((a,b)=>(a.sort_order-b.sort_order)||(a.id-b.id));
+function sgEntries() {
+  const g = state.signage.groups.map(x=>({type:'group',obj:x}));
+  const it = state.signage.items.filter(i=>!i.group_id).map(x=>({type:'item',obj:x}));
+  return [...g,...it].sort((a,b)=>(a.obj.sort_order-b.obj.sort_order)||(a.obj.id-b.obj.id));
+}
+const sgGroupItems = gid => sgSorted(state.signage.items.filter(i=>i.group_id===gid));
+
+let sgDrag = null; // {type:'item'|'group', id, groupId}
+
+function sgOrderPayload() {
+  return {
+    order: sgEntries().map(e=>({type:e.type,id:e.obj.id})),
+    group_items: Object.fromEntries(
+      state.signage.groups.map(g=>[g.id, sgGroupItems(g.id).map(i=>i.id)])),
+  };
+}
+
+async function sgApplyMove(drag, target) {
+  // target: {kind:'row', type, id, groupId} | {kind:'group-append', groupId} | {kind:'end'}
+  const p = sgOrderPayload();
+  p.order = p.order.filter(e=>!(e.type===drag.type&&e.id===drag.id));
+  if (drag.type==='item') {
+    for (const k in p.group_items) p.group_items[k] = p.group_items[k].filter(id=>id!==drag.id);
+  }
+  if (target.kind==='end') {
+    p.order.push({type:drag.type,id:drag.id});
+  } else if (target.kind==='group-append') {
+    if (drag.type!=='item') return;
+    p.group_items[target.groupId].push(drag.id);
+  } else if (target.groupId) {          // dropping onto an item inside a group
+    if (drag.type!=='item') return;     // groups can't nest
+    const arr = p.group_items[target.groupId];
+    const idx = arr.indexOf(target.id);
+    arr.splice(idx<0?arr.length:idx, 0, drag.id);
+  } else {                              // dropping onto a top-level entry
+    const idx = p.order.findIndex(e=>e.type===target.type&&e.id===target.id);
+    p.order.splice(idx<0?p.order.length:idx, 0, {type:drag.type,id:drag.id});
+  }
+  await api(`/instances/${state.signageInstId}/signage/reorder`,{method:'POST',body:p});
+  await loadData(true);
+}
+
+function sgMakeDraggable(row, drag, target) {
+  row.setAttribute('draggable','true');
+  row.addEventListener('dragstart', e=>{ sgDrag = drag; e.dataTransfer.effectAllowed='move'; });
+  row.addEventListener('dragend', ()=>{ sgDrag = null; });
+  row.addEventListener('dragover', e=>{
+    if(!sgDrag) return;
+    if(sgDrag.type===drag.type && sgDrag.id===drag.id) return;
+    e.preventDefault(); row.classList.add('dragover');
+  });
+  row.addEventListener('dragleave', ()=>row.classList.remove('dragover'));
+  row.addEventListener('drop', e=>{
+    e.preventDefault(); row.classList.remove('dragover');
+    if(sgDrag && !(sgDrag.type===drag.type&&sgDrag.id===drag.id)) {
+      // target may depend on what's being dragged (e.g. group headers accept
+      // items INTO the group but groups reorder AROUND it) — resolve at drop
+      sgApplyMove(sgDrag, typeof target==='function' ? target() : target);
+    }
+  });
+}
+
+function sgFmtDT(iso) {
+  const d = new Date(iso);
+  return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+function sgSchedSummary(o) {
+  const parts = [];
+  if (o.start_at || o.end_at) parts.push(`${o.start_at?sgFmtDT(o.start_at):'…'} → ${o.end_at?sgFmtDT(o.end_at):'…'}`);
+  if (o.daily_start && o.daily_end) parts.push(`⏰ ${o.daily_start}–${o.daily_end}`);
+  return parts.join(' · ');
+}
+function sgFmtSecs(v) { return (v%1 ? v.toFixed(1) : String(v))+'s'; }
+
+function sgEffTiming(item, group) {
+  const d = state.signage.defaults;
+  const m = item.media_file;
+  let dur = item.duration_s ?? group?.duration_s ?? (m?.is_video && m.duration_s ? m.duration_s : null) ?? d.duration;
+  let fade = item.crossfade_s ?? group?.crossfade_s ?? d.crossfade;
+  const inherited = item.duration_s==null;
+  return {dur, fade, inherited};
+}
+
+function sgItemRow(item, group) {
+  const m = item.media_file || {};
+  const t = sgEffTiming(item, group);
+  const sched = sgSchedSummary(item);
+  const cb = h('input',{type:'checkbox',style:{width:'auto'}});
+  cb.checked = sgSel.has(item.id);
+  cb.addEventListener('change',()=>{ if(cb.checked) sgSel.add(item.id); else sgSel.delete(item.id); sgUpdateToolbar(); });
+  cb.addEventListener('click',e=>e.stopPropagation());
+
+  const row = h('div',{className:`sg-row ${group?'grouped':''} ${item.enabled&&(group?group.enabled:true)?'':'off'}`},
+    h('div',{className:'drag-handle',title:'Drag to reorder'},'⠿'),
+    cb,
+    m.is_video
+      ? h('video',{className:'sg-thumb',src:(m.url||'')+'#t=0.1',muted:'true',preload:'metadata'})
+      : h('img',{className:'sg-thumb',src:m.url||'',loading:'lazy',alt:''}),
+    h('div',null,
+      h('div',{className:'sg-name'},(m.is_video?'🎞 ':'🖼 ')+(m.original_name||'(deleted)')),
+      h('div',{className:'sg-sub'},`#${item.id}${m.is_video&&m.duration_s?` · file ${Math.round(m.duration_s)}s`:''}`),
+    ),
+    h('div',{className:'sg-timing'},`▦ ${sgFmtSecs(t.dur)}${t.inherited?'*':''} · fade ${sgFmtSecs(t.fade)}`),
+    h('div',{className:'sg-sched',title:sched},sched||'always'),
+    h('div',{className:'sg-imp',title:'Impressions (times shown)'},`👁 ${item.impressions||0}`),
+    h('div',{className:'sg-actions'},
+      h('div',{className:`toggle ${item.enabled?'on':''}`,onClick:()=>sgToggleItem(item),title:item.enabled?'Enabled':'Disabled'}),
+      h('button',{className:'sm',onClick:()=>{state.sgModal={type:'item',obj:item};render();},title:'Edit timing & schedule'},'✎'),
+      h('button',{className:'sm danger',onClick:()=>sgDeleteItem(item.id)},'✕'),
+    ),
+  );
+  sgMakeDraggable(row,
+    {type:'item', id:item.id, groupId:group?group.id:null},
+    {kind:'row', type:'item', id:item.id, groupId:group?group.id:null});
+  return row;
+}
+
+function sgGroupRow(g) {
+  const items = sgGroupItems(g.id);
+  const collapsed = !!state.sgCollapsed[g.id];
+  const sched = sgSchedSummary(g);
+  const row = h('div',{className:`sg-row sg-group-row ${g.enabled?'':'off'}`},
+    h('div',{className:'drag-handle',title:'Drag to reorder'},'⠿'),
+    h('div',{style:{cursor:'pointer'},onClick:()=>{state.sgCollapsed[g.id]=!collapsed;render();}},collapsed?'▸':'▾'),
+    h('div',{style:{fontSize:'20px',textAlign:'center'}},'🗂'),
+    h('div',null,
+      h('div',{className:'sg-name'},g.name),
+      h('div',{className:'sg-sub'},`group · ${items.length} item${items.length===1?'':'s'} — drop items here to add`),
+    ),
+    h('div',{className:'sg-timing'},
+      (g.duration_s!=null||g.crossfade_s!=null)
+        ? `▦ ${g.duration_s!=null?sgFmtSecs(g.duration_s):'—'} · fade ${g.crossfade_s!=null?sgFmtSecs(g.crossfade_s):'—'}` : ''),
+    h('div',{className:'sg-sched',title:sched},sched||'always'),
+    h('div',{className:'sg-imp'},''),
+    h('div',{className:'sg-actions'},
+      h('div',{className:`toggle ${g.enabled?'on':''}`,onClick:()=>sgToggleGroup(g),title:g.enabled?'Enabled':'Disabled'}),
+      h('button',{className:'sm',onClick:()=>{state.sgModal={type:'group',obj:g};render();},title:'Edit group'},'✎'),
+      h('button',{className:'sm danger',onClick:()=>sgDeleteGroup(g)},'✕'),
+    ),
+  );
+  // Dropping an item on the header appends it to the group; dropping a
+  // group on it reorders at the top level
+  sgMakeDraggable(row, {type:'group', id:g.id, groupId:null},
+    ()=> sgDrag && sgDrag.type==='item'
+      ? {kind:'group-append', groupId:g.id}
+      : {kind:'row', type:'group', id:g.id, groupId:null});
+  return row;
+}
+
+function sgUpdateToolbar() {
+  const gb = document.getElementById('sg-group-btn');
+  const db = document.getElementById('sg-del-btn');
+  if (gb) gb.disabled = !sgSel.size;
+  if (db) db.disabled = !sgSel.size;
+}
+
+async function updateSignageStatus() {
+  if (state.tab!=='signage' || !state.signageInstId || document.hidden) return;
+  try {
+    const s = await api(`/instances/${state.signageInstId}/signage/status`);
+    const set = (id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
+    if (s.running && s.status) {
+      set('sg-now', s.status.current ? s.status.current.name : 'Black (nothing scheduled)');
+      set('sg-remaining', s.status.current && s.status.remaining_s!=null
+        ? `${Math.max(0,Math.round(s.status.remaining_s))}s left` : '');
+      set('sg-next', s.status.next ? s.status.next.name : '—');
+    } else {
+      set('sg-now', s.running ? 'Starting…' : 'Not running');
+      set('sg-next','—'); set('sg-remaining','');
+    }
+  } catch(e) {}
+}
+
+function renderSignagePage() {
+  const main = h('div',{className:'main'});
+  const sgInsts = state.instances.filter(i=>i.source_type==='signage');
+
+  // Instance selector
+  const sel = h('select',{style:{width:'260px',fontFamily:"'JetBrains Mono',monospace",background:'var(--bg)',border:'1px solid var(--border)',borderRadius:'8px',color:'var(--text)',padding:'6px 10px',fontSize:'13px'}});
+  sgInsts.forEach(i=>sel.appendChild(h('option',{value:String(i.id)},`#${i.id} ${i.name}`)));
+  if (state.signageInstId) sel.value = String(state.signageInstId);
+  sel.addEventListener('change',()=>{ state.signageInstId = parseInt(sel.value); sgSel.clear(); loadData(true); });
+
+  main.appendChild(h('div',{className:'section-header'},
+    h('div',{style:{display:'flex',alignItems:'center',gap:'10px'}},
+      h('div',{className:'section-title'},'Signage Playlist'),
+      sgInsts.length ? sel : null,
+    ),
+    h('button',{className:'primary',onClick:()=>{state.modal='create';state.modalDefaults={source_type:'signage'};render();}},'+ New Signage Instance'),
+  ));
+
+  if (!sgInsts.length) {
+    main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'📺'),
+      h('div',null,'No signage instances yet. Create one — it appears as an NDI source that plays your scheduled playlist.')));
+    return main;
+  }
+  const inst = sgInsts.find(i=>i.id===state.signageInstId);
+  if (!inst || !state.signage) {
+    main.appendChild(h('div',{className:'empty-state'},'Loading…'));
+    return main;
+  }
+
+  // Live panel
+  const preview = inst.running
+    ? (previewCache[inst.id]
+        ? h('img',{'data-preview':inst.id,src:previewCache[inst.id],alt:'Live'})
+        : h('div',{className:'instance-preview-empty','data-preview-slot':inst.id,style:{width:'180px',height:'101px'}},'Loading…'))
+    : h('div',{className:'instance-preview-empty',style:{width:'180px',height:'101px'}},'Not running');
+  main.appendChild(h('div',{className:'sg-live'},
+    preview,
+    h('div',{className:'sg-live-info'},
+      h('div',null,h('div',{className:'label'},'Now Playing'),
+        h('div',{className:'val',id:'sg-now'},inst.running?'…':'Not running'),
+        h('div',{className:'sg-remaining',id:'sg-remaining'},'')),
+      h('div',null,h('div',{className:'label'},'Up Next'),
+        h('div',{className:'val dim',id:'sg-next'},'—')),
+    ),
+    h('div',{style:{display:'flex',gap:'8px',flexDirection:'column'}},
+      inst.running
+        ? h('button',{onClick:()=>sgSkip(),title:'Crossfade to the next item now'},'⏭ Skip Next')
+        : h('button',{className:'primary',onClick:()=>startInstance(inst.id)},'▶ Start'),
+      inst.running
+        ? h('button',{className:'danger',onClick:()=>stopInstance(inst.id)},'■ Stop')
+        : null,
+      h('button',{className:'sm',onClick:()=>{state.modal=inst;render();}},'✎ Instance Settings'),
+    ),
+  ));
+
+  // Upload zone
+  const zone = h('div',{className:'upload-zone'},
+    'Drop stills, videos, PowerPoint or PDF here (or click) — decks become a group, one slide per image');
+  const fileInput = h('input',{type:'file',accept:'image/*,video/*,.ppt,.pptx,.odp,.pdf',multiple:'true',style:{display:'none'}});
+  const sgHandleFiles = files => { (async()=>{ for(const f of files) await sgUploadFile(f); })(); };
+  fileInput.addEventListener('change',e=>{sgHandleFiles(Array.from(e.target.files)); e.target.value='';});
+  zone.addEventListener('click',()=>fileInput.click());
+  zone.addEventListener('dragover',e=>{ if(sgDrag) return; e.preventDefault();zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave',()=>zone.classList.remove('dragover'));
+  zone.addEventListener('drop',e=>{ if(sgDrag) return; e.preventDefault();zone.classList.remove('dragover');sgHandleFiles(Array.from(e.dataTransfer.files)); });
+  main.appendChild(zone);
+  main.appendChild(fileInput);
+
+  // Toolbar
+  main.appendChild(h('div',{className:'sg-toolbar'},
+    h('button',{className:'sm',onClick:()=>{state.sgModal={type:'library'};render();}},'+ Add from Library'),
+    h('button',{className:'sm',onClick:sgNewGroup},'🗂 New Group'),
+    h('button',{className:'sm',id:'sg-group-btn',disabled:sgSel.size?null:'true',onClick:sgGroupSelected},'Group Selected'),
+    h('button',{className:'sm danger',id:'sg-del-btn',disabled:sgSel.size?null:'true',onClick:sgDeleteSelected},'Delete Selected'),
+    h('div',{className:'form-hint',style:{marginLeft:'auto'}},
+      `Defaults: ${sgFmtSecs(state.signage.defaults.duration)} / fade ${sgFmtSecs(state.signage.defaults.crossfade)} (* = inherited) · drag ⠿ to reorder, drop items on a group to add`),
+  ));
+
+  // Playlist
+  const entries = sgEntries();
+  if (!entries.length) {
+    main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'🖼'),
+      h('div',null,'Playlist is empty. Upload content above or add from the media library.')));
+  } else {
+    const list = h('div',{className:'sg-list'});
+    for (const e of entries) {
+      if (e.type==='group') {
+        list.appendChild(sgGroupRow(e.obj));
+        if (!state.sgCollapsed[e.obj.id]) sgGroupItems(e.obj.id).forEach(it=>list.appendChild(sgItemRow(it, e.obj)));
+      } else {
+        list.appendChild(sgItemRow(e.obj, null));
+      }
+    }
+    // Tail drop target: append at the end of the top level
+    const endZone = h('div',{className:'sg-dropzone'},'⤓ drop here to move to the end');
+    endZone.addEventListener('dragover',e=>{ if(!sgDrag) return; e.preventDefault(); endZone.classList.add('dragover'); });
+    endZone.addEventListener('dragleave',()=>endZone.classList.remove('dragover'));
+    endZone.addEventListener('drop',e=>{ e.preventDefault(); endZone.classList.remove('dragover'); if(sgDrag) sgApplyMove(sgDrag,{kind:'end'}); });
+    list.appendChild(endZone);
+    main.appendChild(list);
+  }
+
+  setTimeout(updateSignageStatus, 0);
+  return main;
+}
+
+// --- Signage modals (item / group settings, add-from-library) ------------
+
+function renderSignageModal() {
+  if (!state.sgModal) return null;
+  const {type} = state.sgModal;
+  const close = ()=>{state.sgModal=null;render();};
+
+  if (type==='library') {
+    const picked = new Set();
+    const grid = h('div',{className:'media-picker',style:{maxHeight:'320px'}});
+    state.media.forEach(m=>{
+      const thumb = m.is_video
+        ? h('video',{src:m.url+'#t=0.1',muted:'true',preload:'metadata',title:m.original_name})
+        : h('img',{src:m.url,alt:m.original_name,title:m.original_name});
+      const cell = h('div',{className:'media-picker-item',onClick:()=>{
+        if(picked.has(m.id)){picked.delete(m.id);cell.classList.remove('selected');}
+        else {picked.add(m.id);cell.classList.add('selected');}
+      }},thumb);
+      grid.appendChild(cell);
+    });
+    return h('div',{className:'modal-overlay',onClick:e=>{if(e.target.className==='modal-overlay')close();}},
+      h('div',{className:'modal'},
+        h('h2',null,'Add from Media Library'),
+        h('div',{className:'form-hint',style:{marginBottom:'8px'}},'Click to select multiple files — they are appended to the playlist in library order'),
+        grid,
+        h('div',{className:'modal-actions'},
+          h('button',{onClick:close},'Cancel'),
+          h('button',{className:'primary',onClick:async()=>{
+            if(picked.size) await sgAddFromLibrary([...picked]);
+            close();
+          }},'Add Selected'),
+        ),
+      ));
+  }
+
+  // Item or group settings
+  const obj = state.sgModal.obj;
+  const isGroup = type==='group';
+  const d = state.signage ? state.signage.defaults : {duration:8,crossfade:1};
+  const dtVal = iso => iso ? iso.substring(0,16) : '';
+
+  const nameInput = isGroup ? h('input',{type:'text',value:obj.name}) : null;
+  const durInput = h('input',{type:'number',step:'0.5',min:'0.5',value:obj.duration_s!=null?String(obj.duration_s):'',
+    placeholder:isGroup?`inherit (${d.duration}s)`:`auto (video length / ${d.duration}s)`});
+  const fadeInput = h('input',{type:'number',step:'0.1',min:'0',max:'30',value:obj.crossfade_s!=null?String(obj.crossfade_s):'',
+    placeholder:`inherit (${d.crossfade}s)`});
+  const startInput = h('input',{type:'datetime-local',value:dtVal(obj.start_at)});
+  const endInput = h('input',{type:'datetime-local',value:dtVal(obj.end_at)});
+  const dsInput = h('input',{type:'time',value:obj.daily_start||''});
+  const deInput = h('input',{type:'time',value:obj.daily_end||''});
+  const enabledCheck = h('input',{type:'checkbox',style:{width:'auto'}});
+  enabledCheck.checked = !!obj.enabled;
+
+  async function save() {
+    const body = {
+      duration_s: durInput.value===''?null:parseFloat(durInput.value),
+      crossfade_s: fadeInput.value===''?null:parseFloat(fadeInput.value),
+      start_at: startInput.value||null,
+      end_at: endInput.value||null,
+      daily_start: dsInput.value?dsInput.value.substring(0,5):null,
+      daily_end: deInput.value?deInput.value.substring(0,5):null,
+      enabled: enabledCheck.checked,
+    };
+    if (isGroup) body.name = nameInput.value;
+    const res = await api(isGroup?`/signage/groups/${obj.id}`:`/signage/items/${obj.id}`,{method:'PUT',body});
+    if (res && res.error) { alert(res.error); return; }
+    state.sgModal = null;
+    await loadData(true);
+  }
+
+  const title = isGroup ? `Group: ${obj.name}` :
+    `Item: ${(obj.media_file&&obj.media_file.original_name)||('#'+obj.id)}`;
+  return h('div',{className:'modal-overlay',onClick:e=>{if(e.target.className==='modal-overlay')close();}},
+    h('div',{className:'modal'},
+      h('h2',null,title),
+      isGroup ? h('div',{className:'form-group'},h('label',null,'Group Name'),nameInput) : null,
+      h('div',{className:'form-row'},
+        h('div',{className:'form-group'},h('label',null,'Duration (seconds)'),durInput,
+          h('div',{className:'form-hint'},isGroup?'Default for items in this group':'Blank = video length / inherited default. Setting it on a video holds the last frame to fill the slot.')),
+        h('div',{className:'form-group'},h('label',null,'Crossfade (seconds)'),fadeInput,
+          h('div',{className:'form-hint'},'Fade into the NEXT item — starts this long before the slot (or video) ends. 0 = hard cut.')),
+      ),
+      h('div',{className:'text-settings'},
+        h('div',{className:'form-row'},
+          h('div',{className:'form-group'},h('label',null,'Start Showing (date & time)'),startInput),
+          h('div',{className:'form-group'},h('label',null,'Expire (date & time)'),endInput),
+        ),
+        h('div',{className:'form-row'},
+          h('div',{className:'form-group'},h('label',null,'Daily From'),dsInput),
+          h('div',{className:'form-group'},h('label',null,'Daily Until'),deInput),
+        ),
+        h('div',{className:'form-hint'},'Times are the server’s local wall-clock. Daily window needs both bounds; From later than Until wraps past midnight (e.g. 22:00–06:00). Blank = no restriction.'),
+      ),
+      h('div',{className:'form-group',style:{marginTop:'10px'}},
+        h('label',{style:{display:'flex',alignItems:'center',gap:'8px',textTransform:'none',fontSize:'13px',color:'var(--text)'}},
+          enabledCheck, isGroup?'Group enabled (off = whole group skipped)':'Enabled (off = skipped)'),
+      ),
+      h('div',{className:'modal-actions'},
+        h('button',{onClick:close},'Cancel'),
+        h('button',{className:'primary',onClick:save},'Save'),
+      ),
+    ));
+}
+
 function renderModal() {
   if(!state.modal) return null;
   const isEdit = state.modal !== 'create';
-  const inst = isEdit ? state.modal : {};
-  const field = (k,d) => isEdit ? (inst[k]??d) : d;
+  const inst = isEdit ? state.modal : (state.modalDefaults || {});
+  const field = (k,d) => (inst[k] ?? d);
 
   const sourceTypeSelect = h('select',null,
     h('option',{value:'webpage'},'Webpage URL'),
@@ -426,8 +990,9 @@ function renderModal() {
     h('option',{value:'text'},'Text'),
     h('option',{value:'webcam'},'Webcam'),
     h('option',{value:'video'},'Video File'),
+    h('option',{value:'signage'},'Signage Playlist'),
   );
-  if(isEdit) sourceTypeSelect.value = inst.source_type;
+  if(inst.source_type) sourceTypeSelect.value = inst.source_type;
 
   const nameInput = h('input',{type:'text',value:field('name',''),placeholder:'Lower Third'});
   const sourceInput = h('input',{type:'text',value:field('source_value',''),placeholder:'https://...'});
@@ -523,6 +1088,22 @@ function renderModal() {
       `Remote control (same port as this page): GET or POST /api/instances/${videoApiName}/video/play · /video/play/<media> (switch & play) · /video/load/<media> (cue first frame) · /video/stop?hold=first|last · /video/status — instance by id or name, media by id, uid, or filename`),
   );
 
+  // Signage source settings (playlist itself is managed in the Signage tab)
+  const sgDurInput = h('input',{type:'number',step:'0.5',min:'0.5',value:String(field('signage_duration',8))});
+  const sgFadeInput = h('input',{type:'number',step:'0.1',min:'0',max:'30',value:String(field('signage_crossfade',1))});
+  const sgApiName = isEdit ? inst.id : '<id>';
+  const signageSection = h('div',{className:'text-settings',id:'signage-settings'},
+    h('div',{className:'form-row'},
+      h('div',{className:'form-group'},h('label',null,'Default Still Duration (s)'),sgDurInput,
+        h('div',{className:'form-hint'},'Per-item/group settings override this')),
+      h('div',{className:'form-group'},h('label',null,'Default Crossfade (s)'),sgFadeInput,
+        h('div',{className:'form-hint'},'0 = hard cuts')),
+    ),
+    h('div',{className:'form-hint'},
+      `Manage the playlist (upload, order, schedules, groups) in the Signage tab. `+
+      `Remote control: GET or POST /api/instances/${sgApiName}/signage/skip · /signage/status — instance by id or name`),
+  );
+
   const sourceGroup = h('div',{className:'form-group'},h('label',null,'Source URL'),sourceInput);
 
   // Webcam device picker
@@ -573,7 +1154,8 @@ function renderModal() {
     textSection.style.display = st==='text'?'block':'none';
     mediaPicker.style.display = st==='image'?'block':'none';
     videoSection.style.display = st==='video'?'block':'none';
-    sourceGroup.style.display = (st==='webcam'||st==='video')?'none':'block';
+    signageSection.style.display = st==='signage'?'block':'none';
+    sourceGroup.style.display = (st==='webcam'||st==='video'||st==='signage')?'none':'block';
     webcamSection.style.display = st==='webcam'?'block':'none';
     if(st==='webcam') loadWebcams();
   }
@@ -584,8 +1166,10 @@ function renderModal() {
     const data = {
       name: nameInput.value,
       source_type: st,
-      source_value: st==='webcam' ? webcamSelect.value : (st==='video' ? '' : sourceInput.value),
+      source_value: (st==='webcam') ? webcamSelect.value : ((st==='video'||st==='signage') ? '' : sourceInput.value),
       media_file_id: (st==='image'||st==='video') ? selectedMediaId : null,
+      signage_duration: parseFloat(sgDurInput.value)||8,
+      signage_crossfade: sgFadeInput.value==='' ? 1 : Math.max(0, parseFloat(sgFadeInput.value)||0),
       video_loop: videoLoopSel.value==='loop',
       video_hold: videoHoldSel.value,
       video_autoplay: videoAutoplayCheck.checked,
@@ -614,6 +1198,7 @@ function renderModal() {
       webcamSection,
       mediaPicker,
       videoSection,
+      signageSection,
       h('div',{className:'form-row'},
         h('div',{className:'form-group'},h('label',null,'Width'),widthInput),
         h('div',{className:'form-group'},h('label',null,'Height'),heightInput),
@@ -645,19 +1230,27 @@ function render() {
   if(state.tab==='instances') {
     root.appendChild(renderSettingsBar());
     root.appendChild(renderInstancesPage());
+  } else if(state.tab==='signage') {
+    root.appendChild(renderSignagePage());
   } else {
     root.appendChild(renderMediaPage());
   }
   const modal = renderModal();
   if(modal) root.appendChild(modal);
+  const sgModal = renderSignageModal();
+  if(sgModal) root.appendChild(sgModal);
 }
 
+// A modal open or a drag in progress must not be clobbered by a poll re-render
+const uiBusy = () => state.modal || state.sgModal || sgDrag;
+
 loadData();
-setInterval(() => { if (!state.modal && !document.hidden) loadData(); }, 5000);
+setInterval(() => { if (!uiBusy() && !document.hidden) loadData(); }, 5000);
 setInterval(updatePreviews, 2000);
+setInterval(updateSignageStatus, 2000);
 // Catch up immediately when the tab becomes visible again
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && !state.modal) { loadData(); updatePreviews(); }
+  if (!document.hidden && !uiBusy()) { loadData(); updatePreviews(); }
 });
 </script>
 </body>

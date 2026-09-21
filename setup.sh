@@ -131,6 +131,13 @@ else
     warn "Install avahi-daemon for NDI discovery: sudo apt install avahi-daemon avahi-utils libnss-mdns"
 fi
 
+# Optional: signage PowerPoint/PDF deck conversion (LibreOffice + poppler).
+# The app runs fine without these — deck uploads return a clear error instead.
+if ! command -v soffice &>/dev/null || ! command -v pdftoppm &>/dev/null; then
+    warn "Optional: install LibreOffice + poppler-utils to upload PowerPoint/PDF decks into signage playlists:"
+    warn "    sudo apt install libreoffice-impress poppler-utils"
+fi
+
 # ------------------------------------------------------------------
 # 5. NDI SDK detection + system install
 # ------------------------------------------------------------------

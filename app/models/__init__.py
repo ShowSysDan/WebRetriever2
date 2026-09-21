@@ -93,6 +93,20 @@ class OutputInstance(db.Model):
     source_type = db.Column(db.String(16), nullable=False, default="webpage")
     source_value = db.Column(db.Text, nullable=False, default="")
 
+    # Signage source defaults (nullable for ADD COLUMN auto-migration; code
+    # treats NULL as the default). Per-item / per-group values override these.
+    signage_duration = db.Column(db.Float, nullable=True, default=8.0)    # seconds per still
+    signage_crossfade = db.Column(db.Float, nullable=True, default=1.0)   # seconds
+
+    signage_groups = db.relationship(
+        "SignageGroup", backref="instance", lazy=True,
+        cascade="all, delete-orphan",
+    )
+    signage_items = db.relationship(
+        "SignageItem", backref="instance", lazy=True,
+        cascade="all, delete-orphan",
+    )
+
     # Link to media library (for image source type)
     media_file_id = db.Column(db.Integer, db.ForeignKey("media_files.id"), nullable=True)
     media_file = db.relationship("MediaFile", backref="instances")
@@ -155,9 +169,13 @@ class OutputInstance(db.Model):
             "refresh_interval": self.refresh_interval,
             "enabled": self.enabled,
             "running": self.running,
+            "signage_duration": self.signage_duration if self.signage_duration is not None else 8.0,
+            "signage_crossfade": self.signage_crossfade if self.signage_crossfade is not None else 1.0,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+        if self.source_type == "signage":
+            d["signage_item_count"] = len(self.signage_items)
         return d
 
     @property
@@ -165,3 +183,118 @@ class OutputInstance(db.Model):
         """NDI source name — just the instance name.
         NDI protocol automatically prefixes with MACHINE_NAME."""
         return self.name
+
+
+class SignageGroup(db.Model):
+    """A named bundle of signage items inside one instance's playlist.
+
+    A group occupies a single slot in the top-level play order (its items
+    play consecutively) and carries schedule/timing settings that apply to
+    every item in it — so 10 uploaded slides can be scheduled, transitioned
+    and deleted as one unit.
+
+    Scheduling semantics (see routes._build_signage_playlist): the group's
+    date window intersects with each item's own window; the group's daily
+    time window and duration/crossfade act as defaults an item can override.
+    """
+    __tablename__ = "signage_groups"
+
+    id = db.Column(db.Integer, primary_key=True)
+    instance_id = db.Column(
+        db.Integer, db.ForeignKey("output_instances.id"), nullable=False, index=True
+    )
+    name = db.Column(db.String(128), nullable=False, default="Group")
+    sort_order = db.Column(db.Integer, nullable=False, default=0)
+
+    # Defaults for items in the group (NULL = fall through to instance default)
+    duration_s = db.Column(db.Float, nullable=True)
+    crossfade_s = db.Column(db.Float, nullable=True)
+
+    # Schedule window — naive datetimes interpreted in the SERVER's local
+    # timezone (signage schedules mean wall-clock time on the box)
+    start_at = db.Column(db.DateTime, nullable=True)
+    end_at = db.Column(db.DateTime, nullable=True)
+    # Daily time-of-day window, "HH:MM" strings; start > end wraps midnight
+    daily_start = db.Column(db.String(5), nullable=True)
+    daily_end = db.Column(db.String(5), nullable=True)
+
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # No delete-orphan here: "ungroup" detaches items without deleting them.
+    # Group deletion handles its items explicitly in the route.
+    items = db.relationship("SignageItem", backref="group", lazy=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "instance_id": self.instance_id,
+            "name": self.name,
+            "sort_order": self.sort_order,
+            "duration_s": self.duration_s,
+            "crossfade_s": self.crossfade_s,
+            "start_at": self.start_at.isoformat() if self.start_at else None,
+            "end_at": self.end_at.isoformat() if self.end_at else None,
+            "daily_start": self.daily_start,
+            "daily_end": self.daily_end,
+            "enabled": self.enabled,
+            "item_count": len(self.items),
+        }
+
+
+class SignageItem(db.Model):
+    """One entry in a signage instance's playlist: a media file plus playback
+    timing, an optional schedule window, and an impression counter."""
+    __tablename__ = "signage_items"
+
+    id = db.Column(db.Integer, primary_key=True)
+    instance_id = db.Column(
+        db.Integer, db.ForeignKey("output_instances.id"), nullable=False, index=True
+    )
+    group_id = db.Column(
+        db.Integer, db.ForeignKey("signage_groups.id"), nullable=True, index=True
+    )
+    media_file_id = db.Column(
+        db.Integer, db.ForeignKey("media_files.id"), nullable=False
+    )
+    media_file = db.relationship("MediaFile", backref="signage_items")
+
+    # Order within the top level (group_id NULL) or within the group
+    sort_order = db.Column(db.Integer, nullable=False, default=0)
+
+    # NULL = inherit from group, then instance default. For videos the
+    # fallback is the file's own duration.
+    duration_s = db.Column(db.Float, nullable=True)
+    crossfade_s = db.Column(db.Float, nullable=True)
+
+    # Schedule window — naive local datetimes + optional daily "HH:MM" window
+    start_at = db.Column(db.DateTime, nullable=True)
+    end_at = db.Column(db.DateTime, nullable=True)
+    daily_start = db.Column(db.String(5), nullable=True)
+    daily_end = db.Column(db.String(5), nullable=True)
+
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+
+    # Times this item went on air (folded in from the worker's impression log)
+    impressions = db.Column(db.Integer, nullable=False, default=0)
+
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        m = self.media_file
+        return {
+            "id": self.id,
+            "instance_id": self.instance_id,
+            "group_id": self.group_id,
+            "media_file_id": self.media_file_id,
+            "media_file": m.to_dict() if m else None,
+            "sort_order": self.sort_order,
+            "duration_s": self.duration_s,
+            "crossfade_s": self.crossfade_s,
+            "start_at": self.start_at.isoformat() if self.start_at else None,
+            "end_at": self.end_at.isoformat() if self.end_at else None,
+            "daily_start": self.daily_start,
+            "daily_end": self.daily_end,
+            "enabled": self.enabled,
+            "impressions": self.impressions or 0,
+        }
