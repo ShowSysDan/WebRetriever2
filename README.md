@@ -1411,7 +1411,8 @@ Current version is tracked in the `VERSION` file at the project root.
 
 #### 1.7.0
 
-**Signage preloading, visible upload progress, bigger UI text.**
+**Signage RAM preloading & caching, real-time status, receiver counts,
+multi-user hardening, bigger UI.**
 
 - **Signage items are preloaded into RAM before they go on air.** The
   worker builds the upcoming item's layer on a background thread ~6s before

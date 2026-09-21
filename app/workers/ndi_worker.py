@@ -1521,6 +1521,9 @@ class NDIWorker:
                 attempts += 1
 
             if item is None:
+                # Going to black: a stale preloaded layer (schedule changed
+                # since it was built) must not idle holding a file handle
+                drop_preloaded()
                 if current.item is None:
                     fade_start_t = float("inf")  # already black, stay put
                     return

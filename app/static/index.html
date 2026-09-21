@@ -446,6 +446,20 @@ function uploadStatusText(u) {
     : u.status==='done' ? '✓ done' : '✗ failed';
 }
 
+// One progress card, in overlay ('upov') or mini-panel ('up') styling
+function uploadCard(u, pre, closable) {
+  return h('div',{className:`${pre}-item ${u.status}`},
+    h('div',{className:`${pre}-head`},
+      h('div',{className:`${pre}-name`,title:u.name},u.name),
+      h('div',{className:`${pre}-status`},uploadStatusText(u)),
+      closable && (u.status==='done'||u.status==='error')
+        ? h('div',{className:'up-close',onClick:()=>{removeUpload(u.id);}},'✕') : null,
+    ),
+    h('div',{className:`${pre}-bar`},h('div',{className:`${pre}-fill`,style:{width:`${u.pct}%`}})),
+    u.status==='error'&&u.msg ? h('div',{className:`${pre}-err`},u.msg) : null,
+  );
+}
+
 function updateUploadPanel() {
   let panel = document.getElementById('upload-panel');
   let overlay = document.getElementById('upload-overlay');
@@ -470,14 +484,7 @@ function updateUploadPanel() {
       h('div',{className:'upov-title'},'Uploading media'),
       h('div',{className:'upov-sub'},
         `${finished} of ${total} file${total===1?'':'s'} finished — keep this page open until uploads complete`),
-      ...uploads.map(u=>h('div',{className:`upov-item ${u.status}`},
-        h('div',{className:'upov-head'},
-          h('div',{className:'upov-name',title:u.name},u.name),
-          h('div',{className:'upov-status'},uploadStatusText(u)),
-        ),
-        h('div',{className:'upov-bar'},h('div',{className:'upov-fill',style:{width:`${u.pct}%`}})),
-        u.status==='error'&&u.msg ? h('div',{className:'upov-err'},u.msg) : null,
-      )),
+      ...uploads.map(u=>uploadCard(u,'upov',false)),
       h('div',{className:'upov-actions'},
         h('button',{className:'sm',onClick:()=>{uploadsMinimized=true;updateUploadPanel();}},
           'Hide — keep uploading in background'),
@@ -493,18 +500,7 @@ function updateUploadPanel() {
     document.body.appendChild(panel);
   }
   panel.innerHTML = '';
-  for (const u of uploads) {
-    panel.appendChild(h('div',{className:`up-item ${u.status}`},
-      h('div',{className:'up-head'},
-        h('div',{className:'up-name',title:u.name},u.name),
-        h('div',{className:'up-status'},uploadStatusText(u)),
-        (u.status==='done'||u.status==='error')
-          ? h('div',{className:'up-close',onClick:()=>{removeUpload(u.id);}},'✕') : null,
-      ),
-      h('div',{className:'up-bar'},h('div',{className:'up-fill',style:{width:`${u.pct}%`}})),
-      u.status==='error'&&u.msg ? h('div',{className:'up-err'},u.msg) : null,
-    ));
-  }
+  for (const u of uploads) panel.appendChild(uploadCard(u,'up',true));
 }
 
 function removeUpload(id) {

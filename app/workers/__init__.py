@@ -83,6 +83,16 @@ class WorkerManager:
         # Start button races two spawns and orphans one worker untracked
         self._lock = threading.RLock()
 
+    def _forget_instance(self, instance_id: int):
+        """Drop every per-instance shared ref (worker, process, control and
+        stats Values). One list, used by stop/restart/cleanup alike — so a
+        newly added channel can't be forgotten in one of them and leak."""
+        for d in (self._workers, self._processes, self._heartbeats,
+                  self._video_cmds, self._video_states, self._video_paths,
+                  self._video_holds, self._signage_cmds, self._preview_boosts,
+                  self._ndi_connections, self._ndi_tallys):
+            d.pop(instance_id, None)
+
     def _spawn(self, instance_id: int, config: dict) -> mp.Process:
         """Create a fresh heartbeat + worker + process from a stored config
         and register them. Shared by initial start and watchdog restart."""
@@ -195,17 +205,7 @@ class WorkerManager:
                         _kill_process_tree(process)
                         process.join(timeout=3)
 
-            self._workers.pop(instance_id, None)
-            self._processes.pop(instance_id, None)
-            self._heartbeats.pop(instance_id, None)
-            self._video_cmds.pop(instance_id, None)
-            self._video_states.pop(instance_id, None)
-            self._video_paths.pop(instance_id, None)
-            self._video_holds.pop(instance_id, None)
-            self._signage_cmds.pop(instance_id, None)
-            self._preview_boosts.pop(instance_id, None)
-            self._ndi_connections.pop(instance_id, None)
-            self._ndi_tallys.pop(instance_id, None)
+            self._forget_instance(instance_id)
             self._configs.pop(instance_id, None)
             self._restart_meta.pop(instance_id, None)
             log_event("INSTANCE_STOPPED", f"id={instance_id}")
@@ -399,17 +399,7 @@ class WorkerManager:
                     proc.join(timeout=3)
 
             # Clean up old refs (_spawn recreates control values as needed)
-            self._workers.pop(iid, None)
-            self._processes.pop(iid, None)
-            self._heartbeats.pop(iid, None)
-            self._video_cmds.pop(iid, None)
-            self._video_states.pop(iid, None)
-            self._video_paths.pop(iid, None)
-            self._video_holds.pop(iid, None)
-            self._signage_cmds.pop(iid, None)
-            self._preview_boosts.pop(iid, None)
-            self._ndi_connections.pop(iid, None)
-            self._ndi_tallys.pop(iid, None)
+            self._forget_instance(iid)
 
             process = self._spawn(iid, config)
             log_event("INSTANCE_RESTARTED", f"id={iid} reason={reason} new_pid={process.pid}")
@@ -479,17 +469,7 @@ class WorkerManager:
             if not proc.is_alive() and iid not in self._configs
         ]
         for iid in dead:
-            self._workers.pop(iid, None)
-            self._processes.pop(iid, None)
-            self._heartbeats.pop(iid, None)
-            self._video_cmds.pop(iid, None)
-            self._video_states.pop(iid, None)
-            self._video_paths.pop(iid, None)
-            self._video_holds.pop(iid, None)
-            self._signage_cmds.pop(iid, None)
-            self._preview_boosts.pop(iid, None)
-            self._ndi_connections.pop(iid, None)
-            self._ndi_tallys.pop(iid, None)
+            self._forget_instance(iid)
         return dead
 
 
