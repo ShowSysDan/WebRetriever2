@@ -115,9 +115,16 @@ class Transcoder:
                 self._ensure_thread()
 
             if app.config.get("VIDEO_OPTIMIZE") == "all":
+                # NULL = never checked. "skipped" = ffmpeg was missing when
+                # the file was checked — re-check those too once it's
+                # installed, so `apt install ffmpeg` + a service restart
+                # converts the backlog with no per-file clicking.
+                statuses = [MediaFile.optimize_status.is_(None)]
+                if ffmpeg_available():
+                    statuses.append(MediaFile.optimize_status == "skipped")
+                from sqlalchemy import or_
                 unchecked = [
-                    m for m in MediaFile.query.filter(
-                        MediaFile.optimize_status.is_(None)).all()
+                    m for m in MediaFile.query.filter(or_(*statuses)).all()
                     if m.is_video
                 ]
                 if unchecked:
