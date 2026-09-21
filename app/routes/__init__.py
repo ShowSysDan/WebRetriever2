@@ -321,7 +321,15 @@ def get_settings():
         settings = GlobalSettings(ndi_hostname="NDI-STREAMER", output_fps=60)
         db.session.add(settings)
         db.session.commit()
-    return jsonify(settings.to_dict())
+    d = settings.to_dict()
+    # Server clock for the UI header — signage schedules run on the server's
+    # local wall-clock, so show it where people set them. The browser ticks
+    # it forward between polls from the epoch + offset here.
+    now = datetime.now().astimezone()
+    d["server_time_ms"] = int(now.timestamp() * 1000)
+    d["server_tz"] = now.tzname() or ""
+    d["server_tz_offset_min"] = int(now.utcoffset().total_seconds() // 60)
+    return jsonify(d)
 
 
 @api.route("/settings", methods=["PUT"])
@@ -1164,6 +1172,33 @@ def signage_delete_item(item_id):
         _sync_signage(inst)
     log_event("SIGNAGE_ITEM_DELETED", f"id={item_id}")
     return jsonify({"message": "Deleted"})
+
+
+@api.route("/instances/<int:instance_id>/signage/items/update", methods=["POST"])
+def signage_update_items(instance_id):
+    """Batch-edit playlist items in one call (one playlist reload).
+    Body: {"item_ids": [..], "set": {fields}} — `set` takes the same fields
+    as a single-item PUT; only the fields present are changed, and null
+    clears an override back to inherited."""
+    inst = _get_signage_instance(instance_id)
+    data = request.get_json() or {}
+    ids = data.get("item_ids") or []
+    fields = data.get("set") or {}
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "item_ids (non-empty list) required"}), 400
+    if not isinstance(fields, dict) or not fields:
+        return jsonify({"error": "set (object of fields to change) required"}), 400
+
+    updated = []
+    for iid in ids:
+        item = db.session.get(SignageItem, iid)
+        if item is not None and item.instance_id == inst.id:
+            _apply_item_fields(item, fields)
+            updated.append(item)
+    db.session.commit()
+    _sync_signage(inst)
+    log_event("SIGNAGE_ITEMS_UPDATED", f"instance={inst.id} count={len(updated)}")
+    return jsonify([i.to_dict() for i in updated])
 
 
 @api.route("/instances/<int:instance_id>/signage/items/delete", methods=["POST"])

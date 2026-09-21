@@ -1214,12 +1214,27 @@ class NDIWorker:
                 pass
 
         def slot_times(item, start_t):
-            """(fade_start, fade_len) for an item that went on air at start_t."""
+            """(fade_start, fade_len) for an item that went on air at start_t.
+
+            start_t is when the item FIRST became visible (its fade-in
+            began). The anchors differ by kind:
+              - video: the outgoing fade overlaps the file's tail, starting
+                at (duration - fade) so the picture is still moving as it
+                dissolves and the file ends as the fade completes.
+              - still: duration is time on screen BEFORE the outgoing fade
+                begins — "5s with a 3s fade" = 3s fade-in (overlapping the
+                previous item), ~2s clean hold, then the 3s fade-out. If
+                the fade started at duration - fade like video, a fade
+                longer than the remaining solo time would chain fade-in
+                straight into fade-out and the still would never hold.
+            """
             dur = float(item.get("duration") or 8.0)
             dur = max(0.5, dur)
             fade = max(0.0, float(item.get("crossfade") or 0.0))
-            fade = min(fade, max(0.0, dur - 0.1))
-            return start_t + dur - fade, fade
+            if item.get("kind") == "video":
+                fade = min(fade, max(0.0, dur - 0.1))
+                return start_t + dur - fade, fade
+            return start_t + dur, fade
 
         def pick_next(from_index):
             """Next eligible (index, item) after from_index, wrapping; (-1, None) if none."""
