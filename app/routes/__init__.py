@@ -25,6 +25,7 @@ from app.models import (
     SignageGroup, SignageItem,
 )
 from app.workers import manager
+from app.transcode import transcoder, ffmpeg_available
 from app.logging_config import log_event
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -70,9 +71,10 @@ def _start_worker(inst, settings=None):
         source_value = f"http://127.0.0.1:{current_app.config.get('FLASK_PORT', 5000)}/api/media/{inst.media_file_id}/file"
     elif inst.source_type == "video" and inst.media_file:
         # Video is decoded directly by the worker (OpenCV/FFmpeg) — hand it
-        # the local file path, not an HTTP URL
+        # the local file path (optimized playback copy when one exists),
+        # not an HTTP URL
         source_value = os.path.join(
-            current_app.config["UPLOAD_FOLDER"], inst.media_file.filename
+            current_app.config["UPLOAD_FOLDER"], inst.media_file.playback_filename
         )
 
     return manager.start_instance(
@@ -182,7 +184,7 @@ def _resolve_signage_item(item, group, inst):
         "media_id": media.id,
         "name": media.original_name,
         "kind": "video" if is_video else "image",
-        "path": os.path.join(current_app.config["UPLOAD_FOLDER"], media.filename),
+        "path": os.path.join(current_app.config["UPLOAD_FOLDER"], media.playback_filename),
         "duration": round(float(duration), 3),
         "duration_explicit": explicit,
         "crossfade": round(float(crossfade), 3),
@@ -631,7 +633,9 @@ def _resolve_media(ref):
 
 
 def _media_path(media):
-    return os.path.join(current_app.config["UPLOAD_FOLDER"], media.filename)
+    """Path workers should decode — the optimized playback copy when one
+    exists, else the original upload."""
+    return os.path.join(current_app.config["UPLOAD_FOLDER"], media.playback_filename)
 
 
 def _hold_param():
@@ -902,6 +906,12 @@ def list_media():
     for f in files:
         d = f.to_dict()
         d["signage_usage"] = usage.get(f.id, [])
+        # Whether the UI should offer an Optimize action (eligible under the
+        # current mode and not already queued/optimized/playback-ready)
+        d["can_optimize"] = (
+            f.optimize_status not in ("pending", "processing", "done", "native")
+            and _needs_optimize(f)
+        )
         out.append(d)
     return jsonify(out)
 
@@ -997,6 +1007,27 @@ def _store_media_upload(file, origin="library"):
     )
 
 
+def _needs_optimize(media):
+    """Whether this video should get a playback copy under the current mode."""
+    if not media.is_video:
+        return False
+    mode = current_app.config.get("VIDEO_OPTIMIZE", "oversized")
+    if mode == "off":
+        return False
+    if mode == "all":
+        return True
+    tw = current_app.config.get("VIDEO_TARGET_WIDTH", 1920)
+    th = current_app.config.get("VIDEO_TARGET_HEIGHT", 1080)
+    return (media.width_px or 0) > tw or (media.height_px or 0) > th
+
+
+def _maybe_optimize(media):
+    """Queue a background transcode when the mode calls for one."""
+    if media is not None and _needs_optimize(media):
+        transcoder.enqueue(media.id)
+        db.session.commit()
+
+
 @api.route("/media", methods=["POST"])
 def upload_media():
     if "file" not in request.files:
@@ -1004,7 +1035,25 @@ def upload_media():
     media, err = _store_media_upload(request.files["file"])
     if err:
         return err
+    _maybe_optimize(media)
     return jsonify(media.to_dict()), 201
+
+
+@api.route("/media/<int:media_id>/optimize", methods=["POST"])
+def optimize_media(media_id):
+    """Queue (or re-queue) a video for background optimization — for files
+    uploaded before this feature existed, or after installing ffmpeg."""
+    media = MediaFile.query.get_or_404(media_id)
+    if not media.is_video:
+        return jsonify({"error": "Only videos can be optimized"}), 400
+    if media.optimize_status in ("pending", "processing"):
+        return jsonify(media.to_dict())  # already on its way
+    status = transcoder.enqueue(media.id)
+    db.session.commit()
+    if status == "skipped":
+        return jsonify({"error": "ffmpeg is not installed on the server "
+                        "(apt install ffmpeg)"}), 501
+    return jsonify(media.to_dict()), 202
 
 
 @api.route("/media/<int:media_id>", methods=["GET"])
@@ -1015,9 +1064,16 @@ def get_media(media_id):
 
 @api.route("/media/<int:media_id>/file", methods=["GET"])
 def serve_media_file(media_id):
+    """Serve the media file. For optimized videos this is the playback copy
+    (what actually goes on air, and lighter for browser previews too);
+    ?original=1 fetches the untouched upload."""
     media = MediaFile.query.get_or_404(media_id)
     upload_dir = current_app.config["UPLOAD_FOLDER"]
-    return send_from_directory(upload_dir, media.filename, mimetype=media.mime_type)
+    if request.args.get("original"):
+        return send_from_directory(upload_dir, media.filename, mimetype=media.mime_type)
+    filename = media.playback_filename
+    mime = "video/mp4" if filename != media.filename else media.mime_type
+    return send_from_directory(upload_dir, filename, mimetype=mime)
 
 
 @api.route("/media/<int:media_id>", methods=["DELETE"])
@@ -1056,18 +1112,21 @@ def delete_media(media_id):
             if sig_inst is not None:
                 _sync_signage(sig_inst)
 
-    # Delete DB record first, then file (avoids orphaned DB records if file delete fails)
+    # Delete DB record first, then files (avoids orphaned DB records if file delete fails)
     original_name = media.original_name
-    filename = media.filename
+    filenames = [media.filename]
+    if media.optimized_filename:
+        filenames.append(media.optimized_filename)
     db.session.delete(media)
     db.session.commit()
 
-    filepath = os.path.join(current_app.config["UPLOAD_FOLDER"], filename)
-    try:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-    except OSError as e:
-        logger.warning(f"Failed to delete media file {filepath}: {e}")
+    for filename in filenames:
+        filepath = os.path.join(current_app.config["UPLOAD_FOLDER"], filename)
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except OSError as e:
+            logger.warning(f"Failed to delete media file {filepath}: {e}")
 
     log_event("MEDIA_DELETED", f"id={media_id} name='{original_name}'")
     return jsonify({"message": "Deleted", "unlinked_instances": [i.id for i in instances]})
@@ -1432,6 +1491,7 @@ def signage_upload(instance_id):
         )
         db.session.add(item)
         db.session.commit()
+        _maybe_optimize(media)
         _sync_signage(inst)
         return jsonify({"items": [item.to_dict()], "group": None}), 201
 

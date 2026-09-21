@@ -68,6 +68,16 @@ class MediaFile(db.Model):
     # For deck slides: the source deck's filename, so a deck's slides can be
     # filtered/grouped together in the library
     origin_name = db.Column(db.String(256), nullable=True)
+
+    # Background video optimization (nullable for ADD COLUMN auto-migration).
+    # Oversized videos get an H.264 playback copy sized for the outputs;
+    # the original stays on disk. optimize_status: NULL (never considered) |
+    # "pending" | "processing" | "done" | "failed" | "skipped" (no ffmpeg).
+    optimized_filename = db.Column(db.String(256), nullable=True)
+    optimize_status = db.Column(db.String(12), nullable=True)
+    optimized_width = db.Column(db.Integer, nullable=True)
+    optimized_height = db.Column(db.Integer, nullable=True)
+
     uploaded_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     @property
@@ -76,6 +86,14 @@ class MediaFile(db.Model):
             return True
         ext = self.filename.rsplit(".", 1)[-1].lower() if "." in self.filename else ""
         return ext in {"mp4", "mov", "m4v", "mkv", "webm", "avi", "mpg", "mpeg"}
+
+    @property
+    def playback_filename(self):
+        """The file workers should actually decode: the optimized playback
+        copy once it exists, otherwise the original upload."""
+        if self.optimized_filename and self.optimize_status == "done":
+            return self.optimized_filename
+        return self.filename
 
     def to_dict(self):
         return {
@@ -91,6 +109,9 @@ class MediaFile(db.Model):
             "is_video": self.is_video,
             "origin": self.origin or "library",
             "origin_name": self.origin_name,
+            "optimize_status": self.optimize_status,
+            "optimized_width": self.optimized_width,
+            "optimized_height": self.optimized_height,
             "url": f"/api/media/{self.id}/file",
             "uploaded_at": self.uploaded_at.isoformat() if self.uploaded_at else None,
         }

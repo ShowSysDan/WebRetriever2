@@ -92,6 +92,11 @@ def create_app(config_class=Config):
             db.session.add(settings)
             db.session.commit()
 
+    # Background video optimizer — re-queues transcodes interrupted by a
+    # restart and serves new uploads from here on
+    from app.transcode import transcoder
+    transcoder.init_app(app)
+
     # Auto-start instances that were running before shutdown
     with app.app_context():
         from app.routes import _start_worker
