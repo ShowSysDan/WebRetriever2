@@ -664,3 +664,29 @@ class WorkerManager:
 
 
 manager = WorkerManager()
+
+
+def install_shutdown_cleanup():
+    """Make sure no worker (or its Chromium tree) outlives the app.
+
+    - atexit: any normal interpreter exit (Ctrl+C, SystemExit, end of main)
+      stops every worker cleanly — graceful stop first, process-group kill
+      as the fallback, exactly like a manual Stop.
+    - SIGTERM: Python's default action kills the process WITHOUT running
+      atexit, which would orphan the workers. Converting it to SystemExit
+      makes cleanup run. systemd's cgroup kill already covers services;
+      this covers manual runs, NSSM, and other supervisors.
+
+    Called from run.py (the entrypoint). Safe to skip in embedders — they
+    own their process lifecycle; signal registration is main-thread-only
+    and silently skipped elsewhere."""
+    import atexit
+    atexit.register(manager.stop_all)
+
+    def _terminate(_signum, _frame):
+        raise SystemExit(0)
+
+    try:
+        signal.signal(signal.SIGTERM, _terminate)
+    except ValueError:
+        pass  # not the main thread — leave signal handling to the host

@@ -16,6 +16,11 @@ if __name__ == "__main__":
 
     app = create_app()
 
+    # Stop all workers (and their Chromium trees) on any exit path,
+    # including SIGTERM — nothing may outlive the app
+    from app.workers import install_shutdown_cleanup
+    install_shutdown_cleanup()
+
     host = app.config.get("FLASK_HOST", "0.0.0.0")
     port = app.config.get("FLASK_PORT", 5000)
     debug = app.config.get("FLASK_ENV") == "development"
