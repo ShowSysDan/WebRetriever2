@@ -222,6 +222,59 @@
   .up-close { cursor:pointer; color:var(--text-dim); flex-shrink:0; }
   .up-close:hover { color:var(--text); }
 
+  /* --- 2026 freshening pass ------------------------------------------
+     Micro-interactions (every state change acknowledged), controlled
+     glass depth on overlays + sticky nav, spatial shadow layering,
+     fluid type via clamp(), accessible focus rings, thin scrollbars.
+     Honors prefers-reduced-motion. */
+
+  /* Subtle aurora depth behind the surfaces (fixed, ~zero paint cost) */
+  body {
+    background:
+      radial-gradient(1100px 520px at 85% -10%, rgba(34,197,94,.07), transparent 60%),
+      radial-gradient(900px 520px at -10% 105%, rgba(59,130,246,.06), transparent 60%),
+      var(--bg);
+    background-attachment: fixed;
+  }
+
+  /* Tabs stick with a frosted layer — the depth cue says "chrome above content" */
+  .tabs { position:sticky; top:0; z-index:40; background:rgba(18,20,26,.85); backdrop-filter:blur(10px); }
+
+  /* Micro-interactions: hover lift + settle on press; disabled stays inert */
+  button:hover { transform:translateY(-1px); box-shadow:0 2px 10px rgba(0,0,0,.35); }
+  button.primary:hover { box-shadow:0 2px 14px rgba(34,197,94,.35); }
+  button:active { transform:translateY(0); box-shadow:none; }
+  button:disabled:hover { transform:none; box-shadow:none; }
+  .instance-card, .media-card { transition:transform .15s, box-shadow .15s, border-color .15s; }
+  .instance-card:hover, .media-card:hover { transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,.35); }
+
+  /* Focus acknowledgment: visible rings for keyboard users, soft glow on inputs */
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .form-group input:focus, .form-group select:focus, .form-group textarea:focus,
+  .settings-bar input:focus { box-shadow:0 0 0 3px rgba(34,197,94,.14); }
+
+  /* Layered glass on modal overlays: blur communicates what recedes */
+  .modal-overlay { background:rgba(5,6,10,.68); backdrop-filter:blur(4px); }
+  .modal { box-shadow:0 24px 80px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.3); }
+
+  /* Fluid type: smooth scale between laptop and control-room wall monitor */
+  .logo { font-size:clamp(16px, 1.2vw + 11px, 21px); }
+  .section-title { font-size:clamp(13px, .4vw + 12px, 15px); }
+  .sg-live .val, .rx-stat-val { font-size:clamp(16px, 1vw + 12px, 21px); }
+  .sg-live .val { font-variant-numeric:tabular-nums; }
+
+  /* Thin, theme-matched scrollbars */
+  * { scrollbar-width:thin; scrollbar-color:var(--border) transparent; }
+  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar-thumb { background:var(--border); border-radius:4px; }
+  ::-webkit-scrollbar-thumb:hover { background:var(--border-hover); }
+  ::-webkit-scrollbar-track { background:transparent; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition-duration:.01ms !important; animation-duration:.01ms !important; }
+    .instance-card:hover, .media-card:hover, button:hover { transform:none; }
+  }
+
   /* Full-page upload overlay — shown while uploads are in flight; the
      bottom-right mini panel above is the minimized / all-done fallback */
   #upload-overlay { position:fixed; inset:0; background:rgba(5,6,10,.82); backdrop-filter:blur(3px); z-index:400; display:flex; align-items:center; justify-content:center; }
@@ -244,6 +297,18 @@
 </head>
 <body>
 <div id="app"></div>
+<!-- lit-html (vendored in /static/lit — no CDN, works air-gapped): keyed,
+     in-place DOM updates for refresh-heavy views. Loaded as a module (runs
+     after the main script parses); views check window.lit and fall back to
+     full-rebuild rendering if it ever fails to load. -->
+<script type="module">
+  import {html, render} from '/static/lit/lit-html.js';
+  import {repeat} from '/static/lit/directives/repeat.js';
+  window.lit = {html, render, repeat};
+  // If a receivers popup opened before this module finished loading,
+  // upgrade its body to lit rendering now
+  if (window.rxRenderBody) window.rxRenderBody();
+</script>
 <script>
 const API = '/api';
 let state = {
@@ -632,6 +697,14 @@ async function videoStop(id) {
 }
 
 // --- Receivers popup (who is pulling a source / the whole server) ---------
+// The modal SHELL is built once per open; the BODY is rendered by lit-html
+// into a stable container and updated IN PLACE on every 3s refresh — no DOM
+// rebuild, so scroll position, text selection and row identity all survive.
+// Rows are keyed by IP (repeat), so churn moves/updates rows rather than
+// recreating them. If the lit module failed to load, the fallback rebuilds
+// the container the old way.
+let rxBodyEl = null;
+
 async function openRxModal(inst) {
   // inst = one instance, or null for the fleet-wide view (header pill)
   state.rxModal = inst ? {instId: inst.id, name: inst.name, data: null}
@@ -645,7 +718,11 @@ async function refreshRxModal() {
   try {
     const d = m.all ? await api('/receivers')
                     : await api(`/instances/${m.instId}/receivers`);
-    if (state.rxModal === m) { m.data = d; render(); }
+    if (state.rxModal !== m) return;
+    m.data = d;
+    // In-place body update — the modal element is never rebuilt on refresh
+    if (rxBodyEl && document.body.contains(rxBodyEl)) rxRenderBody();
+    else render();
   } catch(e) {}
 }
 
@@ -655,23 +732,112 @@ const rxTransportLabel = r =>
   : r.transport==='udp-multicast' ? '⇢ UDP / multicast'
   : r.transport==='measuring' ? 'measuring…' : '—';
 
+const RX_TRANSPORT_TIP =
+  'Inferred from TCP throughput: media flowing over the TCP connection = TCP; '+
+  'a quiet control-only connection means the video travels as UDP or multicast';
+
+// lit templates (primary path) ------------------------------------------
+function rxLitTable(receivers) {
+  const {html, repeat} = window.lit;
+  return html`<table class="rx-table">
+    <thead><tr><th>Hostname</th><th>IP Address</th><th>Conns</th>
+      <th>Transport</th><th>TCP Rate</th></tr></thead>
+    <tbody>${repeat(receivers, r=>r.ip, r=>html`
+      <tr class=${r.active===false?'gone':''}>
+        <td>${r.hostname||'—'}</td>
+        <td class="mono">${r.ip}</td>
+        <td>${r.connections}</td>
+        <td title=${RX_TRANSPORT_TIP}>${rxTransportLabel(r)}</td>
+        <td class="mono">${r.mbps!=null?`${r.mbps} Mbps`:''}</td>
+      </tr>`)}</tbody></table>`;
+}
+
+function rxLitBody(m) {
+  const {html, repeat} = window.lit;
+  const data = m.data;
+  if (!data) return html`<div class="form-hint">Looking up connections…</div>`;
+  if (m.all) {
+    const stat = (label,val) => html`<div>
+      <div class="rx-stat-label">${label}</div>
+      <div class="rx-stat-val">${val}</div></div>`;
+    return html`
+      <div class="rx-stats">
+        ${stat('Server Egress', data.egress_mbps!=null ? `${data.egress_mbps} Mbps` : 'measuring…')}
+        ${stat('Summed TCP Rate', `${data.total_tcp_mbps} Mbps`)}
+        ${stat('Receivers', `${data.unique_receivers} unique · ${data.total_connections} conn${data.total_connections===1?'':'s'}`)}
+      </div>
+      ${!data.instances.length
+        ? html`<div class="form-hint">No running instances.</div>`
+        : repeat(data.instances, i=>i.instance_id, i=>html`
+            <div style="margin-top:14px">
+              <div class="section-title" style="margin-bottom:6px">
+                #${i.instance_id} ${i.name}${i.sdk_receivers!=null?` — SDK reports ${i.sdk_receivers}`:''}</div>
+              ${i.receivers.length ? rxLitTable(i.receivers)
+                : html`<div class="form-hint">No receivers connected.</div>`}
+            </div>`)}`;
+  }
+  if (!data.supported)
+    return html`<div class="form-hint">Not available: ${data.reason||'unsupported'}</div>`;
+  if (!data.receivers || !data.receivers.length)
+    return html`<div class="form-hint">${data.running===false ? 'Instance not running.' : 'No receivers connected.'}</div>`;
+  return rxLitTable(data.receivers);
+}
+
+// Fallback path (lit module unavailable): rebuild the container's children
 function rxTable(receivers) {
   return h('table',{className:'rx-table'},
     h('thead',null,h('tr',null,
       h('th',null,'Hostname'),h('th',null,'IP Address'),h('th',null,'Conns'),
       h('th',null,'Transport'),h('th',null,'TCP Rate'))),
-    // Rows that just dropped linger dimmed for ~20s (server-side), so the
-    // table doesn't change height every refresh and yank the scroll around
     h('tbody',null, ...receivers.map(r=>h('tr',{className:r.active===false?'gone':''},
       h('td',null,r.hostname||'—'),
       h('td',{className:'mono'},r.ip),
       h('td',null,String(r.connections)),
-      h('td',{title:'Inferred from TCP throughput: media flowing over the TCP connection = TCP; a quiet control-only connection means the video travels as UDP or multicast'},
-        rxTransportLabel(r)),
+      h('td',{title:RX_TRANSPORT_TIP},rxTransportLabel(r)),
       h('td',{className:'mono'},r.mbps!=null?`${r.mbps} Mbps`:''),
     ))),
   );
 }
+
+function rxRenderBody() {
+  if (!rxBodyEl || !state.rxModal) return;
+  if (window.lit) {
+    window.lit.render(rxLitBody(state.rxModal), rxBodyEl);
+    return;
+  }
+  const m = state.rxModal, data = m.data;
+  rxBodyEl.innerHTML = '';
+  let body;
+  if (!data) body = h('div',{className:'form-hint'},'Looking up connections…');
+  else if (m.all) {
+    const stat = (label,val) => h('div',null,
+      h('div',{className:'rx-stat-label'},label),
+      h('div',{className:'rx-stat-val'},val));
+    body = h('div',null,
+      h('div',{className:'rx-stats'},
+        stat('Server Egress', data.egress_mbps!=null ? `${data.egress_mbps} Mbps` : 'measuring…'),
+        stat('Summed TCP Rate', `${data.total_tcp_mbps} Mbps`),
+        stat('Receivers', `${data.unique_receivers} unique · ${data.total_connections} conn${data.total_connections===1?'':'s'}`),
+      ),
+      !data.instances.length
+        ? h('div',{className:'form-hint'},'No running instances.')
+        : data.instances.map(i=>h('div',{style:{marginTop:'14px'}},
+            h('div',{className:'section-title',style:{marginBottom:'6px'}},
+              `#${i.instance_id} ${i.name}`
+              + (i.sdk_receivers!=null?` — SDK reports ${i.sdk_receivers}`:'')),
+            i.receivers.length ? rxTable(i.receivers)
+              : h('div',{className:'form-hint'},'No receivers connected.'),
+          )),
+    );
+  }
+  else if (!data.supported) body = h('div',{className:'form-hint'},`Not available: ${data.reason||'unsupported'}`);
+  else if (!data.receivers || !data.receivers.length)
+    body = h('div',{className:'form-hint'},
+      data.running===false ? 'Instance not running.' : 'No receivers connected.');
+  else body = rxTable(data.receivers);
+  rxBodyEl.appendChild(body);
+}
+window.rxRenderBody = rxRenderBody; // the lit module upgrades an open popup on load
 
 const RX_HINT =
   'Every receiver keeps a TCP control connection whatever the video transport; the Transport column '+
@@ -681,58 +847,25 @@ const RX_HINT =
 
 function renderRxModal() {
   if (!state.rxModal) return null;
-  const {all, name, data} = state.rxModal;
-  const close = ()=>{state.rxModal=null;render();};
-  let hint, body;
+  const {all, name} = state.rxModal;
+  const close = ()=>{state.rxModal=null; rxBodyEl=null; render();};
 
-  if (all) {
-    hint = 'All established NDI connections across running sources. Summed TCP rate counts media on those '+
+  const hint = all
+    ? 'All established NDI connections across running sources. Summed TCP rate counts media on those '+
       'connections; server egress is the interface-counter total actually leaving the box (loopback excluded) — '+
       'it also carries UDP/multicast media, previews and this web UI, so the gap between the two is roughly '+
-      'the non-TCP output. ' + RX_HINT;
-    if (!data) {
-      body = h('div',{className:'form-hint'},'Looking up connections…');
-    } else {
-      const stat = (label,val) => h('div',null,
-        h('div',{className:'rx-stat-label'},label),
-        h('div',{className:'rx-stat-val'},val));
-      body = h('div',null,
-        h('div',{className:'rx-stats'},
-          stat('Server Egress', data.egress_mbps!=null ? `${data.egress_mbps} Mbps` : 'measuring…'),
-          stat('Summed TCP Rate', `${data.total_tcp_mbps} Mbps`),
-          stat('Receivers', `${data.unique_receivers} unique · ${data.total_connections} conn${data.total_connections===1?'':'s'}`),
-        ),
-        !data.instances.length
-          ? h('div',{className:'form-hint'},'No running instances.')
-          : data.instances.map(i=>h('div',{style:{marginTop:'14px'}},
-              h('div',{className:'section-title',style:{marginBottom:'6px'}},
-                `#${i.instance_id} ${i.name}`
-                + (i.sdk_receivers!=null?` — SDK reports ${i.sdk_receivers}`:'')),
-              i.receivers.length ? rxTable(i.receivers)
-                : h('div',{className:'form-hint'},'No receivers connected.'),
-            )),
-      );
-    }
-  } else {
-    const sdkNote = data && data.sdk_receivers!=null ? ` The NDI SDK reports ${data.sdk_receivers}.` : '';
-    hint = `Established NDI connections to this source, from the worker's sockets.${sdkNote} ` + RX_HINT;
-    if (!data) {
-      body = h('div',{className:'form-hint'},'Looking up connections…');
-    } else if (!data.supported) {
-      body = h('div',{className:'form-hint'},`Not available: ${data.reason||'unsupported'}`);
-    } else if (!data.receivers || !data.receivers.length) {
-      body = h('div',{className:'form-hint'},
-        data.running===false ? 'Instance not running.' : 'No receivers connected.');
-    } else {
-      body = rxTable(data.receivers);
-    }
-  }
+      'the non-TCP output. ' + RX_HINT
+    : `Established NDI connections to this source, from the worker's sockets. ` + RX_HINT;
+
+  // Stable body container: lit renders (and re-renders in place) into it
+  rxBodyEl = h('div');
+  rxRenderBody();
 
   return h('div',{className:'modal-overlay',onClick:e=>{if(e.target.className==='modal-overlay')close();}},
     h('div',{className:'modal',style:{width: all?'640px':'560px'}},
       h('h2',null, all ? 'All Receivers & Bandwidth' : `Receivers — ${name}`),
       h('div',{className:'form-hint',style:{marginBottom:'10px'}},hint),
-      body,
+      rxBodyEl,
       h('div',{className:'modal-actions'},
         h('button',{onClick:refreshRxModal},'↻ Refresh'),
         h('button',{onClick:close},'Close'),

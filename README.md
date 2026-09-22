@@ -1492,6 +1492,22 @@ multi-user hardening, bigger UI.**
   (`tcp` / `udp-multicast` / `measuring` / `unknown`) and `mbps` per
   receiver. Rates need two samples, so the first poll reports
   `measuring`; platforms without `ss` report `unknown`.
+- **lit-html adopted for refresh-heavy views** (vendored in
+  `app/static/lit/` — ~10KB, BSD-3, no CDN, works air-gapped, no build
+  step). The receivers popup is the first conversion: its body renders
+  through lit with rows keyed by IP, so the 3s auto-refresh updates cells
+  **in place** — the modal element is never rebuilt, scroll position and
+  row identity survive, and churn moves rows instead of recreating them.
+  Falls back to the old full-rebuild rendering if the module fails to
+  load. Other views convert incrementally as they're touched.
+- **2026 UI freshening pass** (CSS only, honors
+  `prefers-reduced-motion`): micro-interactions — buttons lift on hover
+  and settle on press, cards elevate, inputs glow on focus, visible
+  `:focus-visible` rings for keyboard users; sticky frosted tab bar and
+  blurred modal backdrops (layered-glass depth cues); a subtle fixed
+  aurora gradient behind the surfaces; fluid `clamp()` type on the logo,
+  section titles and live stats; tabular numerals on countdowns; thin
+  theme-matched scrollbars.
 - **Fleet-wide bandwidth view.** The header's `RX` pill is clickable:
   every connection across all running sources in one popup, with three
   headline numbers — summed per-receiver TCP rate, unique receiver /
