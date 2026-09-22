@@ -1,6 +1,6 @@
 # NDI Streamer
 
-[![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.8.0-blue.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
@@ -1448,6 +1448,30 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.8.0
+
+**Broadcast-console UI, Instances merged into Overview.**
+
+- **Instances tab folded into Overview.** The home tab is now the one
+  place to watch and run outputs: a KPI strip (outputs live, receivers,
+  server egress, TCP media rate — the last three with ~5 min sparklines
+  kept in the browser), the output cards, and a side column with On Air
+  signage (current/next thumbnails + countdown bar) and the media library.
+  Output FPS moved into the Outputs panel header. Old `#/instances`
+  bookmarks land on the Overview.
+- **Output cards instead of rows.** A compact grid of boxes: a 16:9 live
+  screen with LIVE / PGM / PVW / RX overlays (click it to pop out the
+  preview), resolution / fps / refresh chips, and a control strip. Cards
+  on program or preview are framed red or green.
+- **Stop and disable ask first.** Stopping an output (card, Signage tab,
+  or Stop All) confirms, and names any output that is on program right
+  now; disabling confirms and explains that a running output keeps
+  running until stopped.
+- **Broadcast-console styling.** Raised surfaces with lit top edges and
+  deeper shadows, a visible aurora + grid backdrop, per-tile color tints,
+  glowing tallies and pulsing live dots, machined buttons and toggles.
+  Phone widths: the header wraps, tabs scroll, KPIs sit two-up.
 
 #### 1.7.0
 
