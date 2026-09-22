@@ -1494,12 +1494,26 @@ multi-user hardening, bigger UI.**
   `measuring`; platforms without `ss` report `unknown`.
 - **lit-html adopted for refresh-heavy views** (vendored in
   `app/static/lit/` — ~10KB, BSD-3, no CDN, works air-gapped, no build
-  step). The receivers popup is the first conversion: its body renders
-  through lit with rows keyed by IP, so the 3s auto-refresh updates cells
-  **in place** — the modal element is never rebuilt, scroll position and
-  row identity survive, and churn moves rows instead of recreating them.
-  Falls back to the old full-rebuild rendering if the module fails to
-  load. Other views convert incrementally as they're touched.
+  step). The receivers popup converted first: its body renders through lit
+  with rows keyed by IP, so the 3s auto-refresh updates cells **in place**
+  — the modal element is never rebuilt, scroll position and row identity
+  survive, and churn moves rows instead of recreating them. Falls back to
+  the old full-rebuild rendering if the module fails to load.
+- **Signage playlist converted to lit keyed rendering.** Rows (items and
+  group headers) are keyed by id and rendered into a stable container:
+  polls, enable toggles, drag-reorders, select-all and group collapse all
+  update the list **in place** — row DOM identity and your scroll survive,
+  and a reorder physically moves the existing row elements. The playlist
+  also gained its own change signature: when only signage data changed
+  (impressions ticking up each slot, edits from another session), the list
+  refreshes without rebuilding the page at all — previously every aired
+  slot forced a full re-render for everyone on the Signage tab.
+- **New Overview home tab (bento grid).** The default landing tab is now
+  an at-a-glance wall of modular tiles: Outputs (live count + per-instance
+  health rows), On Air (now playing / countdown / up next per running
+  signage output), Receivers, Server Egress, TCP Media Rate, and Media
+  Library totals. Tiles refresh in place every 3s via lit and click
+  through to their sections (bandwidth tiles open the receivers popup).
 - **2026 UI freshening pass** (CSS only, honors
   `prefers-reduced-motion`): micro-interactions — buttons lift on hover
   and settle on press, cards elevate, inputs glow on focus, visible

@@ -41,6 +41,26 @@
   .tally.pgm { background:var(--danger); color:#fff; }
   .tally.pvw { background:var(--accent); color:#000; }
 
+  /* Overview — bento grid of modular tiles */
+  .bento { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; }
+  .tile { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:18px 20px; }
+  .tile.click { cursor:pointer; transition:transform .15s, box-shadow .15s, border-color .15s; }
+  .tile.click:hover { transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,.35); border-color:var(--border-hover); }
+  .tile.span2 { grid-column:span 2; }
+  @media (max-width:640px) { .tile.span2 { grid-column:span 1; } }
+  .t-label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; margin-bottom:8px; }
+  .t-big { font-size:clamp(26px,2.6vw,38px); font-weight:700; font-family:'JetBrains Mono',monospace; line-height:1.1; font-variant-numeric:tabular-nums; }
+  .t-big small { font-size:.42em; font-weight:500; color:var(--text-dim); font-family:'Outfit',sans-serif; }
+  .t-big.ok { color:var(--accent); }
+  .t-big.blue { color:var(--blue); }
+  .t-sub { font-size:12px; color:var(--text-dim); margin-top:6px; }
+  .t-rows { margin-top:10px; display:flex; flex-direction:column; gap:6px; }
+  .t-row { display:flex; align-items:center; gap:8px; font-size:13px; min-width:0; }
+  .t-row .dot { width:8px; height:8px; border-radius:50%; background:var(--border); flex-shrink:0; }
+  .t-row .dot.on { background:var(--accent); box-shadow:0 0 6px var(--accent); }
+  .t-row .grow { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .t-row .mono { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text-dim); white-space:nowrap; }
+
   /* Receivers modal (who is pulling a source / the whole server) */
   .rx-stats { display:flex; gap:36px; margin-bottom:6px; flex-wrap:wrap; }
   .rx-stat-label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; margin-bottom:3px; }
@@ -305,9 +325,9 @@
   import {html, render} from '/static/lit/lit-html.js';
   import {repeat} from '/static/lit/directives/repeat.js';
   window.lit = {html, render, repeat};
-  // If a receivers popup opened before this module finished loading,
-  // upgrade its body to lit rendering now
+  // Anything rendered before this module finished loading gets upgraded now
   if (window.rxRenderBody) window.rxRenderBody();
+  if (window.onLitReady) window.onLitReady();
 </script>
 <script>
 const API = '/api';
@@ -316,8 +336,9 @@ let state = {
   instances: [],
   media: [],
   modal: null,
-  tab: 'instances',
+  tab: 'overview',
   fpsInput: '60',
+  overview: { rx:null, sg:{} },  // fleet receivers payload + signage statuses
   mediaFilter: { type:'all', source:'all', usage:'all' },
   // Signage tab
   signageInstId: null,
@@ -341,6 +362,7 @@ async function api(path, opts={}) {
 
 let settingsEditing = false;
 let lastDataSig = '';
+let lastSgSig = '';
 let serverClock = null; // {epochMs, offsetMin, tz, receivedAt} — from /settings
 
 // Format the SERVER's wall clock (schedules run on it, not the browser's)
@@ -413,11 +435,28 @@ async function loadData(force=false) {
     }
   }
   // Only rebuild the DOM when the data actually changed — a full re-render
-  // every poll recreates every element and makes images flash
-  const sig = JSON.stringify([settings, instances, media, state.signage]);
+  // every poll recreates every element and makes images flash. The signage
+  // playlist has its own signature: when ONLY it changed (impressions
+  // ticking up every slot, edits from another session), the lit-rendered
+  // list updates IN PLACE instead of rebuilding the page.
+  const sig = JSON.stringify([settings, instances, media]);
+  const sgSig = JSON.stringify(state.signage);
   if (force || sig !== lastDataSig) {
     lastDataSig = sig;
+    lastSgSig = sgSig;
     render();
+  } else if (sgSig !== lastSgSig) {
+    lastSgSig = sgSig;
+    if (state.tab === 'signage') {
+      if (sgListEl && document.body.contains(sgListEl) && state.signage) {
+        sgRenderList();
+        sgUpdateToolbar();
+        const hint = document.getElementById('sg-defaults-hint');
+        if (hint) hint.textContent = sgDefaultsHint();
+      } else {
+        render();
+      }
+    }
   }
 }
 
@@ -661,12 +700,12 @@ async function sgDeleteGroup(g) {
   await loadData(true);
 }
 async function sgToggleItem(item) {
-  item.enabled = !item.enabled; render();
+  item.enabled = !item.enabled; sgListUpdate();
   await api(`/signage/items/${item.id}`,{method:'PUT',body:{enabled:item.enabled}});
   await loadData(true);
 }
 async function sgToggleGroup(g) {
-  g.enabled = !g.enabled; render();
+  g.enabled = !g.enabled; sgListUpdate();
   await api(`/signage/groups/${g.id}`,{method:'PUT',body:{enabled:g.enabled}});
   await loadData(true);
 }
@@ -929,7 +968,7 @@ function renderHeader() {
 
 function applyRoute() {
   const parts = location.hash.replace(/^#\/?/, '').split('/');
-  if (['instances','signage','media'].includes(parts[0])) state.tab = parts[0];
+  if (['overview','instances','signage','media'].includes(parts[0])) state.tab = parts[0];
   if (parts[0]==='signage' && parts[1]) {
     const id = parseInt(parts[1]);
     if (id) state.signageInstId = id;
@@ -960,7 +999,7 @@ window.addEventListener('hashchange', () => {
 });
 
 function renderTabs() {
-  const tabs = [['instances','Instances'],['signage','Signage'],['media','Media Library']];
+  const tabs = [['overview','Overview'],['instances','Instances'],['signage','Signage'],['media','Media Library']];
   return h('div',{className:'tabs'}, ...tabs.map(([id,label])=>
     h('div',{className:`tab ${state.tab===id?'active':''}`,onClick:()=>{location.hash=`#/${id}`;}},label)
   ));
@@ -1210,6 +1249,102 @@ function renderMediaPage() {
   return main;
 }
 
+// --- Overview (bento home tab) --------------------------------------------
+// Modular at-a-glance tiles: output health, what's on air, receiver totals,
+// server egress. Rendered by lit into a stable container so the 3s refresh
+// updates the numbers in place.
+let ovEl = null;
+
+function fmtBytes(n) {
+  if (n >= 1073741824) return (n/1073741824).toFixed(1)+' GB';
+  if (n >= 1048576) return (n/1048576).toFixed(1)+' MB';
+  return Math.round(n/1024)+' KB';
+}
+
+async function updateOverview() {
+  if (state.tab!=='overview' || document.hidden) return;
+  const sgIds = state.instances
+    .filter(i=>i.source_type==='signage' && i.running).map(i=>i.id);
+  const [rx, ...sts] = await Promise.all([
+    api('/receivers').catch(()=>null),
+    ...sgIds.map(id=>api(`/instances/${id}/signage/status`).catch(()=>null)),
+  ]);
+  if (rx) state.overview.rx = rx;
+  state.overview.sg = {};
+  sgIds.forEach((id,i)=>{ if(sts[i]) state.overview.sg[id]=sts[i]; });
+  if (ovEl && document.body.contains(ovEl)) ovRender();
+}
+
+function ovRender() {
+  if (!ovEl || !window.lit) return;
+  const {html, repeat, render: litRender} = window.lit;
+  const insts = state.instances;
+  const running = insts.filter(i=>i.running);
+  const sgRunning = running.filter(i=>i.source_type==='signage');
+  const rx = state.overview.rx;
+  const vids = state.media.filter(m=>m.is_video).length;
+  const totalSize = state.media.reduce((a,m)=>a+(m.file_size||0),0);
+  const go = hash => () => { location.hash = hash; };
+
+  litRender(html`
+    <div class="tile span2 click" @click=${go('#/instances')}>
+      <div class="t-label">Outputs</div>
+      <div class="t-big ${running.length?'ok':''}">${running.length}<small> / ${insts.length} live</small></div>
+      <div class="t-rows">${repeat(insts, i=>i.id, i=>html`
+        <div class="t-row"><span class="dot ${i.running?'on':''}"></span>
+          <span class="grow">${i.name}</span>
+          <span class="mono">${i.source_type} · ${i.width}×${i.height} · ${i.capture_fps}fps</span></div>`)}
+      </div>
+    </div>
+    <div class="tile span2 click" @click=${go('#/signage')}>
+      <div class="t-label">On Air — Signage</div>
+      ${sgRunning.length ? repeat(sgRunning, i=>i.id, i=>{
+        const s = state.overview.sg[i.id];
+        const cur = s && s.status && s.status.current;
+        const next = s && s.status && s.status.next;
+        const rem = s && s.status ? s.status.remaining_s : null;
+        return html`<div class="t-rows" style="margin-top:8px">
+          <div class="t-row"><span class="dot on"></span><span class="grow"><b>${i.name}</b></span>
+            <span class="mono">${rem!=null?Math.max(0,Math.round(rem))+'s left':''}</span></div>
+          <div class="t-row"><span class="grow">${cur?cur.name:(s?'Black (nothing scheduled)':'…')}</span></div>
+          <div class="t-row"><span class="grow" style="color:var(--text-dim)">next: ${next?next.name:'—'}</span></div>
+        </div>`;
+      }) : html`<div class="t-sub">No signage instance running.</div>`}
+    </div>
+    <div class="tile click" @click=${()=>openRxModal(null)}>
+      <div class="t-label">Receivers</div>
+      <div class="t-big ok">${rx?rx.unique_receivers:'…'}</div>
+      <div class="t-sub">${rx?`${rx.total_connections} connection${rx.total_connections===1?'':'s'} — click for details`:'measuring…'}</div>
+    </div>
+    <div class="tile click" @click=${()=>openRxModal(null)}>
+      <div class="t-label">Server Egress</div>
+      <div class="t-big blue">${rx&&rx.egress_mbps!=null?rx.egress_mbps:'…'}<small> Mbps</small></div>
+      <div class="t-sub">everything leaving the box, incl. UDP/multicast</div>
+    </div>
+    <div class="tile click" @click=${()=>openRxModal(null)}>
+      <div class="t-label">TCP Media Rate</div>
+      <div class="t-big blue">${rx?rx.total_tcp_mbps:'…'}<small> Mbps</small></div>
+      <div class="t-sub">summed across receivers on TCP transport</div>
+    </div>
+    <div class="tile click" @click=${go('#/media')}>
+      <div class="t-label">Media Library</div>
+      <div class="t-big">${state.media.length}<small> files</small></div>
+      <div class="t-sub">${vids} videos · ${state.media.length-vids} images · ${fmtBytes(totalSize)}</div>
+    </div>`, ovEl);
+}
+
+function renderOverviewPage() {
+  const main = h('div',{className:'main'});
+  main.appendChild(h('div',{className:'section-header'},
+    h('div',{className:'section-title'},'Overview'),
+  ));
+  ovEl = h('div',{className:'bento'});
+  ovRender();
+  main.appendChild(ovEl);
+  setTimeout(updateOverview, 0);
+  return main;
+}
+
 // --- Signage tab ---------------------------------------------------------
 
 const sgSorted = arr => arr.slice().sort((a,b)=>(a.sort_order-b.sort_order)||(a.id-b.id));
@@ -1282,9 +1417,10 @@ async function sgApplyMove(drag, target) {
     const idx = p.order.findIndex(e=>e.type===target.type&&e.id===target.id);
     p.order.splice(idx<0?p.order.length:idx, 0, ...movedEntries);
   }
-  // Apply the new order locally first so the rows land instantly; the POST
-  // + background reload reconcile with the server
-  sgApplyLocalOrder(p); render();
+  // Apply the new order locally first so the rows land instantly (lit MOVES
+  // the existing row elements — no rebuild); the POST + background reload
+  // reconcile with the server
+  sgApplyLocalOrder(p); sgListUpdate();
   await api(`/instances/${state.signageInstId}/signage/reorder`,{method:'POST',body:p});
   await loadData(true);
 }
@@ -1308,36 +1444,34 @@ function sgApplyLocalOrder(p) {
   }
 }
 
-function sgMakeDraggable(row, drag, target) {
-  row.setAttribute('draggable','true');
-  row.addEventListener('dragstart', e=>{
-    // Dragging a SELECTED item moves the whole selection as a block,
-    // preserving its play order; unselected rows drag alone as before
-    if (drag.type==='item' && sgSel.has(drag.id) && sgSel.size>1) {
-      sgDrag = {type:'multi', ids: sgFlatItemIds().filter(id=>sgSel.has(id))};
-      document.querySelectorAll('.sg-row.sel').forEach(r=>r.classList.add('dragging'));
-    } else {
-      sgDrag = drag;
-    }
-    e.dataTransfer.effectAllowed='move';
-  });
-  row.addEventListener('dragend', ()=>{
-    sgDrag = null;
-    document.querySelectorAll('.sg-row.dragging').forEach(r=>r.classList.remove('dragging'));
-  });
-  row.addEventListener('dragover', e=>{
-    if(!sgDrag || sgIsSelfDrop(drag)) return;
-    e.preventDefault(); row.classList.add('dragover');
-  });
-  row.addEventListener('dragleave', ()=>row.classList.remove('dragover'));
-  row.addEventListener('drop', e=>{
-    e.preventDefault(); row.classList.remove('dragover');
-    if(sgDrag && !sgIsSelfDrop(drag)) {
-      // target may depend on what's being dragged (e.g. group headers accept
-      // items INTO the group but groups reorder AROUND it) — resolve at drop
-      sgApplyMove(sgDrag, typeof target==='function' ? target() : target);
-    }
-  });
+// Drag & drop handlers, bound per-row by the lit templates below
+function sgDragStart(e, drag) {
+  // Dragging a SELECTED item moves the whole selection as a block,
+  // preserving its play order; unselected rows drag alone as before
+  if (drag.type==='item' && sgSel.has(drag.id) && sgSel.size>1) {
+    sgDrag = {type:'multi', ids: sgFlatItemIds().filter(id=>sgSel.has(id))};
+    document.querySelectorAll('.sg-row.sel').forEach(r=>r.classList.add('dragging'));
+  } else {
+    sgDrag = drag;
+  }
+  e.dataTransfer.effectAllowed='move';
+}
+function sgDragEnd() {
+  sgDrag = null;
+  document.querySelectorAll('.sg-row.dragging').forEach(r=>r.classList.remove('dragging'));
+}
+function sgDragOverRow(e, rowDrag) {
+  if(!sgDrag || sgIsSelfDrop(rowDrag)) return;
+  e.preventDefault(); e.currentTarget.classList.add('dragover');
+}
+function sgDragLeave(e) { e.currentTarget.classList.remove('dragover'); }
+function sgDropRow(e, rowDrag, target) {
+  e.preventDefault(); e.currentTarget.classList.remove('dragover');
+  if(sgDrag && !sgIsSelfDrop(rowDrag)) {
+    // target may depend on what's being dragged (e.g. group headers accept
+    // items INTO the group but groups reorder AROUND it) — resolve at drop
+    sgApplyMove(sgDrag, typeof target==='function' ? target() : target);
+  }
 }
 
 // Server "now" as a naive ISO string ("2026-09-21T14:35:07"). Schedule
@@ -1391,83 +1525,137 @@ function sgEffTiming(item, group) {
   return {dur, fade, inherited};
 }
 
-function sgItemRow(item, group) {
+// --- Playlist rows as lit templates (keyed by item/group id) -------------
+// Rendered by sgRenderList into a stable container: polls, toggles, drags
+// and collapse update rows IN PLACE instead of rebuilding the list, so row
+// DOM identity (and the user's scroll) survives.
+function sgSelectChange(e, id) {
+  if (e.target.checked) sgSel.add(id); else sgSel.delete(id);
+  e.target.closest('.sg-row').classList.toggle('sel', e.target.checked);
+  sgUpdateToolbar();
+}
+
+function sgLitItemRow(item, group) {
+  const {html} = window.lit;
   const m = item.media_file || {};
   const t = sgEffTiming(item, group);
   const sched = sgSchedSummary(item);
-  const cb = h('input',{type:'checkbox',style:{width:'auto'}});
-  cb.checked = sgSel.has(item.id);
-  cb.addEventListener('change',()=>{
-    if(cb.checked) sgSel.add(item.id); else sgSel.delete(item.id);
-    row.classList.toggle('sel', cb.checked);
-    sgUpdateToolbar();
-  });
-  cb.addEventListener('click',e=>e.stopPropagation());
-
   const status = sgItemStatus(item, group);
-  const row = h('div',{className:`sg-row ${group?'grouped':''} ${sgSel.has(item.id)?'sel':''} ${status.cls} ${sgNowPlayingId===item.id?'playing':''}`,
-                       'data-sgitem':item.id},
-    h('div',{className:'drag-handle',title:'Drag to reorder'},'⠿'),
-    cb,
-    h('img',{className:'sg-thumb',src:m.thumb_url||'',loading:'lazy',alt:'',
-             onError:e=>{e.target.style.visibility='hidden';}}),
-    h('div',null,
-      h('div',{className:'sg-name'},
-        h('span',{className:'type-badge'},m.is_video?'VID':'IMG'),
-        m.original_name||'(deleted)',
-        h('span',{className:'sg-onair'},'ON AIR')),
-      h('div',{className:'sg-sub'},`#${item.id}${m.is_video&&m.duration_s?` · file ${Math.round(m.duration_s)}s`:''}`),
-    ),
-    h('div',{className:'sg-timing'},`▦ ${sgFmtSecs(t.dur)}${t.inherited?'*':''} · fade ${sgFmtSecs(t.fade)}`),
-    h('div',{className:'sg-sched',title:`${status.label?status.label+' · ':''}${sched||'always'}`},
-      status.label ? h('span',{className:'sg-status-tag'},status.label+' ') : null,
-      sched||'always'),
-    h('div',{className:'sg-imp',title:'Impressions (times shown)'},`${item.impressions||0} views`),
-    h('div',{className:'sg-actions'},
-      h('div',{className:`toggle ${item.enabled?'on':''}`,onClick:()=>sgToggleItem(item),title:item.enabled?'Enabled':'Disabled'}),
-      h('button',{className:'sm',onClick:()=>{state.sgModal={type:'item',obj:item};render();},title:'Edit timing & schedule'},'✎'),
-      h('button',{className:'sm danger',onClick:()=>sgDeleteItem(item.id)},'✕'),
-    ),
-  );
-  sgMakeDraggable(row,
-    {type:'item', id:item.id, groupId:group?group.id:null},
-    {kind:'row', type:'item', id:item.id, groupId:group?group.id:null});
-  return row;
+  const drag = {type:'item', id:item.id, groupId:group?group.id:null};
+  const target = {kind:'row', type:'item', id:item.id, groupId:group?group.id:null};
+  return html`<div
+      class="sg-row ${group?'grouped':''} ${sgSel.has(item.id)?'sel':''} ${status.cls} ${sgNowPlayingId===item.id?'playing':''}"
+      data-sgitem=${item.id} draggable="true"
+      @dragstart=${e=>sgDragStart(e,drag)} @dragend=${sgDragEnd}
+      @dragover=${e=>sgDragOverRow(e,drag)} @dragleave=${sgDragLeave}
+      @drop=${e=>sgDropRow(e,drag,target)}>
+    <div class="drag-handle" title="Drag to reorder">⠿</div>
+    <input type="checkbox" style="width:auto" .checked=${sgSel.has(item.id)}
+      @click=${e=>e.stopPropagation()} @change=${e=>sgSelectChange(e,item.id)}>
+    <img class="sg-thumb" src=${m.thumb_url||''} loading="lazy" alt=""
+      @error=${e=>{e.target.style.visibility='hidden';}}>
+    <div>
+      <div class="sg-name"><span class="type-badge">${m.is_video?'VID':'IMG'}</span>${m.original_name||'(deleted)'}<span class="sg-onair">ON AIR</span></div>
+      <div class="sg-sub">#${item.id}${m.is_video&&m.duration_s?` · file ${Math.round(m.duration_s)}s`:''}</div>
+    </div>
+    <div class="sg-timing">▦ ${sgFmtSecs(t.dur)}${t.inherited?'*':''} · fade ${sgFmtSecs(t.fade)}</div>
+    <div class="sg-sched" title=${`${status.label?status.label+' · ':''}${sched||'always'}`}>
+      ${status.label?html`<span class="sg-status-tag">${status.label} </span>`:''}${sched||'always'}</div>
+    <div class="sg-imp" title="Impressions (times shown)">${item.impressions||0} views</div>
+    <div class="sg-actions">
+      <div class="toggle ${item.enabled?'on':''}" title=${item.enabled?'Enabled':'Disabled'}
+        @click=${()=>sgToggleItem(item)}></div>
+      <button class="sm" title="Edit timing & schedule"
+        @click=${()=>{state.sgModal={type:'item',obj:item};render();}}>✎</button>
+      <button class="sm danger" @click=${()=>sgDeleteItem(item.id)}>✕</button>
+    </div>
+  </div>`;
 }
 
-function sgGroupRow(g) {
+function sgLitGroupRow(g) {
+  const {html} = window.lit;
   const items = sgGroupItems(g.id);
   const collapsed = !!state.sgCollapsed[g.id];
   const sched = sgSchedSummary(g);
   const status = sgItemStatus(g, null);
-  const row = h('div',{className:`sg-row sg-group-row ${status.cls}`,'data-sggroup':g.id},
-    h('div',{className:'drag-handle',title:'Drag to reorder'},'⠿'),
-    h('div',{style:{cursor:'pointer'},onClick:()=>{state.sgCollapsed[g.id]=!collapsed;render();}},collapsed?'▸':'▾'),
-    h('div',{style:{textAlign:'center'}},h('span',{className:'type-badge',style:{marginRight:'0'}},'GRP')),
-    h('div',null,
-      h('div',{className:'sg-name'},g.name,h('span',{className:'sg-onair'},'ON AIR')),
-      h('div',{className:'sg-sub'},`group · ${items.length} item${items.length===1?'':'s'} — drop items here to add`),
-    ),
-    h('div',{className:'sg-timing'},
-      (g.duration_s!=null||g.crossfade_s!=null)
-        ? `▦ ${g.duration_s!=null?sgFmtSecs(g.duration_s):'—'} · fade ${g.crossfade_s!=null?sgFmtSecs(g.crossfade_s):'—'}` : ''),
-    h('div',{className:'sg-sched',title:`${status.label?status.label+' · ':''}${sched||'always'}`},
-      status.label ? h('span',{className:'sg-status-tag'},status.label+' ') : null,
-      sched||'always'),
-    h('div',{className:'sg-imp'},''),
-    h('div',{className:'sg-actions'},
-      h('div',{className:`toggle ${g.enabled?'on':''}`,onClick:()=>sgToggleGroup(g),title:g.enabled?'Enabled':'Disabled'}),
-      h('button',{className:'sm',onClick:()=>{state.sgModal={type:'group',obj:g};render();},title:'Edit group'},'✎'),
-      h('button',{className:'sm danger',onClick:()=>sgDeleteGroup(g)},'✕'),
-    ),
-  );
+  const drag = {type:'group', id:g.id, groupId:null};
   // Dropping an item on the header appends it to the group; dropping a
   // group on it reorders at the top level
-  sgMakeDraggable(row, {type:'group', id:g.id, groupId:null},
-    ()=> sgDrag && (sgDrag.type==='item' || sgDrag.type==='multi')
-      ? {kind:'group-append', groupId:g.id}
-      : {kind:'row', type:'group', id:g.id, groupId:null});
-  return row;
+  const target = ()=> sgDrag && (sgDrag.type==='item' || sgDrag.type==='multi')
+    ? {kind:'group-append', groupId:g.id}
+    : {kind:'row', type:'group', id:g.id, groupId:null};
+  return html`<div class="sg-row sg-group-row ${status.cls}" data-sggroup=${g.id}
+      draggable="true"
+      @dragstart=${e=>sgDragStart(e,drag)} @dragend=${sgDragEnd}
+      @dragover=${e=>sgDragOverRow(e,drag)} @dragleave=${sgDragLeave}
+      @drop=${e=>sgDropRow(e,drag,target)}>
+    <div class="drag-handle" title="Drag to reorder">⠿</div>
+    <div style="cursor:pointer"
+      @click=${()=>{state.sgCollapsed[g.id]=!collapsed; sgRenderList();}}>${collapsed?'▸':'▾'}</div>
+    <div style="text-align:center"><span class="type-badge" style="margin-right:0">GRP</span></div>
+    <div>
+      <div class="sg-name">${g.name}<span class="sg-onair">ON AIR</span></div>
+      <div class="sg-sub">group · ${items.length} item${items.length===1?'':'s'} — drop items here to add</div>
+    </div>
+    <div class="sg-timing">${(g.duration_s!=null||g.crossfade_s!=null)
+      ? `▦ ${g.duration_s!=null?sgFmtSecs(g.duration_s):'—'} · fade ${g.crossfade_s!=null?sgFmtSecs(g.crossfade_s):'—'}` : ''}</div>
+    <div class="sg-sched" title=${`${status.label?status.label+' · ':''}${sched||'always'}`}>
+      ${status.label?html`<span class="sg-status-tag">${status.label} </span>`:''}${sched||'always'}</div>
+    <div class="sg-imp"></div>
+    <div class="sg-actions">
+      <div class="toggle ${g.enabled?'on':''}" title=${g.enabled?'Enabled':'Disabled'}
+        @click=${()=>sgToggleGroup(g)}></div>
+      <button class="sm" title="Edit group"
+        @click=${()=>{state.sgModal={type:'group',obj:g};render();}}>✎</button>
+      <button class="sm danger" @click=${()=>sgDeleteGroup(g)}>✕</button>
+    </div>
+  </div>`;
+}
+
+// Flattened display order (group headers followed by their items when
+// expanded), each with a stable key for lit's repeat()
+function sgDisplayEntries() {
+  const out = [];
+  for (const e of sgEntries()) {
+    if (e.type==='group') {
+      out.push({key:`g:${e.obj.id}`, tpl: sgLitGroupRow(e.obj)});
+      if (!state.sgCollapsed[e.obj.id])
+        sgGroupItems(e.obj.id).forEach(it=>out.push({key:`i:${it.id}`, tpl: sgLitItemRow(it, e.obj)}));
+    } else {
+      out.push({key:`i:${e.obj.id}`, tpl: sgLitItemRow(e.obj, null)});
+    }
+  }
+  return out;
+}
+
+let sgListEl = null; // stable playlist container that lit renders into
+
+function sgRenderList() {
+  // window.lit loads as a module moments after first parse; onLitReady
+  // triggers a render as soon as it lands, so this early-out is transient
+  if (!sgListEl || !state.signage || !window.lit) return;
+  const {html, render: litRender, repeat} = window.lit;
+  const entries = sgDisplayEntries();
+  litRender(entries.length ? html`
+      ${repeat(entries, e=>e.key, e=>e.tpl)}
+      <div class="sg-dropzone"
+        @dragover=${e=>{ if(!sgDrag) return; e.preventDefault(); e.currentTarget.classList.add('dragover'); }}
+        @dragleave=${sgDragLeave}
+        @drop=${e=>{ e.preventDefault(); e.currentTarget.classList.remove('dragover'); if(sgDrag) sgApplyMove(sgDrag,{kind:'end'}); }}>
+        ⤓ drop here to move to the end</div>`
+    : html`<div class="empty-state"><div class="icon">▦</div>
+        <div>Playlist is empty. Upload content above or add from the media library.</div></div>`,
+    sgListEl);
+}
+
+// In-place list update when the container is live, full render otherwise
+function sgListUpdate() {
+  if (sgListEl && document.body.contains(sgListEl)) sgRenderList();
+  else render();
+}
+
+function sgDefaultsHint() {
+  return `Defaults: ${sgFmtSecs(state.signage.defaults.duration)} / fade ${sgFmtSecs(state.signage.defaults.crossfade)} (* = inherited) · drag ⠿ to reorder (selected rows move together) · drop items on a group to add`;
 }
 
 function sgUpdateToolbar() {
@@ -1489,7 +1677,8 @@ function sgToggleSelectAll() {
   const all = state.signage.items.map(i=>i.id);
   if (sgSel.size >= all.length) sgSel.clear();
   else all.forEach(id=>sgSel.add(id));
-  render();
+  sgListUpdate();
+  sgUpdateToolbar();
 }
 
 let sgNowPlayingId = null; // playlist item id currently on air (green row)
@@ -1590,12 +1779,14 @@ function renderSignagePage() {
   ));
 
   if (!sgInsts.length) {
+    sgListEl = null;
     main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'📺'),
       h('div',null,'No signage instances yet. Create one — it appears as an NDI source that plays your scheduled playlist.')));
     return main;
   }
   const inst = sgInsts.find(i=>i.id===state.signageInstId);
   if (!inst || !state.signage) {
+    sgListEl = null;
     main.appendChild(h('div',{className:'empty-state'},'Loading…'));
     return main;
   }
@@ -1652,33 +1843,14 @@ function renderSignagePage() {
       onClick:()=>{state.sgModal={type:'bulk'};render();}},
       sgSel.size?`✎ Edit Selected (${sgSel.size})`:'✎ Edit Selected'),
     h('button',{className:'sm danger',id:'sg-del-btn',disabled:sgSel.size?null:'true',onClick:sgDeleteSelected},'Delete Selected'),
-    h('div',{className:'form-hint',style:{marginLeft:'auto'}},
-      `Defaults: ${sgFmtSecs(state.signage.defaults.duration)} / fade ${sgFmtSecs(state.signage.defaults.crossfade)} (* = inherited) · drag ⠿ to reorder (selected rows move together) · drop items on a group to add`),
+    h('div',{className:'form-hint',id:'sg-defaults-hint',style:{marginLeft:'auto'}},sgDefaultsHint()),
   ));
 
-  // Playlist
-  const entries = sgEntries();
-  if (!entries.length) {
-    main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'▦'),
-      h('div',null,'Playlist is empty. Upload content above or add from the media library.')));
-  } else {
-    const list = h('div',{className:'sg-list'});
-    for (const e of entries) {
-      if (e.type==='group') {
-        list.appendChild(sgGroupRow(e.obj));
-        if (!state.sgCollapsed[e.obj.id]) sgGroupItems(e.obj.id).forEach(it=>list.appendChild(sgItemRow(it, e.obj)));
-      } else {
-        list.appendChild(sgItemRow(e.obj, null));
-      }
-    }
-    // Tail drop target: append at the end of the top level
-    const endZone = h('div',{className:'sg-dropzone'},'⤓ drop here to move to the end');
-    endZone.addEventListener('dragover',e=>{ if(!sgDrag) return; e.preventDefault(); endZone.classList.add('dragover'); });
-    endZone.addEventListener('dragleave',()=>endZone.classList.remove('dragover'));
-    endZone.addEventListener('drop',e=>{ e.preventDefault(); endZone.classList.remove('dragover'); if(sgDrag) sgApplyMove(sgDrag,{kind:'end'}); });
-    list.appendChild(endZone);
-    main.appendChild(list);
-  }
+  // Playlist — lit renders keyed rows into this stable container; polls,
+  // toggles, reorders and collapse update it in place (sgRenderList)
+  sgListEl = h('div',{className:'sg-list'});
+  sgRenderList();
+  main.appendChild(sgListEl);
 
   setTimeout(updateSignageStatus, 0);
   return main;
@@ -2129,7 +2301,9 @@ function render() {
   root.innerHTML = '';
   root.appendChild(renderHeader());
   root.appendChild(renderTabs());
-  if(state.tab==='instances') {
+  if(state.tab==='overview') {
+    root.appendChild(renderOverviewPage());
+  } else if(state.tab==='instances') {
     root.appendChild(renderSettingsBar());
     root.appendChild(renderInstancesPage());
   } else if(state.tab==='signage') {
@@ -2154,6 +2328,10 @@ function render() {
 // A modal open or a drag in progress must not be clobbered by a poll re-render
 const uiBusy = () => state.modal || state.sgModal || sgDrag;
 
+// lit loads as a module (after this script parses): re-render anything
+// already painted once it lands — but only if a first data render happened
+window.onLitReady = () => { if (lastDataSig) render(); };
+
 applyRoute();  // restore tab + signage selection from the URL before first load
 loadData();
 setInterval(() => { if (!uiBusy() && !document.hidden) loadData(); }, 5000);
@@ -2161,12 +2339,13 @@ setInterval(updatePreviews, 2000);
 setInterval(updateSignageStatus, 2000);
 setInterval(tickServerClock, 1000);
 setInterval(() => { if (state.rxModal && !document.hidden) refreshRxModal(); }, 3000);
+setInterval(updateOverview, 3000);
 // Catch up immediately when the tab becomes visible again; hidden tabs
 // also drop their signage event stream (reopened on return) so idle
 // sessions never hold server connections
 document.addEventListener('visibilitychange', () => {
   syncSignageEvents();
-  if (!document.hidden && !uiBusy()) { loadData(); updatePreviews(); }
+  if (!document.hidden && !uiBusy()) { loadData(); updatePreviews(); updateOverview(); }
 });
 </script>
 </body>
