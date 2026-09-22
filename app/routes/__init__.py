@@ -1740,7 +1740,10 @@ def all_receivers():
         if not data or not data.get("supported"):
             continue
         for r in data["receivers"]:
-            ips.add(r["ip"])
+            # Lingering just-disconnected rows stay listed for UI stability
+            # but don't count toward the totals
+            if r.get("active", True):
+                ips.add(r["ip"])
             total_conns += r["connections"]
             if r.get("mbps"):
                 total_mbps += r["mbps"]
