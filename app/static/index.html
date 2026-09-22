@@ -296,7 +296,7 @@
   :root {
     --bg:#06070b; --surface:#10121a; --surface2:#181b26; --raised:#1d2130;
     --border:rgba(255,255,255,.075); --border-hover:rgba(255,255,255,.16);
-    --cyan:#22d3ee; --purple:#a78bfa;
+    --cyan:#22d3ee; --purple:#a78bfa; --pink:#f472b6;
     --hl:inset 0 1px 0 rgba(255,255,255,.055);
     --lift:0 1px 2px rgba(0,0,0,.45), 0 10px 30px -10px rgba(0,0,0,.7);
     --glow-g:0 0 18px rgba(34,197,94,.45);
@@ -462,6 +462,43 @@
   .btn-group button:hover { transform:none; position:relative; z-index:1; }
   button.ghost-danger:hover { color:var(--danger); border-color:rgba(239,68,68,.5); }
   button.power { min-width:64px; font-weight:600; }
+  /* Host health: CPU tile (fixed-scale graph + per-core bars), disk meter */
+  .t-dim { color:var(--text-dim); font-weight:500; letter-spacing:.5px; text-transform:none; }
+  .t-big.pink { color:var(--pink); text-shadow:0 0 26px rgba(244,114,182,.45); }
+  .status-warn { font-size:11px; font-weight:600; color:var(--warning); background:rgba(245,158,11,.1); border:1px solid rgba(245,158,11,.35); border-radius:4px; padding:1px 7px; white-space:nowrap; }
+  .cpu-tile .t-big { margin-top:4px; }
+  .cpu-chart { position:relative; height:84px; margin:10px 0 8px; cursor:crosshair; touch-action:none; }
+  .cpu-chart svg { display:block; width:100%; height:100%; overflow:visible; }
+  .cpu-chart .grid { stroke:rgba(255,255,255,.07); stroke-width:1; stroke-dasharray:3 4; vector-effect:non-scaling-stroke; }
+  .cpu-chart .area { fill:var(--pink); fill-opacity:.12; }
+  .cpu-chart .line { fill:none; stroke:var(--pink); stroke-width:2; stroke-linejoin:round; filter:drop-shadow(0 0 4px rgba(244,114,182,.5)); }
+  .cpu-chart .cross { stroke:rgba(255,255,255,.35); stroke-width:1; }
+  .cpu-chart.empty { display:flex; align-items:center; justify-content:center; font-size:11px; color:var(--text-dim); border:1px dashed var(--border); border-radius:6px; cursor:default; }
+  .cpu-axis { position:absolute; left:0; font-family:'JetBrains Mono',monospace; font-size:9px; color:var(--text-dim); transform:translateY(-110%); pointer-events:none; }
+  .cpu-axis.top { top:2px; transform:none; }
+  .cpu-axis.mid { top:50%; }
+  .cpu-dot { position:absolute; width:8px; height:8px; margin:-4px 0 0 -4px; border-radius:50%; background:var(--pink); box-shadow:0 0 0 2px var(--surface), 0 0 10px var(--pink); pointer-events:none; }
+  .cpu-tip { position:absolute; top:2px; transform:translateX(10px); display:flex; gap:6px; align-items:baseline; white-space:nowrap; background:rgba(8,9,14,.92); border:1px solid var(--border-hover); border-radius:6px; padding:3px 8px; font-size:11px; color:var(--text-dim); pointer-events:none; box-shadow:0 4px 14px rgba(0,0,0,.5); }
+  .cpu-tip.left { transform:translateX(calc(-100% - 10px)); }
+  .cpu-tip b { font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--text); }
+  .cores { display:flex; gap:3px; height:26px; align-items:flex-end; }
+  .core { flex:1; height:100%; display:flex; align-items:flex-end; background:rgba(255,255,255,.04); border-radius:2px; overflow:hidden; }
+  .core i { display:block; width:100%; background:linear-gradient(0deg,rgba(244,114,182,.55),var(--pink)); border-radius:2px 2px 0 0; transition:height .6s ease; }
+  .core:hover { background:rgba(255,255,255,.09); }
+  .cpu-foot { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; font-family:'JetBrains Mono',monospace; font-size:11px; margin-top:8px; }
+  .cpu-foot span { white-space:nowrap; }
+  .disk { margin-top:12px; }
+  .disk-head { display:flex; align-items:center; gap:8px; font-size:12px; }
+  .disk-label { font-size:11px; font-weight:600; letter-spacing:1px; text-transform:uppercase; color:#a9aec2; }
+  .disk-free { margin-left:auto; color:var(--text-dim); white-space:nowrap; }
+  .disk-free b { color:var(--text); font-family:'JetBrains Mono',monospace; font-weight:600; }
+  .disk-meter { height:6px; margin-top:6px; border-radius:3px; background:rgba(255,255,255,.06); overflow:hidden; }
+  .disk-meter span { display:block; height:100%; border-radius:3px; background:linear-gradient(90deg,rgba(167,139,250,.6),var(--purple)); box-shadow:0 0 8px rgba(167,139,250,.5); transition:width .6s; }
+  .disk.low .disk-meter span { background:linear-gradient(90deg,rgba(245,158,11,.6),var(--warning)); box-shadow:0 0 8px rgba(245,158,11,.5); }
+  .disk-sub { font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--text-dim); margin-top:4px; }
+  .media-disk { width:min(340px,100%); }
+  .media-disk .disk { margin-top:0; }
+  .section-header { gap:16px; flex-wrap:wrap; }
   /* Phones: header wraps, tabs scroll sideways instead of squashing */
   @media (max-width:700px) {
     .header { flex-wrap:wrap; gap:10px; padding:12px 16px; }
@@ -508,6 +545,8 @@ let state = {
   sgModal: null,        // {type:'item'|'group'|'library', obj}
   sgCollapsed: {},      // group id -> collapsed
   rxModal: null,        // {instId, name, data} — receiver list popup
+  system: null,         // GET /system — CPU / memory / disk
+  cpuHover: null,       // index into system.cpu.history under the pointer
 };
 const sgSel = new Set(); // selected signage item ids (multi-select actions)
 
@@ -1423,10 +1462,14 @@ function renderMediaPage() {
 
   const filtered = state.media.filter(m=>mediaMatchesFilter(m, f));
   const filterActive = f.type!=='all'||f.source!=='all'||f.usage!=='all';
+  diskEl = h('div',{className:'media-disk'});
+  if (window.lit) window.lit.render(diskView(), diskEl);
+  setTimeout(updateSystem, 0);
   main.appendChild(h('div',{className:'section-header',style:{marginTop:'16px'}},
     h('div',{className:'section-title'},
       filterActive ? `Library (${filtered.length} of ${state.media.length} files)`
                    : `Library (${state.media.length} files)`),
+    diskEl,
   ));
 
   if(!state.media.length) {
@@ -1461,6 +1504,7 @@ let ovEl = null;      // KPI strip
 let ovSideEl = null;  // On Air + media column
 
 function fmtBytes(n) {
+  if (n >= 1099511627776) return (n/1099511627776).toFixed(2)+' TB';
   if (n >= 1073741824) return (n/1073741824).toFixed(1)+' GB';
   if (n >= 1048576) return (n/1048576).toFixed(1)+' MB';
   return Math.round(n/1024)+' KB';
@@ -1520,6 +1564,103 @@ function ovSpark(values, color) {
   </svg>`;
 }
 
+// --- Host health (CPU graph, disk readout) --------------------------------
+// The server samples CPU every 2s and keeps the history, so the graph is
+// already full when a page opens; polled only while a view shows it.
+let diskEl = null; // Media Library tab readout (lit, updated in place)
+
+async function updateSystem() {
+  if (document.hidden || !['overview','media'].includes(state.tab)) return;
+  const sys = await api('/system').catch(()=>null);
+  if (!sys) return;
+  state.system = sys;
+  if (ovEl && document.body.contains(ovEl)) ovRender();
+  if (window.lit && diskEl && document.body.contains(diskEl)) window.lit.render(diskView(), diskEl);
+}
+
+// Disk meter: free space leads (it's what runs out), percent in the bar
+function diskView() {
+  const {html, nothing} = window.lit;
+  const d = state.system && state.system.disk;
+  if (!d) return html`<div class="disk"><div class="disk-head"><span class="disk-label">Disk</span>
+    <span class="disk-free">…</span></div><div class="disk-meter"></div></div>`;
+  const usable = d.used + d.free;
+  const low = usable && d.free / usable < 0.1;
+  return html`<div class="disk ${low?'low':''}" title="Media drive: ${d.path}">
+    <div class="disk-head">
+      <span class="disk-label">Disk</span>
+      ${low ? html`<span class="status-warn">⚠ Low space</span>` : nothing}
+      <span class="disk-free"><b>${fmtBytes(d.free)}</b> free of ${fmtBytes(usable)}</span>
+    </div>
+    <div class="disk-meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${d.percent}
+         aria-label="Media drive ${d.percent}% used"><span style="width:${d.percent}%"></span></div>
+    <div class="disk-sub">${d.percent}% used</div>
+  </div>`;
+}
+
+const CPU_WINDOW_MS = 5 * 60 * 1000;
+const CPU_W = 300, CPU_H = 80;
+
+// CPU average over the last 5 min on a FIXED 0–100% scale (unlike the
+// traffic sparklines, which autoscale — a flat 3% must not look like 100%)
+function cpuChart(cpu) {
+  const {html, svg, nothing} = window.lit;
+  const hist = (cpu.history || []).filter(p=>p[1]!=null);
+  if (hist.length < 2) return html`<div class="cpu-chart empty"><span>collecting samples…</span></div>`;
+  const t1 = hist[hist.length-1][0], t0 = t1 - CPU_WINDOW_MS;
+  const X = t => Math.max(0, (t - t0) / CPU_WINDOW_MS * CPU_W);
+  const Y = v => CPU_H - 2 - v / 100 * (CPU_H - 4);
+  const pts = hist.map(([t,v]) => `${X(t).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  const hi = state.cpuHover != null && hist[state.cpuHover] ? state.cpuHover : null;
+  const hp = hi != null ? hist[hi] : null;
+  const onMove = e => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const t = t0 + (e.clientX - r.left) / r.width * CPU_WINDOW_MS;
+    let best = 0;
+    for (let i = 1; i < hist.length; i++)
+      if (Math.abs(hist[i][0]-t) < Math.abs(hist[best][0]-t)) best = i;
+    if (best !== state.cpuHover) { state.cpuHover = best; ovRender(); }
+  };
+  const onLeave = () => { state.cpuHover = null; ovRender(); };
+  const ago = ms => { const s = Math.round(ms/1000); return s < 5 ? 'now' : s < 60 ? `${s}s ago` : `${Math.floor(s/60)}m ${s%60}s ago`; };
+  return html`<div class="cpu-chart" @pointermove=${onMove} @pointerleave=${onLeave}>
+    <svg viewBox="0 0 ${CPU_W} ${CPU_H}" preserveAspectRatio="none" aria-hidden="true">
+      <line x1="0" x2=${CPU_W} y1=${Y(50)} y2=${Y(50)} class="grid"></line>
+      <line x1="0" x2=${CPU_W} y1=${Y(100)} y2=${Y(100)} class="grid"></line>
+      <polygon points="${X(hist[0][0]).toFixed(1)},${CPU_H} ${pts} ${CPU_W},${CPU_H}" class="area"></polygon>
+      <polyline points=${pts} class="line" vector-effect="non-scaling-stroke"></polyline>
+      ${hp ? svg`<line x1=${X(hp[0])} x2=${X(hp[0])} y1="0" y2=${CPU_H} class="cross" vector-effect="non-scaling-stroke"></line>` : nothing}
+    </svg>
+    <span class="cpu-axis top">100%</span><span class="cpu-axis mid">50%</span>
+    ${hp ? html`<span class="cpu-dot" style="left:${X(hp[0])/CPU_W*100}%;top:${Y(hp[1])/CPU_H*100}%"></span>
+      <div class="cpu-tip ${X(hp[0]) > CPU_W*0.6 ? 'left' : ''}" style="left:${X(hp[0])/CPU_W*100}%">
+        <b>${hp[1]}%</b><span>${ago(t1 - hp[0])}</span></div>` : nothing}
+  </div>`;
+}
+
+function cpuTile() {
+  const {html, nothing} = window.lit;
+  const sys = state.system, cpu = sys && sys.cpu;
+  const mem = sys && sys.memory;
+  const cores = cpu && cpu.per_core;
+  const n = cpu && (cpu.cores_logical || (cores && cores.length));
+  const high = cpu && cpu.avg != null && cpu.avg >= 85;
+  return html`<div class="tile cpu-tile" style="--tint:var(--pink)">
+    <div class="t-head">
+      <div class="t-label">CPU${n ? html` <span class="t-dim">· ${n} cores</span>` : nothing}</div>
+      ${high ? html`<span class="status-warn">⚠ High load</span>` : nothing}
+    </div>
+    <div class="t-big pink">${cpu && cpu.avg != null ? cpu.avg : '…'}<small>% avg</small></div>
+    ${cpu ? cpuChart(cpu) : nothing}
+    ${cores ? html`<div class="cores" aria-label="Per-core load">${cores.map((v,i)=>html`
+      <span class="core" title="Core ${i}: ${v}%"><i style="height:${Math.max(2,v)}%"></i></span>`)}</div>` : nothing}
+    <div class="t-sub cpu-foot">
+      ${cpu && cpu.load_avg ? html`<span title="Load average over 1 / 5 / 15 min (runnable processes; compare to ${n} cores)">load ${cpu.load_avg.join(' ')}</span>` : nothing}
+      ${mem ? html`<span title="Memory in use (${mem.percent}%)">RAM ${fmtBytes(mem.used)} / ${fmtBytes(mem.total)}</span>` : nothing}
+    </div>
+  </div>`;
+}
+
 function ovRender() {
   if (!ovEl || !ovSideEl || !window.lit) return;
   const {html, repeat, nothing, render: litRender} = window.lit;
@@ -1563,6 +1704,7 @@ function ovRender() {
 
     `, ovEl);
   litRender(html`
+      ${cpuTile()}
       <div class="tile click" style="--tint:var(--danger)" @click=${go('#/signage')}>
         <div class="t-label">${sgRunning.length?html`<span class="onair-lamp">ON AIR</span>`:nothing} Signage</div>
         ${sgRunning.length ? repeat(sgRunning, i=>i.id, i=>{
@@ -1592,6 +1734,7 @@ function ovRender() {
         <div class="t-big purple">${state.media.length}<small> files</small></div>
         <div class="t-sub">${vids} videos · ${state.media.length-vids} images · ${fmtBytes(totalSize)}</div>
         <div class="media-strip">${state.media.slice(0,6).map(m=>html`<img src=${m.thumb_url||`${API}/media/${m.id}/thumb`} alt="" loading="lazy">`)}</div>
+        ${diskView()}
       </div>`, ovSideEl);
 }
 
@@ -1603,6 +1746,7 @@ function renderOverviewPage() {
   main.appendChild(h('div',{className:'ov-body'}, renderOutputsPanel(), ovSideEl));
   ovRender();
   setTimeout(updateOverview, 0);
+  setTimeout(updateSystem, 0);
   return main;
 }
 
@@ -2598,12 +2742,13 @@ setInterval(updateSignageStatus, 2000);
 setInterval(tickServerClock, 1000);
 setInterval(() => { if (state.rxModal && !document.hidden) refreshRxModal(); }, 3000);
 setInterval(updateOverview, 3000);
+setInterval(updateSystem, 2000);
 // Catch up immediately when the tab becomes visible again; hidden tabs
 // also drop their signage event stream (reopened on return) so idle
 // sessions never hold server connections
 document.addEventListener('visibilitychange', () => {
   syncSignageEvents();
-  if (!document.hidden && !uiBusy()) { loadData(); updatePreviews(); updateOverview(); }
+  if (!document.hidden && !uiBusy()) { loadData(); updatePreviews(); updateOverview(); updateSystem(); }
 });
 </script>
 </body>

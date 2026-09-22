@@ -26,6 +26,7 @@ from app.models import (
     SignageGroup, SignageItem,
 )
 from app.workers import manager, server_egress_mbps
+from app import sysstats
 from app.transcode import transcoder, ffmpeg_available
 from app.logging_config import log_event
 
@@ -1760,6 +1761,14 @@ def all_receivers():
         "total_tcp_mbps": round(total_mbps, 2),
         "egress_mbps": server_egress_mbps(),
     })
+
+
+@api.route("/system", methods=["GET"])
+def system_stats():
+    """Host health for the dashboard: CPU (average across cores, per-core,
+    ~5 min history sampled every 2s server-side), memory, and space on the
+    drive holding the media library."""
+    return jsonify(sysstats.snapshot(current_app.config["UPLOAD_FOLDER"]))
 
 
 @api.route("/instances/<ref>/receivers", methods=["GET"])

@@ -1342,6 +1342,7 @@ Behavior notes:
 | `POST` | `/api/instances/:id/signage/reorder` | Persist a full ordering — `{"order":[{"type":"item"\|"group","id":n},..], "group_items":{"<gid>":[item ids]}}` |
 | `POST` | `/api/instances/:id/signage/upload` | Upload straight into the playlist (multipart); ppt/pptx/odp/pdf become a group of slide images |
 | `GET` | `/api/receivers` | Fleet-wide receiver view: every connection across all running instances, summed TCP bandwidth (`total_tcp_mbps`), unique receiver / connection counts, and total NIC egress (`egress_mbps`, loopback excluded) |
+| `GET` | `/api/system` | Host health: CPU average across all cores (`cpu.avg`), per-core load (`cpu.per_core`), ~5 min history sampled every 2s server-side (`cpu.history`, `[epoch_ms, percent]`), load average, memory, and free/used space on the drive holding `UPLOAD_FOLDER` (`disk`). Needs `psutil` for CPU/memory; disk works without it |
 | `GET` | `/api/instances/:ref/receivers` | Who is pulling this source: peer IPs + reverse-DNS hostnames of established NDI connections to the worker's sockets, with the SDK's own count (`sdk_receivers`) for cross-checking |
 | `GET`/`POST` | `/api/instances/:ref/signage/status` | Now playing / up next / seconds remaining (`:ref` = id or name) |
 | `GET` | `/api/instances/:ref/signage/events` | Real-time now-playing stream (Server-Sent Events) — pushes the status payload on every change; usable from any `EventSource` client |
@@ -1468,6 +1469,14 @@ Current version is tracked in the `VERSION` file at the project root.
   or Stop All) confirms, and names any output that is on program right
   now; disabling confirms and explains that a running output keeps
   running until stopped.
+- **CPU graph and disk readout.** A CPU tile heads the Overview side
+  column: the average across all cores on a fixed 0–100% graph of the
+  last 5 minutes (hover for the value at any point), a bar per core, load
+  average and RAM, with a "High load" flag at 85%+. CPU is sampled every
+  2s by one background thread on the server (`GET /api/system`), so the
+  graph is already full when a page opens and every viewer sees the same
+  curve. Free space on the media drive shows on the Media Library tile
+  and tab, flagged "Low space" under 10% free.
 - **Broadcast-console styling.** Raised surfaces with lit top edges and
   deeper shadows, a visible aurora + grid backdrop, per-tile color tints,
   glowing tallies and pulsing live dots, machined buttons and toggles.
