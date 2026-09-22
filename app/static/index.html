@@ -86,12 +86,6 @@
   .tab:hover { color:var(--text); }
   .tab.active { color:var(--accent); border-bottom-color:var(--accent); }
 
-  /* Settings bar */
-  .settings-bar { display:flex; align-items:center; gap:16px; padding:14px 28px; border-bottom:1px solid var(--border); background:var(--surface); flex-wrap:wrap; }
-  .settings-bar label { font-size:12px; color:var(--text-dim); font-weight:500; text-transform:uppercase; letter-spacing:.5px; }
-  .settings-bar input { font-family:'JetBrains Mono',monospace; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); padding:5px 10px; font-size:13px; width:180px; }
-  .settings-bar input:focus { outline:none; border-color:var(--accent); }
-  .settings-group { display:flex; align-items:center; gap:8px; }
 
   /* Main */
   .main { padding:20px 28px; }
@@ -252,8 +246,7 @@
 
   /* Focus acknowledgment: visible rings for keyboard users, soft glow on inputs */
   :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-  .form-group input:focus, .form-group select:focus, .form-group textarea:focus,
-  .settings-bar input:focus { box-shadow:0 0 0 3px rgba(34,197,94,.14); }
+  .form-group input:focus, .form-group select:focus, .form-group textarea:focus { box-shadow:0 0 0 3px rgba(34,197,94,.14); }
 
   /* Layered glass on modal overlays: blur communicates what recedes */
   .modal-overlay { background:rgba(5,6,10,.68); backdrop-filter:blur(4px); }
@@ -334,8 +327,7 @@
   .tab { position:relative; }
   .tab.active { color:#4ade80; text-shadow:0 0 14px rgba(34,197,94,.6); background:linear-gradient(180deg,transparent 30%,rgba(34,197,94,.1)); border-bottom-color:transparent; }
   .tab.active::after { content:''; position:absolute; left:12px; right:12px; bottom:-1px; height:2px; border-radius:2px; background:linear-gradient(90deg,var(--accent),var(--cyan)); box-shadow:0 0 10px var(--accent); }
-  .settings-bar { background:rgba(12,14,20,.55); border-bottom:1px solid var(--border); }
-  .settings-bar input, .form-group input, .form-group select, .form-group textarea { background:rgba(0,0,0,.35); box-shadow:inset 0 1px 3px rgba(0,0,0,.5); }
+  .form-group input, .form-group select, .form-group textarea { background:rgba(0,0,0,.35); box-shadow:inset 0 1px 3px rgba(0,0,0,.5); }
   .section-title { color:var(--text); display:flex; align-items:center; gap:10px; }
   .section-title::before { content:''; width:4px; height:16px; border-radius:2px; background:linear-gradient(var(--accent),var(--cyan)); box-shadow:var(--glow-g); }
 
@@ -381,44 +373,30 @@
   .t-link { font-size:12px; color:var(--text-dim); text-decoration:none; }
   .t-link:hover { color:var(--accent); }
 
-  /* Overview layout: KPI strip, monitor wall + side column */
+  /* Overview layout: KPI strip, then outputs grid + side column */
   .bento.ov { grid-template-columns:repeat(12,1fr); gap:16px; }
-  .bento.ov > .kpi { grid-column:span 3; padding:16px 18px 0; display:flex; flex-direction:column; }
-  .bento.ov > .wall-tile { grid-column:span 8; }
-  .bento.ov > .ov-side { grid-column:span 4; display:flex; flex-direction:column; gap:16px; }
-  @media (max-width:1180px) { .bento.ov > .kpi { grid-column:span 6; } .bento.ov > .wall-tile, .bento.ov > .ov-side { grid-column:span 12; } }
+  .bento.ov > .kpi { grid-column:span 3; padding:13px 18px 0; display:flex; flex-direction:column; }
+  .ov-body { display:grid; grid-template-columns:minmax(0,1fr) 340px; gap:16px; margin-top:16px; align-items:start; }
+  .ov-side { display:flex; flex-direction:column; gap:16px; }
+  .outputs-tile .t-head { flex-wrap:wrap; gap:10px; align-items:center; }
+  .outputs-tile .instances { margin-top:14px; }
+  .t-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .fps-setting { display:flex; align-items:center; gap:6px; }
+  .fps-setting label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; font-weight:500; }
+  .fps-setting input { width:64px; font-family:'JetBrains Mono',monospace; background:rgba(0,0,0,.35); box-shadow:inset 0 1px 3px rgba(0,0,0,.5); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); padding:4px 8px; font-size:13px; }
+  .fps-setting input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(34,197,94,.14); }
+  @media (max-width:1180px) { .ov-body { grid-template-columns:1fr; } }
+  @media (max-width:900px) { .bento.ov > .kpi { grid-column:span 6; } }
   @media (max-width:640px) { .bento.ov { gap:12px; } .bento.ov > .kpi { grid-column:span 6; padding:14px 14px 0; } .kpi .t-sub { font-size:11px; } .spark, .kpi-meter { width:calc(100% + 28px); margin-left:-14px; margin-right:-14px; } }
-  .kpi .t-big { font-size:clamp(28px,2.4vw,36px); }
+  .kpi .t-big { font-size:clamp(26px,2.1vw,32px); }
+  .kpi .t-label { margin-bottom:4px; }
   .kpi .t-sub { display:flex; align-items:center; gap:6px; }
-  .spark { display:block; width:calc(100% + 36px); height:38px; margin:10px -18px 0; }
+  .spark { display:block; width:calc(100% + 36px); height:26px; margin:10px -18px 0; }
   .kpi-meter { height:4px; margin:auto -18px 0; background:rgba(255,255,255,.05); }
   .kpi-meter span { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--cyan)); box-shadow:var(--glow-g); transition:width .4s; }
-  .kpi .t-sub { margin-bottom:12px; }
+  .kpi .t-sub { margin:4px 0 10px; }
   .kpi .spark { margin-top:0; }
 
-  .wall { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:12px; margin-top:12px; }
-  .mon { cursor:pointer; border-radius:10px; padding:6px; background:rgba(0,0,0,.35); border:1px solid var(--border); transition:transform .15s, box-shadow .15s, border-color .15s; }
-  .mon:hover { transform:translateY(-2px); border-color:var(--border-hover); }
-  .mon.on { border-color:rgba(34,197,94,.3); }
-  .mon.pvw { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent), 0 0 22px -4px rgba(34,197,94,.7); }
-  .mon.pgm { border-color:var(--danger); box-shadow:0 0 0 1px var(--danger), 0 0 26px -2px rgba(239,68,68,.75); }
-  .mon.off { opacity:.55; }
-  .mon-screen { position:relative; aspect-ratio:16/9; border-radius:6px; overflow:hidden;
-                background:repeating-linear-gradient(45deg,#0a0b10 0 8px,#0d0f16 8px 16px); }
-  .mon-screen img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
-  .mon-screen img:not([src]) { display:none; }
-  .mon-screen img[src] + .mon-empty { display:none; }
-  .mon-empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:2px; color:var(--text-dim); }
-  .mon-screen::after { content:''; position:absolute; inset:0; pointer-events:none; background:repeating-linear-gradient(0deg,rgba(0,0,0,.12) 0 1px,transparent 1px 3px); mix-blend-mode:multiply; }
-  .mon-tally { position:absolute; top:6px; left:6px; z-index:1; font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:700; letter-spacing:.8px; border-radius:3px; padding:1px 6px; }
-  .mon-tally:empty { display:none; }
-  .mon.pgm .mon-tally { background:var(--danger); color:#fff; box-shadow:var(--glow-r); }
-  .mon.pvw .mon-tally { background:var(--accent); color:#000; box-shadow:var(--glow-g); }
-  .mon-label { display:flex; align-items:center; gap:8px; font-size:13px; padding:7px 3px 2px; min-width:0; }
-  .mon-label .dot { width:7px; height:7px; border-radius:50%; background:var(--border-hover); flex-shrink:0; }
-  .mon-label .dot.on { background:var(--accent); }
-  .mon-label .grow { flex:1; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .mon-label .mono { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text-dim); }
 
   .onair-lamp { font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:1px; color:#fff; background:var(--danger); border-radius:3px; padding:1px 6px; box-shadow:var(--glow-r); animation:lamp 2.4s ease-in-out infinite; }
   @keyframes lamp { 0%,100% { box-shadow:0 0 18px rgba(239,68,68,.7); } 50% { box-shadow:0 0 6px rgba(239,68,68,.3); } }
@@ -441,7 +419,7 @@
   .media-strip:empty { display:none; }
 
   /* Instances: grid of boxes — screen on top, info, then a control strip */
-  .instances { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:12px; }
+  .instances { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:12px; }
   .instance-card { display:flex; flex-direction:column; padding:0; overflow:hidden; border-radius:12px; position:relative; }
   .instance-card::before { content:''; position:absolute; inset:0 0 auto 0; height:2px; z-index:2; background:var(--border); }
   .instance-card.running::before { background:linear-gradient(90deg,var(--accent),var(--cyan)); box-shadow:var(--glow-g); }
@@ -484,7 +462,6 @@
   .btn-group button:hover { transform:none; position:relative; z-index:1; }
   button.ghost-danger:hover { color:var(--danger); border-color:rgba(239,68,68,.5); }
   button.power { min-width:64px; font-weight:600; }
-  @media (prefers-reduced-motion: reduce) { .mon:hover { transform:none; } }
   /* Phones: header wraps, tabs scroll sideways instead of squashing */
   @media (max-width:700px) {
     .header { flex-wrap:wrap; gap:10px; padding:12px 16px; }
@@ -492,12 +469,11 @@
     .header-actions { width:100%; }
     .header-actions { gap:8px; }
     .header-actions .server-clock { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; text-align:center; }
-    .wall { grid-template-columns:repeat(2,1fr); gap:8px; }
-    .mon-label .mono { display:none; }
     .header-actions button { white-space:nowrap; }
     .tabs { padding:0 8px; overflow-x:auto; }
     .tab { padding:11px 14px; white-space:nowrap; }
-    .main, .settings-bar { padding-left:16px; padding-right:16px; }
+    .main { padding-left:16px; padding-right:16px; }
+    .outputs-tile { padding:14px; }
   }
 </style>
 </head>
@@ -700,7 +676,19 @@ async function startAll() {
   state.instances.forEach(i=>{ if(i.enabled) i.running=true; }); render();
   await api('/start-all',{method:'POST'}); await loadData();
 }
+// Taking an output off the air is the one irreversible-in-the-moment action:
+// ask first, louder when a downstream switcher has it on program
+function confirmStop(insts) {
+  const live = insts.filter(i=>i.running);
+  if (!live.length) return true;
+  const pgm = live.filter(i=>i.ndi&&i.ndi.on_program);
+  const what = live.length===1 ? `"${live[0].name}"` : `${live.length} running outputs`;
+  return confirm(pgm.length
+    ? `⚠ ${pgm.map(i=>`"${i.name}"`).join(', ')} ${pgm.length===1?'is':'are'} ON PROGRAM right now.\n\nStop ${what} anyway?`
+    : `Stop ${what}?`);
+}
 async function stopAll() {
+  if (!confirmStop(state.instances)) return;
   state.instances.forEach(i=>{ i.running=false; }); render();
   await api('/stop-all',{method:'POST'}); await loadData();
 }
@@ -711,6 +699,7 @@ async function startInstance(id) {
 }
 async function stopInstance(id) {
   const i = state.instances.find(x=>x.id===id);
+  if (i && !confirmStop([i])) return;
   if (i) { i.running = false; render(); }
   await api(`/instances/${id}/stop`,{method:'POST'}); await loadData();
 }
@@ -722,6 +711,10 @@ async function deleteInstance(id) {
   await api(`/instances/${id}`,{method:'DELETE'}); await loadData();
 }
 async function toggleEnabled(inst) {
+  // Disabling doesn't stop a running worker — it only leaves the output
+  // out of Start All (and boot) — so say that in the prompt
+  if (inst.enabled && !confirm(`Disable "${inst.name}"?\n\nIt will be skipped by Start All`
+      + (inst.running ? ' — it keeps running until you stop it.' : '.'))) return;
   inst.enabled = !inst.enabled; render();
   await api(`/instances/${inst.id}`,{method:'PUT',body:{enabled:inst.enabled}}); await loadData();
 }
@@ -1148,13 +1141,15 @@ function renderHeader() {
 }
 
 // --- Virtual pages (hash routes) -----------------------------------------
-// #/instances · #/signage · #/signage/<id> · #/media — refreshing or
+// #/overview · #/signage · #/signage/<id> · #/media — refreshing or
 // bookmarking keeps the current tab (and signage selection); back/forward
 // navigate between tabs.
 
 function applyRoute() {
   const parts = location.hash.replace(/^#\/?/, '').split('/');
-  if (['overview','instances','signage','media'].includes(parts[0])) state.tab = parts[0];
+  if (['overview','signage','media'].includes(parts[0])) state.tab = parts[0];
+  // The Instances tab merged into Overview — old bookmarks land there
+  if (parts[0]==='instances') state.tab = 'overview';
   if (parts[0]==='signage' && parts[1]) {
     const id = parseInt(parts[1]);
     if (id) state.signageInstId = id;
@@ -1185,20 +1180,22 @@ window.addEventListener('hashchange', () => {
 });
 
 function renderTabs() {
-  const tabs = [['overview','Overview'],['instances','Instances'],['signage','Signage'],['media','Media Library']];
+  const tabs = [['overview','Overview'],['signage','Signage'],['media','Media Library']];
   return h('div',{className:'tabs'}, ...tabs.map(([id,label])=>
     h('div',{className:`tab ${state.tab===id?'active':''}`,onClick:()=>{location.hash=`#/${id}`;}},label)
   ));
 }
 
-function renderSettingsBar() {
-  const fi = h('input',{type:'number',value:state.fpsInput,style:{width:'80px'}});
+// Global output FPS — lives inline in the Outputs panel header
+function renderFpsSetting() {
+  const fi = h('input',{type:'number',value:state.fpsInput,title:'NDI output frame rate for every source'});
   fi.addEventListener('input',e=>{state.fpsInput=e.target.value;});
   fi.addEventListener('focus',()=>{settingsEditing=true;});
   fi.addEventListener('blur',()=>{settingsEditing=false;});
-  return h('div',{className:'settings-bar'},
-    h('div',{className:'settings-group'},h('label',null,'Output FPS'),fi),
-    h('button',{className:'sm',onClick:saveSettings},'Save Settings'),
+  fi.addEventListener('keydown',e=>{ if(e.key==='Enter') saveSettings(); });
+  return h('div',{className:'fps-setting'},
+    h('label',null,'Output FPS'),fi,
+    h('button',{className:'sm',onClick:saveSettings},'Save'),
   );
 }
 
@@ -1236,7 +1233,7 @@ function renderInstanceCard(inst) {
       preview,
       // Overlay badges; pointer-events pass through to the thumbnail except on RX
       h('div',{className:'ic-overlay'},
-        h('span',{className:`ic-state ${inst.running?'on':''}`},inst.running?'LIVE':'OFF'),
+        inst.running ? h('span',{className:'ic-state on'},'LIVE') : null,
         ndi.on_program ? h('span',{className:'tally pgm',title:'On program (downstream tally)'},'PGM') : null,
         ndi.on_preview ? h('span',{className:'tally pvw',title:'On preview (downstream tally)'},'PVW') : null,
         h('span',{className:'ic-spacer'}),
@@ -1285,21 +1282,29 @@ function renderInstanceCard(inst) {
   );
 }
 
-function renderInstancesPage() {
-  const main = h('div',{className:'main'},
-    h('div',{className:'section-header'},
-      h('div',{className:'section-title'},`Output Instances (${state.instances.length})`),
-      h('button',{className:'primary',onClick:()=>{state.modal='create';state.modalDefaults=null;render();}},`+ New Instance`),
+// Outputs panel: the instance cards, embedded in the Overview. Plain DOM
+// (rebuilt on data change, previews swapped in place) beside the
+// lit-rendered KPI strip and side column.
+function renderOutputsPanel() {
+  const running = state.instances.filter(i=>i.running).length;
+  const panel = h('div',{className:'tile outputs-tile',style:{'--tint':'var(--accent)'}},
+    h('div',{className:'t-head'},
+      h('div',{className:'t-label'},`Outputs · ${running} / ${state.instances.length} live`),
+      h('div',{className:'t-actions'},
+        renderFpsSetting(),
+        h('button',{className:'primary sm',onClick:()=>{state.modal='create';state.modalDefaults=null;render();}},'+ New Instance'),
+      ),
     ),
   );
   if(!state.instances.length) {
-    main.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'⬡'),h('div',null,'No instances yet. Create one to start streaming.')));
+    panel.appendChild(h('div',{className:'empty-state'},h('div',{className:'icon'},'⬡'),h('div',null,'No instances yet. Create one to start streaming.')));
   } else {
+    // Stable order: a card must not jump out from under the cursor on start/stop
     const list = h('div',{className:'instances'});
     state.instances.forEach(i=>list.appendChild(renderInstanceCard(i)));
-    main.appendChild(list);
+    panel.appendChild(list);
   }
-  return main;
+  return panel;
 }
 
 // --- Media Library filters -------------------------------------------------
@@ -1452,7 +1457,8 @@ function renderMediaPage() {
 // Modular at-a-glance tiles: output health, what's on air, receiver totals,
 // server egress. Rendered by lit into a stable container so the 3s refresh
 // updates the numbers in place.
-let ovEl = null;
+let ovEl = null;      // KPI strip
+let ovSideEl = null;  // On Air + media column
 
 function fmtBytes(n) {
   if (n >= 1073741824) return (n/1073741824).toFixed(1)+' GB';
@@ -1515,7 +1521,7 @@ function ovSpark(values, color) {
 }
 
 function ovRender() {
-  if (!ovEl || !window.lit) return;
+  if (!ovEl || !ovSideEl || !window.lit) return;
   const {html, repeat, nothing, render: litRender} = window.lit;
   const insts = state.instances;
   const running = insts.filter(i=>i.running);
@@ -1528,11 +1534,9 @@ function ovRender() {
   const go = hash => () => { location.hash = hash; };
   const thumb = id => id!=null ? `${API}/media/${id}/thumb` : nothing;
 
-  // Monitor wall: running outputs first, then the rest, in their own order
-  const wall = [...running, ...insts.filter(i=>!i.running)];
 
   litRender(html`
-    <div class="tile kpi click" style="--tint:var(--accent)" @click=${go('#/instances')}>
+    <div class="tile kpi" style="--tint:var(--accent)">
       <div class="t-label">Outputs live</div>
       <div class="t-big ${running.length?'ok':''}">${running.length}<small> / ${insts.length}</small></div>
       <div class="t-sub">${onPgm ? html`<span class="tally pgm">PGM</span> ${onPgm} on program` : 'none on program'}</div>
@@ -1557,32 +1561,8 @@ function ovRender() {
       ${ovSpark(hist.tcp,'#22d3ee')}
     </div>
 
-    <div class="tile wall-tile" style="--tint:var(--accent)">
-      <div class="t-head">
-        <div class="t-label">Monitor wall</div>
-        <a class="t-link" href="#/instances">Manage outputs →</a>
-      </div>
-      ${insts.length ? html`<div class="wall">${repeat(wall, i=>i.id, i=>{
-        const ndi = (i.running && i.ndi) || {};
-        const tally = ndi.on_program ? 'pgm' : ndi.on_preview ? 'pvw' : '';
-        const src = i.running && previewCache[i.id] ? previewCache[i.id] : nothing;
-        return html`<div class="mon ${i.running?'on':'off'} ${tally}" title="Open live preview window"
-            @click=${()=>openPreviewPopup(i)}>
-          <div class="mon-screen">
-            <img data-preview=${i.id} src=${src} alt="">
-            <span class="mon-empty">${i.running?'NO SIGNAL':(i.enabled?'OFF AIR':'DISABLED')}</span>
-            <span class="mon-tally">${ndi.on_program?'PGM':ndi.on_preview?'PVW':''}</span>
-          </div>
-          <div class="mon-label">
-            <span class="dot ${i.running?'on':''}"></span>
-            <span class="grow">${i.name}</span>
-            <span class="mono">${ndi.receivers!=null?`◉ ${ndi.receivers}`:`${i.width}×${i.height}`}</span>
-          </div>
-        </div>`;
-      })}</div>` : html`<div class="t-sub">No outputs yet — create one on the Instances tab.</div>`}
-    </div>
-
-    <div class="ov-side">
+    `, ovEl);
+  litRender(html`
       <div class="tile click" style="--tint:var(--danger)" @click=${go('#/signage')}>
         <div class="t-label">${sgRunning.length?html`<span class="onair-lamp">ON AIR</span>`:nothing} Signage</div>
         ${sgRunning.length ? repeat(sgRunning, i=>i.id, i=>{
@@ -1612,18 +1592,16 @@ function ovRender() {
         <div class="t-big purple">${state.media.length}<small> files</small></div>
         <div class="t-sub">${vids} videos · ${state.media.length-vids} images · ${fmtBytes(totalSize)}</div>
         <div class="media-strip">${state.media.slice(0,6).map(m=>html`<img src=${m.thumb_url||`${API}/media/${m.id}/thumb`} alt="" loading="lazy">`)}</div>
-      </div>
-    </div>`, ovEl);
+      </div>`, ovSideEl);
 }
 
 function renderOverviewPage() {
   const main = h('div',{className:'main'});
-  main.appendChild(h('div',{className:'section-header'},
-    h('div',{className:'section-title'},'Overview'),
-  ));
   ovEl = h('div',{className:'bento ov'});
-  ovRender();
+  ovSideEl = h('div',{className:'ov-side'});
   main.appendChild(ovEl);
+  main.appendChild(h('div',{className:'ov-body'}, renderOutputsPanel(), ovSideEl));
+  ovRender();
   setTimeout(updateOverview, 0);
   return main;
 }
@@ -2586,9 +2564,6 @@ function render() {
   root.appendChild(renderTabs());
   if(state.tab==='overview') {
     root.appendChild(renderOverviewPage());
-  } else if(state.tab==='instances') {
-    root.appendChild(renderSettingsBar());
-    root.appendChild(renderInstancesPage());
   } else if(state.tab==='signage') {
     root.appendChild(renderSignagePage());
   } else {
