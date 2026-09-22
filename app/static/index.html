@@ -49,6 +49,7 @@
   .rx-table th { text-align:left; font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; padding:4px 8px; border-bottom:1px solid var(--border); }
   .rx-table td { padding:6px 8px; border-bottom:1px solid var(--border); }
   .rx-table td.mono { font-family:'JetBrains Mono',monospace; font-size:12px; }
+  .rx-table tr.gone td { opacity:.4; }
   .header-actions { display:flex; gap:12px; align-items:center; }
   .server-clock { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text-dim); white-space:nowrap; padding:4px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); cursor:default; }
 
@@ -649,7 +650,8 @@ async function refreshRxModal() {
 }
 
 const rxTransportLabel = r =>
-  r.transport==='tcp' ? '⇄ TCP'
+  r.active===false ? 'disconnected'
+  : r.transport==='tcp' ? '⇄ TCP'
   : r.transport==='udp-multicast' ? '⇢ UDP / multicast'
   : r.transport==='measuring' ? 'measuring…' : '—';
 
@@ -658,7 +660,9 @@ function rxTable(receivers) {
     h('thead',null,h('tr',null,
       h('th',null,'Hostname'),h('th',null,'IP Address'),h('th',null,'Conns'),
       h('th',null,'Transport'),h('th',null,'TCP Rate'))),
-    h('tbody',null, ...receivers.map(r=>h('tr',null,
+    // Rows that just dropped linger dimmed for ~20s (server-side), so the
+    // table doesn't change height every refresh and yank the scroll around
+    h('tbody',null, ...receivers.map(r=>h('tr',{className:r.active===false?'gone':''},
       h('td',null,r.hostname||'—'),
       h('td',{className:'mono'},r.ip),
       h('td',null,String(r.connections)),

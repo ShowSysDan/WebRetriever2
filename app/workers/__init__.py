@@ -65,6 +65,12 @@ RESTART_STABLE_RESET = 120.0
 # multicast).
 RX_TCP_MEDIA_MBPS = 0.5
 
+# List stability: receiver connections flap (reconnects, preview monitors
+# opening/closing). A receiver that disappears stays in the list for this
+# many seconds flagged inactive, so the UI's auto-refreshing table doesn't
+# grow/shrink — and jump the scroll position — on every churn event.
+RX_LINGER_S = 20.0
+
 _HOSTNAME_TTL = 300.0  # seconds a reverse-DNS answer (or miss) is cached
 _hostname_cache: Dict[str, tuple] = {}  # ip -> (hostname|None, expires_at)
 _hostname_pending: set = set()
@@ -250,6 +256,8 @@ class WorkerManager:
         self._ndi_tallys: Dict[int, mp.Value] = {}
         # Last bytes_acked sample per receiver connection, for throughput
         self._rx_samples: Dict[int, dict] = {}
+        # Recently-seen receivers per instance, for the linger window
+        self._rx_seen: Dict[int, dict] = {}
         self._configs: Dict[int, dict] = {}
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
@@ -267,7 +275,8 @@ class WorkerManager:
         for d in (self._workers, self._processes, self._heartbeats,
                   self._video_cmds, self._video_states, self._video_paths,
                   self._video_holds, self._signage_cmds, self._preview_boosts,
-                  self._ndi_connections, self._ndi_tallys, self._rx_samples):
+                  self._ndi_connections, self._ndi_tallys, self._rx_samples,
+                  self._rx_seen):
             d.pop(instance_id, None)
 
     def _spawn(self, instance_id: int, config: dict) -> mp.Process:
@@ -576,6 +585,25 @@ class WorkerManager:
                                   else "udp-multicast")
             else:
                 r["transport"], r["mbps"] = "measuring", None
+
+        # Linger: keep receivers that just dropped in the list (inactive,
+        # zeroed) for RX_LINGER_S so the auto-refreshing table stays a
+        # stable size through connection churn instead of jumping around
+        seen = self._rx_seen.setdefault(instance_id, {})
+        current = {}
+        for r in info["receivers"]:
+            r["active"] = True
+            current[r["ip"]] = r
+            seen[r["ip"]] = {"last": now, "row": r}
+        for ip, entry in list(seen.items()):
+            if ip in current:
+                continue
+            if now - entry["last"] > RX_LINGER_S:
+                del seen[ip]
+            else:
+                current[ip] = dict(entry["row"], active=False,
+                                   connections=0, mbps=None)
+        info["receivers"] = [current[ip] for ip in sorted(current)]
         return info
 
     def get_video_state(self, instance_id: int) -> Optional[str]:
