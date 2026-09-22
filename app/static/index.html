@@ -33,10 +33,7 @@
   .status-pill.stopped { background:var(--danger-dim); color:var(--danger); }
   .status-pill.rx { background:var(--surface2); color:var(--blue); border:1px solid var(--border); cursor:default; }
 
-  /* NDI receiver count + tally badges (reported by the NDI SDK) */
-  .rx-line { display:flex; align-items:center; gap:6px; margin-top:2px; }
-  .rx-count { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text-dim); }
-  .rx-count.active { color:var(--accent); }
+  /* Tally badges (reported by the NDI SDK) */
   .tally { font-family:'JetBrains Mono',monospace; font-size:9px; font-weight:700; letter-spacing:.5px; border-radius:3px; padding:1px 5px; }
   .tally.pgm { background:var(--danger); color:#fff; }
   .tally.pvw { background:var(--accent); color:#000; }
@@ -102,23 +99,8 @@
   .section-title { font-size:14px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim); }
 
   /* Instance cards */
-  .instances { display:flex; flex-direction:column; gap:6px; }
-  .instance-card { display:grid; grid-template-columns:32px 130px 1.2fr 100px 1fr 80px 80px 200px; align-items:center; gap:12px; padding:14px 18px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); transition:border-color .15s; }
-  .instance-preview { width:120px; height:67px; border-radius:4px; object-fit:cover; background:var(--bg); border:1px solid var(--border); }
-  .instance-preview-empty { width:120px; height:67px; border-radius:4px; background:var(--bg); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-size:10px; color:var(--text-dim); }
   .instance-card:hover { border-color:var(--border-hover); }
-  .instance-card.running { border-left:3px solid var(--accent); }
-  .instance-card.stopped { border-left:3px solid var(--border); }
-  .instance-status { width:9px; height:9px; border-radius:50%; background:var(--border); }
-  .instance-status.on { background:var(--accent); box-shadow:0 0 8px var(--accent); }
-  .instance-info h3 { font-size:14px; font-weight:600; margin-bottom:1px; }
   .instance-id { font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:400; color:var(--text-dim); background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:1px 5px; margin-right:6px; vertical-align:1px; }
-  .instance-info .meta { font-size:12px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
-  .instance-res { font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--text-dim); }
-  .instance-source { font-size:12px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .instance-fps { font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--warning); }
-  .instance-refresh { font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--blue); }
-  .instance-actions { display:flex; gap:5px; justify-content:flex-end; }
 
   /* Toggle */
   .toggle { position:relative; width:34px; height:18px; background:var(--border); border-radius:9px; cursor:pointer; transition:background .2s; flex-shrink:0; }
@@ -313,6 +295,210 @@
   .upov-item.processing .upov-fill { animation:up-pulse 1.2s ease-in-out infinite; }
   .upov-err { color:var(--danger); font-size:12px; margin-top:6px; }
   .upov-actions { display:flex; justify-content:flex-end; margin-top:8px; }
+
+  /* --- Broadcast console pass -----------------------------------------
+     Three depth levels (bg → surface → raised), light-catching top edges,
+     per-tile color tints, and live state rendered as light: pulsing
+     dots, glowing tallies, red/green frames for program/preview. */
+  :root {
+    --bg:#06070b; --surface:#10121a; --surface2:#181b26; --raised:#1d2130;
+    --border:rgba(255,255,255,.075); --border-hover:rgba(255,255,255,.16);
+    --cyan:#22d3ee; --purple:#a78bfa;
+    --hl:inset 0 1px 0 rgba(255,255,255,.055);
+    --lift:0 1px 2px rgba(0,0,0,.45), 0 10px 30px -10px rgba(0,0,0,.7);
+    --glow-g:0 0 18px rgba(34,197,94,.45);
+    --glow-r:0 0 18px rgba(239,68,68,.55);
+  }
+  body {
+    background:
+      radial-gradient(1000px 560px at 88% -10%, rgba(34,197,94,.17), transparent 60%),
+      radial-gradient(900px 640px at -8% 110%, rgba(59,130,246,.16), transparent 60%),
+      radial-gradient(700px 420px at 45% 55%, rgba(167,139,250,.06), transparent 70%),
+      linear-gradient(rgba(255,255,255,.02) 1px, transparent 1px) 0 0/32px 32px,
+      linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px) 0 0/32px 32px,
+      var(--bg);
+    background-attachment:fixed;
+  }
+
+  /* Chrome: glass header with a green horizon line, glowing active tab */
+  .header { background:linear-gradient(180deg,rgba(26,29,42,.92),rgba(12,14,20,.8)); backdrop-filter:blur(14px);
+            border-bottom:1px solid var(--border); box-shadow:0 1px 0 rgba(34,197,94,.22), 0 10px 30px -12px rgba(0,0,0,.8); position:relative; z-index:41; }
+  .logo { background:linear-gradient(90deg,#4ade80,#22d3ee); -webkit-background-clip:text; background-clip:text; color:transparent; filter:drop-shadow(0 0 10px rgba(34,197,94,.35)); }
+  .logo span { -webkit-text-fill-color:#8b8fa3; }
+  .version { border:1px solid var(--border); }
+  .status-pill { border:1px solid rgba(34,197,94,.5); background:rgba(34,197,94,.12); box-shadow:var(--glow-g), inset 0 0 10px rgba(34,197,94,.15); text-shadow:0 0 8px rgba(34,197,94,.8); }
+  .status-pill.stopped { border-color:rgba(239,68,68,.45); background:rgba(239,68,68,.1); box-shadow:none; text-shadow:none; }
+  .status-pill.rx { border-color:rgba(59,130,246,.45); background:rgba(59,130,246,.1); box-shadow:0 0 14px rgba(59,130,246,.3); text-shadow:0 0 8px rgba(59,130,246,.7); }
+  .server-clock { background:rgba(0,0,0,.45); border-color:var(--border); color:#b7bccd; box-shadow:inset 0 1px 3px rgba(0,0,0,.6); }
+  .tabs { background:rgba(10,12,18,.72) !important; border-bottom:1px solid var(--border); }
+  .tab { position:relative; }
+  .tab.active { color:#4ade80; text-shadow:0 0 14px rgba(34,197,94,.6); background:linear-gradient(180deg,transparent 30%,rgba(34,197,94,.1)); border-bottom-color:transparent; }
+  .tab.active::after { content:''; position:absolute; left:12px; right:12px; bottom:-1px; height:2px; border-radius:2px; background:linear-gradient(90deg,var(--accent),var(--cyan)); box-shadow:0 0 10px var(--accent); }
+  .settings-bar { background:rgba(12,14,20,.55); border-bottom:1px solid var(--border); }
+  .settings-bar input, .form-group input, .form-group select, .form-group textarea { background:rgba(0,0,0,.35); box-shadow:inset 0 1px 3px rgba(0,0,0,.5); }
+  .section-title { color:var(--text); display:flex; align-items:center; gap:10px; }
+  .section-title::before { content:''; width:4px; height:16px; border-radius:2px; background:linear-gradient(var(--accent),var(--cyan)); box-shadow:var(--glow-g); }
+
+  /* Raised surfaces */
+  .tile, .instance-card, .sg-live, .sg-row, .media-card, .modal, .upov-panel {
+    background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,0) 55%), var(--surface);
+    border:1px solid var(--border); box-shadow:var(--hl), var(--lift);
+  }
+  .sg-row { box-shadow:var(--hl); }
+  .sg-group-row { background:linear-gradient(90deg,rgba(59,130,246,.1),transparent 40%), var(--surface2); }
+  .sg-row.playing { background:linear-gradient(90deg,rgba(34,197,94,.16),transparent 50%), #0c1a12; box-shadow:inset 3px 0 0 var(--accent), 0 0 20px -6px rgba(34,197,94,.5); }
+  .sg-onair { box-shadow:var(--glow-g); }
+
+  /* Buttons: machined keys */
+  button { background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.01)), var(--surface2); box-shadow:var(--hl), 0 1px 2px rgba(0,0,0,.4); }
+  button:hover { background:linear-gradient(180deg,rgba(255,255,255,.1),rgba(255,255,255,.02)), var(--raised); }
+  button.primary { background:linear-gradient(180deg,#4ade80,#16a34a); border-color:#22c55e; color:#03140a; box-shadow:inset 0 1px 0 rgba(255,255,255,.4), 0 4px 16px -4px rgba(34,197,94,.7); }
+  button.primary:hover { background:linear-gradient(180deg,#6ee79a,#22c55e); box-shadow:inset 0 1px 0 rgba(255,255,255,.4), 0 4px 22px -2px rgba(34,197,94,.8); }
+  button.danger { background:linear-gradient(180deg,rgba(239,68,68,.32),rgba(127,29,29,.55)); border-color:rgba(239,68,68,.5); color:#fecaca; }
+  button.danger:hover { background:linear-gradient(180deg,rgba(239,68,68,.5),rgba(153,27,27,.7)); box-shadow:inset 0 1px 0 rgba(255,255,255,.12), 0 4px 18px -4px rgba(239,68,68,.7); }
+  .toggle { background:rgba(0,0,0,.5); box-shadow:inset 0 1px 3px rgba(0,0,0,.7), 0 0 0 1px var(--border); }
+  .toggle.on { background:linear-gradient(90deg,#16a34a,#22c55e); box-shadow:inset 0 1px 2px rgba(0,0,0,.3), 0 0 12px rgba(34,197,94,.55); }
+  .toggle::after { box-shadow:0 1px 3px rgba(0,0,0,.5); }
+  .chip.active { box-shadow:0 0 12px -2px rgba(34,197,94,.5); }
+
+  /* Live state as light */
+  .dot.on { animation:livepulse 2s ease-in-out infinite; }
+  @keyframes livepulse { 0%,100% { box-shadow:0 0 0 0 rgba(34,197,94,.6), 0 0 8px var(--accent); } 50% { box-shadow:0 0 0 5px rgba(34,197,94,0), 0 0 8px var(--accent); } }
+  .tally.pgm { box-shadow:var(--glow-r); }
+  .tally.pvw { box-shadow:var(--glow-g); }
+
+  /* Tiles: tint line on top + corner glow in the tile's own color */
+  .tile { position:relative; overflow:hidden; --tint:var(--accent); }
+  .tile::before { content:''; position:absolute; inset:0 0 auto 0; height:2px; background:linear-gradient(90deg,transparent,var(--tint),transparent); opacity:.85; }
+  .tile::after { content:''; position:absolute; width:280px; height:280px; right:-110px; top:-150px; border-radius:50%; background:radial-gradient(var(--tint),transparent 65%); opacity:.16; pointer-events:none; }
+  .tile.click:hover { border-color:color-mix(in srgb, var(--tint) 45%, transparent); box-shadow:var(--hl), var(--lift), 0 0 30px -10px var(--tint); }
+  .t-label { color:#a9aec2; font-weight:600; letter-spacing:1.2px; display:flex; align-items:center; gap:8px; }
+  .t-big.ok { color:#4ade80; text-shadow:0 0 26px rgba(34,197,94,.55); }
+  .t-big.blue { color:#60a5fa; text-shadow:0 0 26px rgba(59,130,246,.55); }
+  .t-big.cyan { color:var(--cyan); text-shadow:0 0 26px rgba(34,211,238,.5); }
+  .t-big.purple { color:var(--purple); text-shadow:0 0 26px rgba(167,139,250,.5); }
+  .t-head { display:flex; justify-content:space-between; align-items:baseline; }
+  .t-link { font-size:12px; color:var(--text-dim); text-decoration:none; }
+  .t-link:hover { color:var(--accent); }
+
+  /* Overview layout: KPI strip, monitor wall + side column */
+  .bento.ov { grid-template-columns:repeat(12,1fr); gap:16px; }
+  .bento.ov > .kpi { grid-column:span 3; padding:16px 18px 0; display:flex; flex-direction:column; }
+  .bento.ov > .wall-tile { grid-column:span 8; }
+  .bento.ov > .ov-side { grid-column:span 4; display:flex; flex-direction:column; gap:16px; }
+  @media (max-width:1180px) { .bento.ov > .kpi { grid-column:span 6; } .bento.ov > .wall-tile, .bento.ov > .ov-side { grid-column:span 12; } }
+  @media (max-width:640px) { .bento.ov { gap:12px; } .bento.ov > .kpi { grid-column:span 6; padding:14px 14px 0; } .kpi .t-sub { font-size:11px; } .spark, .kpi-meter { width:calc(100% + 28px); margin-left:-14px; margin-right:-14px; } }
+  .kpi .t-big { font-size:clamp(28px,2.4vw,36px); }
+  .kpi .t-sub { display:flex; align-items:center; gap:6px; }
+  .spark { display:block; width:calc(100% + 36px); height:38px; margin:10px -18px 0; }
+  .kpi-meter { height:4px; margin:auto -18px 0; background:rgba(255,255,255,.05); }
+  .kpi-meter span { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--cyan)); box-shadow:var(--glow-g); transition:width .4s; }
+  .kpi .t-sub { margin-bottom:12px; }
+  .kpi .spark { margin-top:0; }
+
+  .wall { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:12px; margin-top:12px; }
+  .mon { cursor:pointer; border-radius:10px; padding:6px; background:rgba(0,0,0,.35); border:1px solid var(--border); transition:transform .15s, box-shadow .15s, border-color .15s; }
+  .mon:hover { transform:translateY(-2px); border-color:var(--border-hover); }
+  .mon.on { border-color:rgba(34,197,94,.3); }
+  .mon.pvw { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent), 0 0 22px -4px rgba(34,197,94,.7); }
+  .mon.pgm { border-color:var(--danger); box-shadow:0 0 0 1px var(--danger), 0 0 26px -2px rgba(239,68,68,.75); }
+  .mon.off { opacity:.55; }
+  .mon-screen { position:relative; aspect-ratio:16/9; border-radius:6px; overflow:hidden;
+                background:repeating-linear-gradient(45deg,#0a0b10 0 8px,#0d0f16 8px 16px); }
+  .mon-screen img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .mon-screen img:not([src]) { display:none; }
+  .mon-screen img[src] + .mon-empty { display:none; }
+  .mon-empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:2px; color:var(--text-dim); }
+  .mon-screen::after { content:''; position:absolute; inset:0; pointer-events:none; background:repeating-linear-gradient(0deg,rgba(0,0,0,.12) 0 1px,transparent 1px 3px); mix-blend-mode:multiply; }
+  .mon-tally { position:absolute; top:6px; left:6px; z-index:1; font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:700; letter-spacing:.8px; border-radius:3px; padding:1px 6px; }
+  .mon-tally:empty { display:none; }
+  .mon.pgm .mon-tally { background:var(--danger); color:#fff; box-shadow:var(--glow-r); }
+  .mon.pvw .mon-tally { background:var(--accent); color:#000; box-shadow:var(--glow-g); }
+  .mon-label { display:flex; align-items:center; gap:8px; font-size:13px; padding:7px 3px 2px; min-width:0; }
+  .mon-label .dot { width:7px; height:7px; border-radius:50%; background:var(--border-hover); flex-shrink:0; }
+  .mon-label .dot.on { background:var(--accent); }
+  .mon-label .grow { flex:1; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mon-label .mono { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text-dim); }
+
+  .onair-lamp { font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:1px; color:#fff; background:var(--danger); border-radius:3px; padding:1px 6px; box-shadow:var(--glow-r); animation:lamp 2.4s ease-in-out infinite; }
+  @keyframes lamp { 0%,100% { box-shadow:0 0 18px rgba(239,68,68,.7); } 50% { box-shadow:0 0 6px rgba(239,68,68,.3); } }
+  .sg-now { margin-top:10px; }
+  .sg-now + .sg-now { padding-top:12px; border-top:1px solid var(--border); }
+  .sg-now-name { display:flex; justify-content:space-between; font-size:13px; margin-bottom:8px; }
+  .sg-now-name .mono { font-family:'JetBrains Mono',monospace; color:var(--warning); font-size:13px; }
+  .sg-now-row { display:flex; align-items:center; gap:10px; }
+  .sg-now-thumb { flex-shrink:0; aspect-ratio:16/9; border-radius:5px; overflow:hidden; background:#000; border:1px solid var(--border); }
+  .sg-now-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+  .sg-now-thumb.cur { width:112px; border-color:var(--danger); box-shadow:0 0 16px -4px rgba(239,68,68,.7); }
+  .sg-now-thumb.nxt { width:60px; opacity:.6; }
+  .sg-now-text { flex:1; min-width:0; }
+  .sg-now-text .now { font-weight:600; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sg-now-text .next { font-size:12px; color:var(--text-dim); margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sg-progress { height:3px; margin-top:10px; border-radius:2px; background:rgba(255,255,255,.06); overflow:hidden; }
+  .sg-progress span { display:block; height:100%; background:linear-gradient(90deg,var(--warning),var(--danger)); box-shadow:0 0 8px rgba(239,68,68,.6); transition:width 2.8s linear; }
+  .media-strip { display:grid; grid-template-columns:repeat(6,1fr); gap:5px; margin-top:12px; }
+  .media-strip img { width:100%; aspect-ratio:1; object-fit:cover; border-radius:4px; background:#000; border:1px solid var(--border); }
+  .media-strip:empty { display:none; }
+
+  /* Instances: grid of boxes — screen on top, info, then a control strip */
+  .instances { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:12px; }
+  .instance-card { display:flex; flex-direction:column; padding:0; overflow:hidden; border-radius:12px; position:relative; }
+  .instance-card::before { content:''; position:absolute; inset:0 0 auto 0; height:2px; z-index:2; background:var(--border); }
+  .instance-card.running::before { background:linear-gradient(90deg,var(--accent),var(--cyan)); box-shadow:var(--glow-g); }
+  .instance-card.running { border-color:rgba(34,197,94,.25); }
+  .instance-card.pvw { border-color:var(--accent); box-shadow:var(--hl), var(--lift), 0 0 0 1px var(--accent), 0 0 26px -8px rgba(34,197,94,.8); }
+  .instance-card.pgm { border-color:var(--danger); box-shadow:var(--hl), var(--lift), 0 0 0 1px var(--danger), 0 0 30px -6px rgba(239,68,68,.8); }
+  .instance-card.pgm::before { background:var(--danger); box-shadow:var(--glow-r); }
+  .instance-card.disabled { opacity:.6; }
+  .instance-card:hover { border-color:var(--border-hover); }
+  .ic-screen { position:relative; aspect-ratio:16/9; background:repeating-linear-gradient(45deg,#0a0b10 0 8px,#0d0f16 8px 16px); border-bottom:1px solid var(--border); }
+  .ic-screen .instance-preview, .ic-screen .instance-preview-empty { position:absolute; inset:0; width:100%; height:100%; border:none; border-radius:0; background:transparent; }
+  .ic-screen .instance-preview-empty { display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:2px; color:var(--text-dim); }
+  .ic-screen::after { content:''; position:absolute; inset:0; pointer-events:none; background:linear-gradient(180deg,rgba(0,0,0,.55),transparent 30%,transparent 75%,rgba(0,0,0,.5)); }
+  .ic-overlay { position:absolute; inset:8px 8px auto 8px; z-index:1; display:flex; align-items:center; gap:6px; pointer-events:none; }
+  .ic-spacer { flex:1; }
+  .ic-state { font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:700; letter-spacing:1px; padding:2px 7px; border-radius:3px; background:rgba(0,0,0,.6); color:var(--text-dim); border:1px solid var(--border); backdrop-filter:blur(4px); }
+  .ic-state.on { color:#4ade80; border-color:rgba(34,197,94,.55); text-shadow:0 0 8px rgba(34,197,94,.9); }
+  .ic-state.on::before { content:'● '; animation:up-pulse 1.6s ease-in-out infinite; }
+  .ic-rx { pointer-events:auto; cursor:pointer; font-family:'JetBrains Mono',monospace; font-size:11px; padding:2px 7px; border-radius:3px; background:rgba(0,0,0,.6); color:var(--text-dim); border:1px solid var(--border); backdrop-filter:blur(4px); }
+  .ic-rx.active { color:#93c5fd; border-color:rgba(59,130,246,.5); }
+  .ic-rx:hover { border-color:var(--border-hover); color:var(--text); }
+  .ic-pop { position:absolute; right:8px; bottom:8px; z-index:1; font-size:11px; padding:2px 8px; border-radius:3px; background:rgba(0,0,0,.7); color:var(--text); opacity:0; transition:opacity .15s; pointer-events:none; }
+  .ic-screen:hover .ic-pop { opacity:1; }
+  .ic-vstate { position:absolute; left:8px; bottom:8px; z-index:1; font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:.8px; padding:2px 7px; border-radius:3px; background:rgba(0,0,0,.65); color:var(--text-dim); pointer-events:none; }
+  .ic-vstate.on { color:#4ade80; }
+  .ic-body { padding:9px 12px 2px; display:flex; flex-direction:column; gap:5px; min-width:0; }
+  .ic-title { display:flex; align-items:center; min-width:0; }
+  .ic-name { font-size:14px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ic-source { font-size:12px; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ic-chips { display:flex; gap:5px; flex-wrap:wrap; margin-top:2px; }
+  .ic-chip { font-family:'JetBrains Mono',monospace; font-size:11px; padding:1px 7px; border-radius:10px; background:rgba(255,255,255,.04); border:1px solid var(--border); color:#b3b8c9; }
+  .ic-chip.fps { color:var(--warning); border-color:rgba(245,158,11,.3); background:rgba(245,158,11,.06); }
+  .ic-chip.refresh { color:#93c5fd; border-color:rgba(59,130,246,.3); background:rgba(59,130,246,.06); }
+  .ic-controls { display:flex; align-items:center; gap:6px; padding:8px 10px 10px; margin-top:auto; }
+  .ic-enable { display:flex; align-items:center; gap:6px; cursor:pointer; font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:1px; color:var(--text-dim); }
+  .btn-group { display:flex; margin-left:auto; border-radius:var(--radius); box-shadow:var(--hl), 0 1px 2px rgba(0,0,0,.4); }
+  .btn-group button { border-radius:0; margin-left:-1px; box-shadow:none; min-width:28px; padding:5px 6px; }
+  .btn-group button:first-child { border-radius:var(--radius) 0 0 var(--radius); margin-left:0; }
+  .btn-group button:last-child { border-radius:0 var(--radius) var(--radius) 0; }
+  .btn-group button:hover { transform:none; position:relative; z-index:1; }
+  button.ghost-danger:hover { color:var(--danger); border-color:rgba(239,68,68,.5); }
+  button.power { min-width:64px; font-weight:600; }
+  @media (prefers-reduced-motion: reduce) { .mon:hover { transform:none; } }
+  /* Phones: header wraps, tabs scroll sideways instead of squashing */
+  @media (max-width:700px) {
+    .header { flex-wrap:wrap; gap:10px; padding:12px 16px; }
+    .header-left { flex-wrap:wrap; gap:8px; }
+    .header-actions { width:100%; }
+    .header-actions { gap:8px; }
+    .header-actions .server-clock { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; text-align:center; }
+    .wall { grid-template-columns:repeat(2,1fr); gap:8px; }
+    .mon-label .mono { display:none; }
+    .header-actions button { white-space:nowrap; }
+    .tabs { padding:0 8px; overflow-x:auto; }
+    .tab { padding:11px 14px; white-space:nowrap; }
+    .main, .settings-bar { padding-left:16px; padding-right:16px; }
+  }
 </style>
 </head>
 <body>
@@ -322,9 +508,9 @@
      after the main script parses); views check window.lit and fall back to
      full-rebuild rendering if it ever fails to load. -->
 <script type="module">
-  import {html, render} from '/static/lit/lit-html.js';
+  import {html, svg, render, nothing} from '/static/lit/lit-html.js';
   import {repeat} from '/static/lit/directives/repeat.js';
-  window.lit = {html, render, repeat};
+  window.lit = {html, svg, render, nothing, repeat};
   // Anything rendered before this module finished loading gets upgraded now
   if (window.rxRenderBody) window.rxRenderBody();
   if (window.onLitReady) window.onLitReady();
@@ -338,7 +524,7 @@ let state = {
   modal: null,
   tab: 'overview',
   fpsInput: '60',
-  overview: { rx:null, sg:{} },  // fleet receivers payload + signage statuses
+  overview: { rx:null, sg:{}, sgSpan:{}, hist:{rx:[],egress:[],tcp:[]} },  // fleet receivers payload, signage statuses, sparkline history
   mediaFilter: { type:'all', source:'all', usage:'all' },
   // Signage tab
   signageInstId: null,
@@ -1034,54 +1220,67 @@ function renderInstanceCard(inst) {
     ? (previewCache[inst.id]
         ? h('img',{className:'instance-preview','data-preview':inst.id,src:previewCache[inst.id],alt:'Preview'})
         : h('div',{className:'instance-preview-empty','data-preview-slot':inst.id},'Loading…'))
-    : h('div',{className:'instance-preview-empty'},'No preview');
+    : h('div',{className:'instance-preview-empty'},inst.enabled?'OFF AIR':'DISABLED');
   // Thumbnail doubles as the popup opener
   preview.style.cursor = 'pointer';
   preview.title = 'Open live preview window';
   preview.addEventListener('click', ()=>openPreviewPopup(inst));
 
-  return h('div',{className:`instance-card ${inst.running?'running':'stopped'}`},
-    h('div',{className:`instance-status ${inst.running?'on':''}`}),
-    preview,
-    h('div',{className:'instance-info'},
-      h('h3',null,h('span',{className:'instance-id',title:'Instance ID — use in API URLs'},`#${inst.id}`),inst.name),
-      h('div',{className:'meta'},`NDI Source: ${inst.name}`),
+  // Tally frames the whole card: red on program, green on preview
+  const ndi = (inst.running && inst.ndi) || {};
+  const tally = ndi.on_program ? 'pgm' : ndi.on_preview ? 'pvw' : '';
+  const videoPlaying = inst.source_type==='video' && inst.running && inst.video_state==='playing';
+
+  return h('div',{className:`instance-card ${inst.running?'running':'stopped'} ${tally} ${inst.enabled?'':'disabled'}`},
+    h('div',{className:'ic-screen'},
+      preview,
+      // Overlay badges; pointer-events pass through to the thumbnail except on RX
+      h('div',{className:'ic-overlay'},
+        h('span',{className:`ic-state ${inst.running?'on':''}`},inst.running?'LIVE':'OFF'),
+        ndi.on_program ? h('span',{className:'tally pgm',title:'On program (downstream tally)'},'PGM') : null,
+        ndi.on_preview ? h('span',{className:'tally pvw',title:'On preview (downstream tally)'},'PVW') : null,
+        h('span',{className:'ic-spacer'}),
+        ndi.receivers!=null
+          ? h('span',{className:`ic-rx ${ndi.receivers?'active':''}`,
+                      title:'NDI receivers connected — click to list hostnames & IPs',
+                      onClick:e=>{e.stopPropagation();openRxModal(inst);}},
+              `◉ ${ndi.receivers} RX`)
+          : null,
+      ),
+      h('span',{className:'ic-pop'},'⧉ Pop out'),
       inst.source_type==='video' && inst.running
-        ? h('div',{className:'meta',style:{color:inst.video_state==='playing'?'var(--accent)':'var(--text-dim)'}},
-            inst.video_state==='playing'?'▶ PLAYING':'⏸ HOLDING')
-        : null,
-      inst.running && inst.ndi && (inst.ndi.receivers!=null || inst.ndi.on_program || inst.ndi.on_preview)
-        ? h('div',{className:'rx-line'},
-            inst.ndi.receivers!=null
-              ? h('span',{className:`rx-count ${inst.ndi.receivers?'active':''}`,
-                          style:{cursor:'pointer'},
-                          title:'NDI receivers connected — click to list hostnames & IPs',
-                          onClick:()=>openRxModal(inst)},
-                  `◉ ${inst.ndi.receivers} RX`)
-              : null,
-            inst.ndi.on_program ? h('span',{className:'tally pgm',title:'On program (downstream tally)'},'PGM') : null,
-            inst.ndi.on_preview ? h('span',{className:'tally pvw',title:'On preview (downstream tally)'},'PVW') : null,
-          )
+        ? h('span',{className:`ic-vstate ${videoPlaying?'on':''}`},videoPlaying?'▶ PLAYING':'⏸ HOLDING')
         : null,
     ),
-    h('div',{className:'instance-res'},`${inst.width}×${inst.height}`),
-    h('div',{className:'instance-source'},srcLabel),
-    h('div',{className:'instance-fps'},`⚡ ${inst.capture_fps}fps`),
-    h('div',{className:'instance-refresh'},refreshLabel),
-    h('div',{className:'instance-actions'},
-      inst.source_type==='video'
-        ? (inst.running && inst.video_state==='playing'
-            ? h('button',{className:'sm',onClick:()=>videoStop(inst.id),title:'Stop video playback'},'⏹')
-            : h('button',{className:'sm',onClick:()=>videoPlay(inst.id),title:'Play video from start'},'⏵'))
-        : null,
-      h('button',{className:'sm',onClick:()=>openPreviewPopup(inst),title:'Open live preview window'},'⧉'),
-      h('div',{className:`toggle ${inst.enabled?'on':''}`,onClick:()=>toggleEnabled(inst),title:inst.enabled?'Enabled':'Disabled'}),
+    h('div',{className:'ic-body'},
+      h('div',{className:'ic-title'},
+        h('span',{className:'instance-id',title:'Instance ID — use in API URLs'},`#${inst.id}`),
+        h('span',{className:'ic-name',title:`NDI Source: ${inst.name}`},inst.name),
+      ),
+      h('div',{className:'ic-source',title:srcLabel},srcLabel),
+      h('div',{className:'ic-chips'},
+        h('span',{className:'ic-chip'},`${inst.width}×${inst.height}`),
+        h('span',{className:'ic-chip fps'},`⚡ ${inst.capture_fps}fps`),
+        refreshLabel ? h('span',{className:'ic-chip refresh'},refreshLabel) : null,
+      ),
+    ),
+    h('div',{className:'ic-controls'},
+      h('div',{className:'ic-enable',onClick:()=>toggleEnabled(inst),title:inst.enabled?'Enabled — click to disable':'Disabled — click to enable'},
+        h('div',{className:`toggle ${inst.enabled?'on':''}`}),
+      ),
+      h('div',{className:'btn-group'},
+        inst.source_type==='video'
+          ? (videoPlaying
+              ? h('button',{className:'sm',onClick:()=>videoStop(inst.id),title:'Stop video playback'},'⏹')
+              : h('button',{className:'sm',onClick:()=>videoPlay(inst.id),title:'Play video from start'},'⏵'))
+          : null,
+        h('button',{className:'sm',onClick:()=>refreshInstance(inst.id),title:'Refresh'},'↻'),
+        h('button',{className:'sm',onClick:()=>{state.modal=inst;render();},title:'Edit'},'✎'),
+        h('button',{className:'sm ghost-danger',onClick:()=>deleteInstance(inst.id),title:'Delete'},'✕'),
+      ),
       inst.running
-        ? h('button',{className:'sm danger',onClick:()=>stopInstance(inst.id)},'■')
-        : h('button',{className:'sm primary',onClick:()=>startInstance(inst.id)},'▶'),
-      h('button',{className:'sm',onClick:()=>refreshInstance(inst.id),title:'Refresh'},'↻'),
-      h('button',{className:'sm',onClick:()=>{state.modal=inst;render();}},'✎'),
-      h('button',{className:'sm danger',onClick:()=>deleteInstance(inst.id)},'✕'),
+        ? h('button',{className:'sm danger power',onClick:()=>stopInstance(inst.id),title:'Stop output'},'■ Stop')
+        : h('button',{className:'sm primary power',onClick:()=>startInstance(inst.id),title:'Start output'},'▶ Start'),
     ),
   );
 }
@@ -1269,67 +1468,151 @@ async function updateOverview() {
     api('/receivers').catch(()=>null),
     ...sgIds.map(id=>api(`/instances/${id}/signage/status`).catch(()=>null)),
   ]);
-  if (rx) state.overview.rx = rx;
+  if (rx) {
+    state.overview.rx = rx;
+    // Rolling ~5 min history (3s polls) for the KPI sparklines — kept
+    // client-side only, so it starts fresh on every page load
+    const hist = state.overview.hist;
+    const push = (k,v) => { hist[k].push(v); if (hist[k].length > OV_HIST) hist[k].shift(); };
+    push('rx', rx.unique_receivers);
+    push('egress', rx.egress_mbps);
+    push('tcp', rx.total_tcp_mbps);
+  }
   state.overview.sg = {};
-  sgIds.forEach((id,i)=>{ if(sts[i]) state.overview.sg[id]=sts[i]; });
+  sgIds.forEach((id,i)=>{
+    const s = sts[i];
+    if (!s) return;
+    state.overview.sg[id] = s;
+    // The status only carries time remaining: remember the largest value
+    // seen for the current item so the countdown bar has a denominator
+    const st = s.status, cur = st && st.current;
+    const span = state.overview.sgSpan;
+    if (cur && st.remaining_s!=null) {
+      const prev = span[id];
+      span[id] = prev && prev.item===cur.id
+        ? {item:cur.id, max:Math.max(prev.max, st.remaining_s)}
+        : {item:cur.id, max:st.remaining_s};
+    }
+  });
   if (ovEl && document.body.contains(ovEl)) ovRender();
+}
+
+const OV_HIST = 100;
+
+// Inline SVG sparkline: area + line, scaled to the series' own range
+function ovSpark(values, color) {
+  const {svg} = window.lit;
+  const v = values.filter(x=>x!=null);
+  if (v.length < 2) return svg`<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>`;
+  const max = Math.max(...v), min = Math.min(...v);
+  const range = (max - min) || 1;
+  const pts = v.map((x,i)=>`${(i/(v.length-1)*100).toFixed(2)},${(27 - (x-min)/range*24).toFixed(2)}`);
+  return svg`<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none">
+    <polygon points="0,30 ${pts.join(' ')} 100,30" fill=${color} fill-opacity=".14"></polygon>
+    <polyline points=${pts.join(' ')} fill="none" stroke=${color} stroke-width="1.6"
+      vector-effect="non-scaling-stroke" stroke-linejoin="round"></polyline>
+  </svg>`;
 }
 
 function ovRender() {
   if (!ovEl || !window.lit) return;
-  const {html, repeat, render: litRender} = window.lit;
+  const {html, repeat, nothing, render: litRender} = window.lit;
   const insts = state.instances;
   const running = insts.filter(i=>i.running);
   const sgRunning = running.filter(i=>i.source_type==='signage');
   const rx = state.overview.rx;
+  const hist = state.overview.hist;
   const vids = state.media.filter(m=>m.is_video).length;
   const totalSize = state.media.reduce((a,m)=>a+(m.file_size||0),0);
+  const onPgm = running.filter(i=>i.ndi&&i.ndi.on_program).length;
   const go = hash => () => { location.hash = hash; };
+  const thumb = id => id!=null ? `${API}/media/${id}/thumb` : nothing;
+
+  // Monitor wall: running outputs first, then the rest, in their own order
+  const wall = [...running, ...insts.filter(i=>!i.running)];
 
   litRender(html`
-    <div class="tile span2 click" @click=${go('#/instances')}>
-      <div class="t-label">Outputs</div>
-      <div class="t-big ${running.length?'ok':''}">${running.length}<small> / ${insts.length} live</small></div>
-      <div class="t-rows">${repeat(insts, i=>i.id, i=>html`
-        <div class="t-row"><span class="dot ${i.running?'on':''}"></span>
-          <span class="grow">${i.name}</span>
-          <span class="mono">${i.source_type} · ${i.width}×${i.height} · ${i.capture_fps}fps</span></div>`)}
-      </div>
+    <div class="tile kpi click" style="--tint:var(--accent)" @click=${go('#/instances')}>
+      <div class="t-label">Outputs live</div>
+      <div class="t-big ${running.length?'ok':''}">${running.length}<small> / ${insts.length}</small></div>
+      <div class="t-sub">${onPgm ? html`<span class="tally pgm">PGM</span> ${onPgm} on program` : 'none on program'}</div>
+      <div class="kpi-meter"><span style="width:${insts.length?running.length/insts.length*100:0}%"></span></div>
     </div>
-    <div class="tile span2 click" @click=${go('#/signage')}>
-      <div class="t-label">On Air — Signage</div>
-      ${sgRunning.length ? repeat(sgRunning, i=>i.id, i=>{
-        const s = state.overview.sg[i.id];
-        const cur = s && s.status && s.status.current;
-        const next = s && s.status && s.status.next;
-        const rem = s && s.status ? s.status.remaining_s : null;
-        return html`<div class="t-rows" style="margin-top:8px">
-          <div class="t-row"><span class="dot on"></span><span class="grow"><b>${i.name}</b></span>
-            <span class="mono">${rem!=null?Math.max(0,Math.round(rem))+'s left':''}</span></div>
-          <div class="t-row"><span class="grow">${cur?cur.name:(s?'Black (nothing scheduled)':'…')}</span></div>
-          <div class="t-row"><span class="grow" style="color:var(--text-dim)">next: ${next?next.name:'—'}</span></div>
-        </div>`;
-      }) : html`<div class="t-sub">No signage instance running.</div>`}
-    </div>
-    <div class="tile click" @click=${()=>openRxModal(null)}>
+    <div class="tile kpi click" style="--tint:var(--accent)" @click=${()=>openRxModal(null)}>
       <div class="t-label">Receivers</div>
       <div class="t-big ok">${rx?rx.unique_receivers:'…'}</div>
-      <div class="t-sub">${rx?`${rx.total_connections} connection${rx.total_connections===1?'':'s'} — click for details`:'measuring…'}</div>
+      <div class="t-sub">${rx?`${rx.total_connections} connection${rx.total_connections===1?'':'s'}`:'measuring…'}</div>
+      ${ovSpark(hist.rx,'#22c55e')}
     </div>
-    <div class="tile click" @click=${()=>openRxModal(null)}>
-      <div class="t-label">Server Egress</div>
+    <div class="tile kpi click" style="--tint:var(--blue)" @click=${()=>openRxModal(null)}>
+      <div class="t-label">Server egress</div>
       <div class="t-big blue">${rx&&rx.egress_mbps!=null?rx.egress_mbps:'…'}<small> Mbps</small></div>
-      <div class="t-sub">everything leaving the box, incl. UDP/multicast</div>
+      <div class="t-sub">all traffic leaving the box</div>
+      ${ovSpark(hist.egress,'#3b82f6')}
     </div>
-    <div class="tile click" @click=${()=>openRxModal(null)}>
-      <div class="t-label">TCP Media Rate</div>
-      <div class="t-big blue">${rx?rx.total_tcp_mbps:'…'}<small> Mbps</small></div>
-      <div class="t-sub">summed across receivers on TCP transport</div>
+    <div class="tile kpi click" style="--tint:var(--cyan)" @click=${()=>openRxModal(null)}>
+      <div class="t-label">TCP media rate</div>
+      <div class="t-big cyan">${rx?rx.total_tcp_mbps:'…'}<small> Mbps</small></div>
+      <div class="t-sub">summed across TCP receivers</div>
+      ${ovSpark(hist.tcp,'#22d3ee')}
     </div>
-    <div class="tile click" @click=${go('#/media')}>
-      <div class="t-label">Media Library</div>
-      <div class="t-big">${state.media.length}<small> files</small></div>
-      <div class="t-sub">${vids} videos · ${state.media.length-vids} images · ${fmtBytes(totalSize)}</div>
+
+    <div class="tile wall-tile" style="--tint:var(--accent)">
+      <div class="t-head">
+        <div class="t-label">Monitor wall</div>
+        <a class="t-link" href="#/instances">Manage outputs →</a>
+      </div>
+      ${insts.length ? html`<div class="wall">${repeat(wall, i=>i.id, i=>{
+        const ndi = (i.running && i.ndi) || {};
+        const tally = ndi.on_program ? 'pgm' : ndi.on_preview ? 'pvw' : '';
+        const src = i.running && previewCache[i.id] ? previewCache[i.id] : nothing;
+        return html`<div class="mon ${i.running?'on':'off'} ${tally}" title="Open live preview window"
+            @click=${()=>openPreviewPopup(i)}>
+          <div class="mon-screen">
+            <img data-preview=${i.id} src=${src} alt="">
+            <span class="mon-empty">${i.running?'NO SIGNAL':(i.enabled?'OFF AIR':'DISABLED')}</span>
+            <span class="mon-tally">${ndi.on_program?'PGM':ndi.on_preview?'PVW':''}</span>
+          </div>
+          <div class="mon-label">
+            <span class="dot ${i.running?'on':''}"></span>
+            <span class="grow">${i.name}</span>
+            <span class="mono">${ndi.receivers!=null?`◉ ${ndi.receivers}`:`${i.width}×${i.height}`}</span>
+          </div>
+        </div>`;
+      })}</div>` : html`<div class="t-sub">No outputs yet — create one on the Instances tab.</div>`}
+    </div>
+
+    <div class="ov-side">
+      <div class="tile click" style="--tint:var(--danger)" @click=${go('#/signage')}>
+        <div class="t-label">${sgRunning.length?html`<span class="onair-lamp">ON AIR</span>`:nothing} Signage</div>
+        ${sgRunning.length ? repeat(sgRunning, i=>i.id, i=>{
+          const s = state.overview.sg[i.id];
+          const st = s && s.status;
+          const cur = st && st.current, next = st && st.next;
+          const rem = st ? st.remaining_s : null;
+          const span = state.overview.sgSpan[i.id];
+          const pct = rem!=null && span && span.max ? Math.max(0,Math.min(100,(1-rem/span.max)*100)) : 0;
+          return html`<div class="sg-now">
+            <div class="sg-now-name"><b>${i.name}</b>
+              <span class="mono">${rem!=null?Math.max(0,Math.round(rem))+'s':''}</span></div>
+            <div class="sg-now-row">
+              <div class="sg-now-thumb cur">${cur&&cur.media_id!=null?html`<img src=${thumb(cur.media_id)} alt="">`:nothing}</div>
+              <div class="sg-now-text">
+                <div class="now">${cur?cur.name:(s?'Black (nothing scheduled)':'…')}</div>
+                <div class="next">next · ${next?next.name:'—'}</div>
+              </div>
+              <div class="sg-now-thumb nxt">${next&&next.media_id!=null?html`<img src=${thumb(next.media_id)} alt="">`:nothing}</div>
+            </div>
+            <div class="sg-progress"><span style="width:${pct}%"></span></div>
+          </div>`;
+        }) : html`<div class="t-sub">No signage instance running.</div>`}
+      </div>
+      <div class="tile click" style="--tint:var(--purple)" @click=${go('#/media')}>
+        <div class="t-label">Media library</div>
+        <div class="t-big purple">${state.media.length}<small> files</small></div>
+        <div class="t-sub">${vids} videos · ${state.media.length-vids} images · ${fmtBytes(totalSize)}</div>
+        <div class="media-strip">${state.media.slice(0,6).map(m=>html`<img src=${m.thumb_url||`${API}/media/${m.id}/thumb`} alt="" loading="lazy">`)}</div>
+      </div>
     </div>`, ovEl);
 }
 
@@ -1338,7 +1621,7 @@ function renderOverviewPage() {
   main.appendChild(h('div',{className:'section-header'},
     h('div',{className:'section-title'},'Overview'),
   ));
-  ovEl = h('div',{className:'bento'});
+  ovEl = h('div',{className:'bento ov'});
   ovRender();
   main.appendChild(ovEl);
   setTimeout(updateOverview, 0);
