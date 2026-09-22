@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
-A self-hosted Flask application that captures webpages, images, or text via headless Chromium — plus webcams and video files decoded natively — and outputs them as NDI video streams on your network.
+A self-hosted Flask application that captures webpages, images, or text via headless Chromium — plus webcams, video files, and signage playlists decoded and composited natively, with no browser involved — and outputs them as NDI video streams on your network.
 
 ---
 
@@ -27,7 +27,7 @@ A self-hosted Flask application that captures webpages, images, or text via head
 - **Permanent media IDs** — every uploaded file gets a `uid` that is never reused or shifted, even after deletes, so controller cues keyed on it stay correct forever; media addressable by id, uid, or filename
 - **Webcam detection** — auto-detects all connected V4L2 cameras (Linux) and streams them as NDI, bypassing the browser entirely for full camera-native frame rates (30–60fps)
 - **Stable camera identity** — webcams are bound by udev stable ID (USB serial via `/dev/v4l/by-id`, physical port via `/dev/v4l/by-path` as fallback), so each camera keeps its correct NDI output across unplugs, replugs, and reboots even when `/dev/videoN` numbers shuffle
-- **Custom NDI naming** — fully configurable hostname + per-instance stream name (e.g. `PRODUCTION (Lower Third)`)
+- **Custom NDI naming** — per-instance stream name; sources appear as `MACHINE (Instance Name)`, where `MACHINE` is the computer's OS hostname (e.g. `PRODUCTION (Lower Third)` — see [NDI source naming](#ndi-source-naming))
 - **Decoupled FPS** — capture at any rate (e.g. 15fps for a weather radar), NDI always outputs at the global rate (60fps) by duplicating frames
 - **Auto-refresh** — per-instance configurable interval to reload content (e.g. refresh a weather page every 30 minutes)
 - **Media library** — upload, manage, and assign images to instances via a built-in file manager
@@ -368,13 +368,32 @@ DATABASE_URL=sqlite:///ndi_streamer.db
 ### NDI Defaults
 
 ```env
-# This is the hostname prefix for all NDI sources.
-# Streams appear as: NDI_HOSTNAME (Instance Name)
+# Stored as a global setting, but NOT applied to NDI output (see below).
 NDI_HOSTNAME=NDI-STREAMER
 
 # Global NDI output frame rate (all senders output at this rate)
 NDI_OUTPUT_FPS=60
 ```
+
+#### NDI source naming
+
+NDI sources always appear on the network as `MACHINE (Source Name)`. The app
+controls only the part in parentheses — the instance name. The NDI SDK fills in
+`MACHINE` itself from the computer's operating-system hostname, and offers no
+way to override it, so `NDI_HOSTNAME` currently has no effect on what
+receivers see.
+
+To change the machine part, rename the computer and restart the service:
+
+```bash
+# Linux
+sudo hostnamectl set-hostname PRODUCTION
+sudo systemctl restart ndi-streamer
+```
+
+On Windows, rename the PC (Settings → System → About → Rename this PC) and
+reboot. Avoid giving two machines on the same network the same hostname —
+receivers can't tell their sources apart, and mDNS/DHCP/DNS will conflict.
 
 ### Flask
 
@@ -900,20 +919,33 @@ Apr  9 15:01:44 prod-server ndi-streamer: [WARNING] ndi_streamer.events - [INSTA
 │       │                                   │
 │  ┌────▼─────────────────────────────────┐ │
 │  │       Worker Manager + Watchdog      │ │
-│  └────┬────────┬────────┬───────────────┘ │
-└───────┼────────┼────────┼─────────────────┘
-        │        │        │
-   ┌────▼──┐ ┌──▼────┐ ┌─▼─────┐
-   │Worker1│ │Worker2│ │WorkerN│   ← Separate processes
-   │Playw. │ │Playw. │ │Playw. │   ← Headless Chromium
-   │ NDI ──│►│ NDI ──│►│ NDI ──│►  ← NDI senders
-   └───────┘ └───────┘ └───────┘
+│  └────┬──────────────┬──────────────────┘ │
+└───────┼──────────────┼────────────────────┘
+        │              │          ← one separate process per instance
+ ┌──────▼──────┐ ┌─────▼───────────────────┐
+ │ Browser     │ │ Native worker           │
+ │ worker      │ │ (webcam / video /       │
+ │ (webpage /  │ │  signage)               │
+ │ image/text) │ │                         │
+ │ Playwright +│ │ OpenCV/FFmpeg decode,   │
+ │ headless    │ │ numpy letterbox +       │
+ │ Chromium    │ │ crossfade compositing   │
+ │ screenshots │ │ — no browser            │
+ │      │      │ │            │            │
+ │  BGRX frame │ │       BGRX frame        │
+ │      ▼      │ │            ▼            │
+ │  NDI sender │ │       NDI sender        │
+ └──────┬──────┘ └────────────┬────────────┘
+        ▼                     ▼
+  NDI "MACHINE (Instance Name)" on the network
 ```
 
 - Each instance runs in an isolated **process** (not thread) — a crash in one does not affect others
 - The **watchdog thread** monitors processes every 5 seconds and auto-restarts any that crash
-- Playwright captures at the **instance capture FPS**; NDI sends at the **global output FPS** by duplicating frames
-- **Auto-refresh** reloads the page/content at a configurable interval per instance
+- **Browser workers** (webpage, image, text) render in headless Chromium and capture JPEG screenshots at the **instance capture FPS**; NDI sends at the **global output FPS** by duplicating frames
+- **Native workers** never launch a browser: webcams are grabbed via V4L2/OpenCV, and video files and signage playlists are decoded with OpenCV/FFmpeg. Signage stills and video frames are letterboxed onto in-memory canvases, and crossfades are alpha-blended per output frame (`cv2.addWeighted`) straight into the NDI frame buffer — frame timing is set by the worker, not a browser compositor
+- Signage playlists can therefore only contain stills and video files, not live webpages
+- **Auto-refresh** and **browser recycling** apply to browser workers only
 
 ---
 
@@ -1345,7 +1377,13 @@ live reload — the NDI stream never drops.
 - For mostly-static content (images, text), set capture FPS low (5–15) to save CPU
 - Auto-refresh causes a brief content reload; the last frame continues sending during reload
 - The NDI SDK's `clock_video` option paces output to real-time
-- Webcam sources bypass Chromium entirely, so they run at the camera's native rate — the
+- Video, webcam, and signage sources bypass Chromium entirely. Crossfades,
+  scaling, and letterboxing are CPU work (numpy/OpenCV); a GPU is not used
+- Hardware video decode is requested (VAAPI/QSV/NVDEC) but depends on the
+  OpenCV build: the stock `opencv-python-headless` wheel's bundled FFmpeg is
+  typically built without hardware decoders, in which case decoding silently
+  falls back to software. Plan CPU headroom for 4K sources accordingly
+- Webcam sources run at the camera's native rate — the
   limit is the camera hardware and USB bandwidth, not the app. The camera is opened in
   MJPEG mode; uncompressed YUYV would cap out at ~5–10fps at 1080p on USB 2.0
 - Multiple simultaneous cameras: spread them across USB controllers/ports if you hit
