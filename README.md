@@ -1,6 +1,6 @@
 # NDI Streamer
 
-[![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.8.0-blue.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
@@ -1449,7 +1449,7 @@ Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
 
-#### Unreleased
+#### 1.8.0
 
 **Broadcast-console UI, Instances merged into Overview.**
 
