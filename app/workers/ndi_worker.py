@@ -4,6 +4,8 @@ NDI Output Worker
 Each instance runs in its own process:
   1. Launches headless Playwright browser (webpage/image/text sources)
      — or opens a V4L2 webcam via OpenCV (webcam source, no browser at all)
+     — or composites every other output, received back over NDI, into a
+       sectioned grid (multiview source — see multiview.py)
      — or decodes an uploaded video file via OpenCV/FFmpeg (video source,
        with play/stop/load control over shared mp.Values from the API
        process; `load` hot-swaps to a different file without restarting
@@ -598,6 +600,7 @@ class NDIWorker:
         text_settings: Optional[dict] = None,
         video_settings: Optional[dict] = None,
         signage_settings: Optional[dict] = None,
+        multiview_settings: Optional[dict] = None,
         heartbeat: Optional[mp.Value] = None,
         video_cmd: Optional[mp.Value] = None,
         video_state: Optional[mp.Value] = None,
@@ -623,6 +626,7 @@ class NDIWorker:
         self.text_settings = text_settings or {}
         self.video_settings = video_settings or {}
         self.signage_settings = signage_settings or {}
+        self.multiview_settings = multiview_settings or {}
         self._stop_event = mp.Event()
         self._heartbeat = heartbeat  # shared with parent process
         self._video_cmd = video_cmd  # play/stop/load commands from the API process
@@ -636,6 +640,8 @@ class NDIWorker:
         self._preview_dir = preview_dir
         self._preview_interval = preview_interval
         self._last_conn_poll = 0.0
+        self._endpoint_published = False  # NDI port written for multiviews
+        self._inherited_ports = set()  # listen sockets inherited from the web server
         self._parent_pid = None  # set by worker_entry in the child process
         self._last_parent_check = 0.0
 
@@ -901,6 +907,8 @@ class NDIWorker:
         if now - self._last_conn_poll < CONN_STATS_INTERVAL:
             return
         self._last_conn_poll = now
+        if not self._endpoint_published:
+            self._publish_ndi_endpoint()
         try:
             self._ndi_connections.value = int(ndi.send_get_no_connections(ndi_send, 0))
         except Exception:
@@ -916,6 +924,17 @@ class NDIWorker:
             )
         except Exception:
             pass
+
+    def _publish_ndi_endpoint(self):
+        """Write this sender's TCP port(s) to <preview_dir>/<id>.ndi.json so
+        a multiview on this box can connect straight to 127.0.0.1:<port>
+        instead of relying on NDI discovery. Retried on the conn-stats
+        cadence until the SDK has bound its listener; every (re)started
+        worker rewrites it, so a watchdog restart is picked up too."""
+        from app.workers import multiview
+        ports = multiview.own_sender_ports(self._inherited_ports)
+        if ports and multiview.publish_endpoint(self._preview_dir, self.instance_id, ports):
+            self._endpoint_published = True
 
     # ------------------------------------------------------------------
     # NDI lifecycle
@@ -1745,6 +1764,76 @@ class NDIWorker:
     # Main loop
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Multiview loop
+    # ------------------------------------------------------------------
+
+    def _run_multiview_loop(self, frame_buffer, ndi=None, ndi_send=None, video_frame=None):
+        """Composite every other output into a sectioned grid and send it.
+
+        Receivers run on their own threads (one per tile); this loop only
+        re-lays out when the app rewrites the layout file, copies each
+        tile's latest frame into the buffer and sends at output_fps — so
+        the grid is real time and can't hang on a missing source. Pass
+        ndi=None for dummy mode (layout renders, previews only)."""
+        from app.workers.multiview import MultiviewCompositor
+
+        comp = MultiviewCompositor(
+            self.width, self.height,
+            layout_path=self.multiview_settings.get("layout_path", ""),
+            preview_dir=self._preview_dir,
+            bandwidth=self.multiview_settings.get("bandwidth", "highest"),
+            exclude_id=self.instance_id,
+            ndi=ndi,
+            fps=self.output_fps,
+        )
+        output_interval = 1.0 / self.output_fps
+        last_preview_time = 0.0
+        logger.info(
+            f"Multiview worker started: {self.ndi_name} | {self.width}x{self.height} | "
+            f"output={self.output_fps}fps | receive={comp.bandwidth}"
+        )
+        comp.poll_layout(frame_buffer, time.monotonic(), force=True)
+        self._update_heartbeat()
+        try:
+            while not self._stop_event.is_set():
+                frame_start = time.monotonic()
+                comp.poll_layout(frame_buffer, frame_start)
+                comp.compose(frame_buffer, frame_start)
+
+                if ndi is not None:
+                    video_frame.data = frame_buffer
+                    ndi.send_send_video_v2(ndi_send, video_frame)
+
+                pv_interval, pv_hd = self._preview_params(frame_start)
+                if frame_start - last_preview_time >= pv_interval:
+                    self._save_preview(frame_buffer, hd=pv_hd)
+                    last_preview_time = frame_start
+
+                self._update_conn_stats(ndi, ndi_send, frame_start)
+                self._update_heartbeat()
+
+                sleep_time = frame_start + output_interval - time.monotonic()
+                if sleep_time > 0.001:
+                    time.sleep(sleep_time)
+        finally:
+            comp.close()
+
+    def _run_multiview_source(self, frame_buffer, ndi=None, ndi_send=None, video_frame=None):
+        """Run the multiview loop with shared error handling (real or dummy mode)."""
+        try:
+            self._run_multiview_loop(
+                frame_buffer, ndi=ndi, ndi_send=ndi_send, video_frame=video_frame
+            )
+        except ImportError:
+            logger.error(
+                "opencv-python-headless not installed — multiview "
+                f"'{self.ndi_name}' cannot run. Install it and restart."
+            )
+            self._idle_until_stopped()
+        except Exception:
+            logger.exception(f"Worker crashed: {self.ndi_name}")
+
     def run(self):
         """Main loop — runs in a child process."""
         try:
@@ -1754,6 +1843,11 @@ class NDIWorker:
             # Windows may not support these signals in all contexts;
             # graceful shutdown still works via _stop_event.set() from parent.
             pass
+
+        # Sockets inherited from the forked web server, snapshotted before
+        # NDI opens its own — so only the sender's port gets published
+        from app.workers.multiview import own_listen_ports
+        self._inherited_ports = own_listen_ports()
 
         try:
             import NDIlib as ndi
@@ -1818,6 +1912,17 @@ class NDIWorker:
         if self.source_type == "signage":
             try:
                 self._run_signage_source(
+                    frame_buffer, ndi=ndi, ndi_send=ndi_send, video_frame=video_frame
+                )
+            finally:
+                logger.info(f"Stopping worker: {self.ndi_name}")
+                self._destroy_ndi(ndi, ndi_send)
+            return
+
+        # --- Multiview: composite the other outputs, no browser ---
+        if self.source_type == "multiview":
+            try:
+                self._run_multiview_source(
                     frame_buffer, ndi=ndi, ndi_send=ndi_send, video_frame=video_frame
                 )
             finally:
@@ -1918,6 +2023,10 @@ class NDIWorker:
 
         if self.source_type == "signage":
             self._run_signage_source(frame_buffer)
+            return
+
+        if self.source_type == "multiview":
+            self._run_multiview_source(frame_buffer)
             return
 
         from playwright.sync_api import sync_playwright
