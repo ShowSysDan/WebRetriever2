@@ -414,6 +414,12 @@
   .sg-now-text .next { font-size:12px; color:var(--text-dim); margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .sg-progress { height:3px; margin-top:10px; border-radius:2px; background:rgba(255,255,255,.06); overflow:hidden; }
   .sg-progress span { display:block; height:100%; background:linear-gradient(90deg,var(--warning),var(--danger)); box-shadow:0 0 8px rgba(239,68,68,.6); transition:width 2.8s linear; }
+  .ovs-head { justify-content:space-between; }
+  .ovs-head .toggle { margin-left:auto; }
+  .ovs-thumb { display:block; width:100%; aspect-ratio:16/9; object-fit:contain; background:#000; border-radius:6px; margin:4px 0 8px; box-shadow:0 0 0 1px var(--border); }
+  img.ovs-thumb { cursor:zoom-in; }
+  .ovs-thumb.empty { display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--text-dim); }
+  .ovs-err { color:var(--danger); font-size:12px; margin-bottom:6px; }
   .media-strip { display:grid; grid-template-columns:repeat(6,1fr); gap:5px; margin-top:12px; }
   .media-strip img { width:100%; aspect-ratio:1; object-fit:cover; border-radius:4px; background:#000; border:1px solid var(--border); }
   .media-strip:empty { display:none; }
@@ -546,6 +552,9 @@ let state = {
   sgCollapsed: {},      // group id -> collapsed
   rxModal: null,        // {instId, name, data} — receiver list popup
   system: null,         // GET /system — CPU / memory / disk
+  overviewStream: null, // GET /overview — built-in multiview stream state
+  overviewErr: null,    // last error from switching it on
+  overviewThumbT: 0,    // cache-buster for its preview thumbnail
   cpuHover: null,       // index into system.cpu.history under the pointer
 };
 const sgSel = new Set(); // selected signage item ids (multi-select actions)
@@ -1166,7 +1175,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v1.9.0'),
+      h('span',{className:'version'},'v1.10.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
       rxKnown ? h('div',{className:'status-pill rx',
         style:{cursor:'pointer'},
@@ -1585,7 +1594,11 @@ let diskEl = null; // Media Library tab readout (lit, updated in place)
 
 async function updateSystem() {
   if (document.hidden || !['overview','media'].includes(state.tab)) return;
-  const sys = await api('/system').catch(()=>null);
+  const [sys, ovs] = await Promise.all([
+    api('/system').catch(()=>null),
+    state.tab==='overview' ? api('/overview').catch(()=>null) : null,
+  ]);
+  if (ovs && !ovs.error) { state.overviewStream = ovs; state.overviewThumbT = Date.now(); }
   if (!sys) return;
   state.system = sys;
   if (ovEl && document.body.contains(ovEl)) ovScheduleRender();
@@ -1675,6 +1688,51 @@ function cpuTile() {
   </div>`;
 }
 
+// --- Overview stream (built-in multiview of every output) ------------------
+async function toggleOverviewStream(e) {
+  e.stopPropagation();
+  const cur = state.overviewStream;
+  const want = !(cur && cur.enabled);
+  if (!want && !confirm('Turn off the Overview stream?\n\nReceivers watching it will lose the feed.')) return;
+  state.overviewErr = null;
+  if (cur) { state.overviewStream = {...cur, enabled:want}; ovScheduleRender(); }
+  const res = await api('/overview',{method:'POST',body:{enabled:want}}).catch(()=>null);
+  if (res && res.error) state.overviewErr = res.error;
+  else if (res) state.overviewStream = res;
+  // The worker takes a moment to come up — refresh state shortly after
+  setTimeout(updateSystem, 1500);
+  ovScheduleRender();
+}
+
+function overviewStreamTile() {
+  const {html, nothing} = window.lit;
+  const o = state.overviewStream;
+  const on = !!(o && o.enabled), live = !!(o && o.running);
+  const popup = () => {
+    const w = 960, h = Math.round(w * (o.height / o.width)) + 70;
+    window.open('/preview/overview', 'wr2-preview-overview',
+      `width=${w},height=${h},resizable=yes,scrollbars=no,location=no,toolbar=no,menubar=no`);
+  };
+  // New cache-buster per poll (2s), so re-renders in between don't refetch
+  const src = `${API}/instances/0/preview?t=${state.overviewThumbT}`;
+  return html`<div class="tile" style="--tint:var(--accent)">
+    <div class="t-label ovs-head">
+      ${live ? html`<span class="onair-lamp">LIVE</span>` : nothing}
+      <span>Overview stream</span>
+      <div class="toggle ${on?'on':''}" title=${on?'On — click to turn off':'Off — click to turn on'}
+        @click=${toggleOverviewStream}></div>
+    </div>
+    ${state.overviewErr ? html`<div class="ovs-err">${state.overviewErr}</div>` : nothing}
+    ${live
+      ? html`<img class="ovs-thumb" src=${src} alt="Overview stream" title="Open live preview" @click=${popup}
+          @error=${e=>{e.target.style.visibility='hidden';}} @load=${e=>{e.target.style.visibility='';}}>`
+      : html`<div class="ovs-thumb empty">${on ? 'Starting…' : 'Off'}</div>`}
+    <div class="t-sub">${o
+      ? html`Every output in one NDI source, grouped by type${on ? html` · <span class="mono">${o.ndi_source}</span>` : nothing}`
+      : '…'}</div>
+  </div>`;
+}
+
 function ovRender() {
   if (!ovEl || !ovSideEl || !window.lit) return;
   const {html, repeat, nothing, render: litRender} = window.lit;
@@ -1718,6 +1776,7 @@ function ovRender() {
 
     `, ovEl);
   litRender(html`
+      ${overviewStreamTile()}
       ${cpuTile()}
       <div class="tile click" style="--tint:var(--danger)" @click=${go('#/signage')}>
         <div class="t-label">${sgRunning.length?html`<span class="onair-lamp">ON AIR</span>`:nothing} Signage</div>

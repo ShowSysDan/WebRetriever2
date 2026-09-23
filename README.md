@@ -1,6 +1,6 @@
 # NDI Streamer
 
-[![Version](https://img.shields.io/badge/version-1.9.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.10.0-blue.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
@@ -20,6 +20,7 @@ A self-hosted Flask application that captures webpages, images, or text via head
 - **Live signage control** — see what's playing and what's next, and skip ahead with one click or a bare URL (`/api/instances/<id-or-name>/signage/skip`)
 - **Upload progress** — per-file progress readout with % uploaded, server-processing state, and clear error messages
 - **4K-safe video pipeline** — workers decode with all cores (and the box's hardware decoder when present), and every uploaded video is checked against the ideal playback format (H.264/yuv420p MP4 within the output size): anything else is transcoded once, in the background, into a light playback copy; already-perfect files are marked playback-ready untouched. Originals always kept (`VIDEO_OPTIMIZE=oversized` limits conversion to 4K-class files, `off` disables)
+- **Overview stream** — one switch on the Overview tab turns on a built-in multiview: every output in one real-time 1080p30 NDI source (`MACHINE (Overview)`), grouped under a header per source type with each output's name under its tile. Tiles appear, disappear and show STOPPED live as outputs are added, disabled or stopped — no restart. See [Overview Stream](#overview-stream)
 - **Live preview popups** — pop any output into its own confidence-monitor window (click an output card's live screen on the Overview, or **⧉ Popup Preview** on the Signage tab): an MJPEG stream that automatically switches the worker to larger, faster preview frames (854px @ ~4fps) while the window is open, with live state, and now/next for signage
 - **Video playback as NDI** — upload a video (mp4, mov, mkv, webm…) and play it out as an NDI source: play once or loop, hold the last or first frame while stopped, optional autoplay on start
 - **Show-control friendly playback API** — trigger video play/stop/load with a plain GET or POST URL on the same port as the web UI (works from Companion, Crestron, QLab, or a browser bookmark), addressing instances by id or by name
@@ -32,7 +33,7 @@ A self-hosted Flask application that captures webpages, images, or text via head
 - **Auto-refresh** — per-instance configurable interval to reload content (e.g. refresh a weather page every 30 minutes)
 - **Media library** — upload, manage, and assign images and videos to instances and signage playlists via a built-in file manager, with the media drive's free space shown alongside
 - **Live dashboard** — the Overview tab shows every output as a live card (with program/preview tally frames), receiver and bandwidth totals, a CPU graph (core average + per-core load), and what's on air in signage
-- **Crash recovery** — watchdog automatically restarts crashed worker processes
+- **Crash recovery** — every output runs in its own process, so one crashing or hanging never takes down the others; a self-healing watchdog restarts only the failed one
 - **Syslog integration** — structured event logging for all instance lifecycle events, settings changes, and media operations
 - **Systemd service** — runs on boot, restarts on failure, production-ready
 - **Database portable** — SQLite by default, one-line swap to PostgreSQL
@@ -55,6 +56,7 @@ A self-hosted Flask application that captures webpages, images, or text via head
 12. [Architecture](#architecture)
 13. [24/7 Production Reliability](#247-production-reliability)
 14. [Digital Signage](#digital-signage)
+    - [Overview Stream](#overview-stream)
 15. [API Reference](#api-reference)
 16. [Performance Notes](#performance-notes)
 17. [Versioning](#versioning)
@@ -477,6 +479,17 @@ BROWSER_RECYCLE_HOURS=4       # full Chromium restart interval per browser insta
 Preview JPEGs and the signage now-playing status are rewritten constantly,
 so they default to tmpfs (`/dev/shm`) where it exists and fall back to the
 app folder elsewhere (e.g. Windows).
+
+### Overview stream
+
+```env
+OVERVIEW_WIDTH=1920           # canvas size of the built-in multiview
+OVERVIEW_HEIGHT=1080
+OVERVIEW_FPS=30               # its own frame rate (not the global output FPS)
+OVERVIEW_BANDWIDTH=highest    # highest = full-quality real-time tiles; lowest = NDI preview streams (much cheaper)
+```
+
+See [Overview Stream](#overview-stream) for how it works and what it costs.
 
 ### Syslog
 
@@ -954,6 +967,9 @@ SYSLOG_ADDRESS=192.168.1.100:514
 | `SIGNAGE_ITEMS_ADDED` / `SIGNAGE_ITEMS_UPDATED` / `SIGNAGE_ITEMS_DELETED` | Playlist items changed (bulk) |
 | `SIGNAGE_ITEM_DELETED` | Single playlist item removed |
 | `SIGNAGE_GROUP_CREATED` / `SIGNAGE_GROUP_DELETED` | Content group added or removed |
+| `OVERVIEW_STARTED` / `OVERVIEW_STOPPED` | Overview stream switched on or off |
+| `INSTANCE_RESTART_FAILED` / `INSTANCE_KILL_FAILED` | Watchdog couldn't respawn or kill a worker (retried) |
+| `WATCHDOG_ERROR` / `WATCHDOG_REARMED` | Watchdog recovered from an internal error / was restarted by a status poll |
 
 ### Example syslog output
 
@@ -1004,11 +1020,12 @@ Apr  9 15:01:44 prod-server ndi-streamer: [WARNING] ndi_streamer.events - [INSTA
 ```
 
 - Each instance runs in an isolated **process** (not thread) — a crash in one does not affect others
-- The **watchdog thread** monitors processes every 5 seconds and auto-restarts any that crash
+- The **watchdog thread** monitors processes every 5 seconds and auto-restarts any that crash or hang; it is self-healing (see [Output Isolation & Watchdog Self-Healing](#output-isolation--watchdog-self-healing))
 - **Browser workers** (webpage, image, text) render in headless Chromium and capture JPEG screenshots at the **instance capture FPS**; NDI sends at the **global output FPS** by duplicating frames
 - **Native workers** never launch a browser: webcams are grabbed via V4L2/OpenCV, and video files and signage playlists are decoded with OpenCV/FFmpeg. Signage stills and video frames are letterboxed onto in-memory canvases, and crossfades are alpha-blended per output frame (`cv2.addWeighted`) straight into the NDI frame buffer — frame timing is set by the worker, not a browser compositor
 - Signage playlists can therefore only contain stills and video files, not live webpages
 - **Auto-refresh** and **browser recycling** apply to browser workers only
+- The **Overview stream** is one more native worker that only *receives*: it pulls every output back over NDI and composites a grid (see [Overview Stream](#overview-stream)). It cannot take an output down, and an output dying only changes its tile
 
 ---
 
@@ -1079,6 +1096,41 @@ instance with exponential backoff: 5s → 10s → 20s → 40s … capped at 5 mi
 A worker that then stays up for 2+ minutes is considered recovered and the
 backoff resets. Repeated failures log `INSTANCE_RESTART_BACKOFF` warnings to
 syslog so external monitoring can catch chronic flappers.
+
+### Output Isolation & Watchdog Self-Healing
+
+Every output is its own OS process with its own NDI sender, frame buffer and
+browser/decoder. When one output crashes or hangs, the other outputs keep
+streaming and only that output is restarted. What all outputs share is the
+main app process and its single watchdog thread, so the watchdog is built so
+that it can't fail silently:
+
+- **Each instance is checked and restarted on its own.** An error while
+  checking or restarting one output (a failed fork under memory pressure,
+  a kill that throws) is logged and the watchdog carries on with the rest.
+- **A failed respawn retries automatically.** If a new worker can't be
+  started, the output stays tracked with no process. The next pass sees it
+  as crashed and tries again under the normal restart backoff.
+  Logged as `INSTANCE_RESTART_FAILED` (and `INSTANCE_KILL_FAILED` if killing
+  the old worker failed).
+- **The watchdog supervises itself.** An unexpected error anywhere in a pass
+  is logged (`WATCHDOG_ERROR`) and the watchdog resumes after 5 seconds
+  instead of stopping.
+- **Re-armed from polling.** `/api/system` (polled every 2s by the
+  dashboard), `/api/status` and `/api/health` check that the watchdog thread
+  is alive while outputs are running, and restart it if it isn't
+  (`WATCHDOG_REARMED`). Before, a dead watchdog stayed dead until someone
+  pressed Start on an output.
+- `/api/status` and `/api/system` return a `watchdog` object
+  (`running`, `rearmed`, `tracked_instances`, `last_check_age_s`). If
+  `last_check_age_s` goes well past 5s, the watchdog is stuck — for example
+  a single thread busy killing several hung workers one after another, each
+  of which can take up to ~8s.
+
+```
+Apr 10 03:42:15 prod ndi-streamer: [ERROR] [INSTANCE_RESTART_FAILED] id=3 reason=crashed error=OSError(12, 'Cannot allocate memory') (will retry)
+Apr 10 03:42:25 prod ndi-streamer: [INFO] [INSTANCE_RESTARTED] id=3 reason=crashed new_pid=51244
+```
 
 ### Sizing Guide
 
@@ -1244,6 +1296,74 @@ curl http://<host>:5000/api/instances/Lobby%20Signage/signage/status
 curl http://<host>:5000/api/instances/1/signage/skip
 ```
 
+
+## Overview Stream
+
+The **Overview stream** is a built-in multiview. It shows every output in
+one real-time NDI source, `MACHINE (Overview)`, for a confidence monitor, a
+switcher multiviewer input, or a producer's screen.
+
+Switch it on with the **Overview stream** toggle on the Overview tab (the
+switch is remembered across restarts). The tile shows a live thumbnail;
+click it to open a full-size preview window.
+
+### Layout
+
+- Tiles are grouped under a header per source type, in this order: Images,
+  Video, Signage, Webpage, Text, Webcam. Empty sections are left out.
+- Each tile has the output's name underneath. Tiles are 16:9 and all the
+  same size: the largest size that fits everything on the canvas. Sections
+  flow left to right and wrap like lines of text. Sources with a different
+  aspect ratio are letterboxed.
+- **The layout follows your outputs live.** Adding, renaming, deleting,
+  starting or stopping an output updates the Overview within half a second,
+  with no restart and no drop in the stream.
+  - **Stopped** outputs keep their tile, which reads **STOPPED**.
+  - **Disabled** outputs are removed from the Overview.
+  - An output that crashes shows **NO SIGNAL** until the watchdog brings it
+    back. **CONNECTING…** means the output is starting but hasn't sent a
+    frame yet.
+
+### How it works
+
+- It is a worker process like any output, with its own heartbeat, watchdog
+  restarts and preview. **Stop All** leaves it running (it has its own
+  toggle); switching it off stops only the Overview.
+- It only **receives**. There is one NDI receiver thread per tile, at full
+  quality by default. The compositor sends the newest frame of every tile
+  at `OVERVIEW_FPS` (30), so tiles are real time with at most one output
+  frame of latency.
+- **It connects locally, without NDI discovery.** Every worker publishes
+  its NDI sender port. The Overview connects straight to
+  `127.0.0.1:<port>`, and checks that the port still belongs to the right
+  worker process, so a stale entry can never show the wrong output. If that
+  gives no video, it falls back to connecting by NDI name.
+- The name "Overview" is reserved: an output can't be named "Overview",
+  since two NDI sources with one name would be indistinguishable.
+
+### Cost
+
+Receiving at full quality means decoding every output's NDI stream. Also,
+while the Overview is on, every output has at least one receiver, so each
+output encodes its NDI stream even if nothing else is watching it. Measured
+on a 4-core VM with 7 outputs at 720p60 (two videos, two images, signage,
+a webpage and text):
+
+| Setting | Overview process CPU | Overview delivered | Outputs |
+|---------|---------------------|--------------------|---------|
+| `OVERVIEW_BANDWIDTH=highest`, 30fps | ~120% (1.2 cores) | 24fps (box saturated) | dropped from 59 to ~50fps |
+| same, with 3 outputs running | — | 30fps steady | — |
+| `OVERVIEW_BANDWIDTH=lowest` (at 60fps) | ~100% | 50fps | ~56fps |
+
+In short, budget about 0.15–0.2 core per 720p60 output at full quality, on
+top of the outputs themselves. The 4-core test box was simply too small
+for 7 outputs, 3 Chromium browsers and a full-quality Overview. On a box
+without headroom, `OVERVIEW_BANDWIDTH=lowest` uses NDI's low-bandwidth
+preview streams: much cheaper to decode, and fine for a monitor wall.
+
+Each output's receiver list shows the Overview as a connection from
+`127.0.0.1`.
+
 ---
 
 ## API Reference
@@ -1260,7 +1380,17 @@ curl http://<host>:5000/api/instances/1/signage/skip
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/start-all` | Start all enabled instances |
-| `POST` | `/api/stop-all` | Stop all running instances |
+| `POST` | `/api/stop-all` | Stop all running instances (the Overview stream keeps running) |
+
+### Overview Stream
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/overview` | State: `enabled`, `running`, `healthy`, `ndi_source`, `width`/`height`/`fps`, `bandwidth`, `tiles` (enabled outputs shown) |
+| `POST` | `/api/overview` | `{"enabled": true\|false}` — switch it on/off (remembered across restarts). 409 if an output is already named "Overview" |
+| `GET`/`POST` | `/api/overview/on` · `/api/overview/off` | Plain-URL switches for show controllers |
+| `GET` | `/api/instances/0/preview` | Latest Overview thumbnail |
+| `GET` | `/api/overview/preview/stream` | Live MJPEG of the Overview (the popup at `/preview/overview` uses it) |
 
 ### Instances
 
@@ -1419,10 +1549,10 @@ live reload — the NDI stream never drops.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/status` | Running count, totals |
-| `GET` | `/api/health` | Per-instance health with heartbeat age |
+| `GET` | `/api/status` | Running count, totals, and watchdog state (`watchdog`: `running`, `rearmed`, `tracked_instances`, `last_check_age_s`) |
+| `GET` | `/api/health` | Per-instance health with heartbeat age (also re-arms the watchdog if its thread has died) |
 | `GET` | `/api/receivers` | Fleet-wide receiver view: every connection across all running instances, summed TCP bandwidth (`total_tcp_mbps`), unique receiver / connection counts, and total NIC egress (`egress_mbps`, loopback excluded) |
-| `GET` | `/api/system` | Host health: CPU average across all cores (`cpu.avg`), per-core load (`cpu.per_core`), ~5 min history sampled every 2s server-side (`cpu.history`, `[epoch_ms, percent]`), load average, memory, and free/used space on the drive holding `UPLOAD_FOLDER` (`disk`, no path). Needs `psutil` for CPU/memory; disk works without it |
+| `GET` | `/api/system` | Host health: CPU average across all cores (`cpu.avg`), per-core load (`cpu.per_core`), ~5 min history sampled every 2s server-side (`cpu.history`, `[epoch_ms, percent]`), load average, memory, and free/used space on the drive holding `UPLOAD_FOLDER` (`disk`, no path), plus watchdog state (`watchdog`, same shape as `/api/status`). Needs `psutil` for CPU/memory; disk works without it |
 | `GET` | `/api/instances/:ref/receivers` | Who is pulling this source: peer IPs + reverse-DNS hostnames of established NDI connections to the worker's sockets, with the SDK's own count (`sdk_receivers`) for cross-checking |
 | `GET` | `/preview/:id` | Popup live-preview page (HTML) |
 
@@ -1515,6 +1645,59 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.10.0
+
+**Overview stream: a built-in multiview of every output.**
+
+- **One switch on the Overview tab** turns on a new NDI source,
+  `MACHINE (Overview)`: every output in a real-time 1080p30 grid, grouped
+  under a header per source type (Images, Video, Signage, Webpage, Text,
+  Webcam) with each output's name under its tile. The tile on the Overview
+  tab shows a live thumbnail and opens a full-size preview popup. The
+  switch is remembered across restarts. See
+  [Overview Stream](#overview-stream).
+- **The layout follows your outputs live**, with no restart: new outputs
+  appear, disabled ones disappear, stopped ones read STOPPED, and crashed
+  ones read NO SIGNAL until the watchdog restores them.
+- **Outputs stay independent.** The Overview runs in its own worker
+  process and only receives. It has its own watchdog restarts and is left
+  running by Stop All.
+- **Local connections, no discovery needed.** Every worker now publishes
+  its NDI sender port (`<preview folder>/<id>.ndi.json`). The Overview
+  connects to `127.0.0.1:<port>`, checked against the owning process, and
+  falls back to the NDI name.
+- **Tile scaling is cheap.** Frames are halved with a 2× box filter, then
+  given one linear step to size. That gives mipmap quality at about a tenth
+  of the cost of a direct area resize, and 60fps sources only get scaled
+  on the frames the 30fps Overview actually uses.
+- New settings `OVERVIEW_WIDTH`, `OVERVIEW_HEIGHT`, `OVERVIEW_FPS` (30) and
+  `OVERVIEW_BANDWIDTH` (`highest` | `lowest`); new API `/api/overview`
+  (+ `/on`, `/off`, `/preview/stream`); new events `OVERVIEW_STARTED` and
+  `OVERVIEW_STOPPED`.
+- Output names: "Overview" is now reserved. The API also now rejects
+  unknown `source_type` values.
+
+#### 1.9.1
+
+**Watchdog hardening.**
+
+- **One bad restart can no longer disable crash recovery for every
+  output.** Before, an exception while restarting a worker (e.g. a fork
+  failing under memory pressure) killed the single watchdog thread. Running
+  outputs kept streaming, but nothing was auto-restarted again until someone
+  pressed Start. Now each instance is checked and restarted on its own, a
+  failed respawn is retried on the next pass under the normal backoff, and
+  the watchdog loop supervises itself and resumes after unexpected errors.
+- **Self-re-arming.** `/api/system`, `/api/status` and `/api/health` restart
+  the watchdog thread if it has died while outputs are running.
+- **Start/idle race fixed.** When the last output stopped, the watchdog could
+  be exiting at the same moment a new Start saw it as still alive, which
+  left the new output unwatched. The exit decision is now made under the
+  lifecycle lock.
+- New `watchdog` object in `/api/status` and `/api/system`; new syslog events
+  `INSTANCE_RESTART_FAILED`, `INSTANCE_KILL_FAILED`, `WATCHDOG_ERROR`,
+  `WATCHDOG_REARMED`.
 
 #### 1.9.0
 
@@ -2134,6 +2317,7 @@ ndi-streamer/
 │   ├── workers/
 │   │   ├── __init__.py     # Worker manager + watchdog
 │   │   ├── ndi_worker.py   # Playwright / video / signage + NDI worker process
+│   │   ├── multiview.py    # Overview stream: layout, tile receivers, compositor
 │   │   └── webcam_utils.py # V4L2 camera discovery + stable IDs
 │   ├── static/
 │   │   ├── index.html      # Web management UI

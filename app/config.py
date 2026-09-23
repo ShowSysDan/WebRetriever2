@@ -79,6 +79,19 @@ class Config:
     # Browser recycling (hours) — restarts Chromium to prevent memory leaks
     BROWSER_RECYCLE_HOURS = float(os.getenv("BROWSER_RECYCLE_HOURS", "4"))
 
+    # Overview stream (built-in multiview of every output): canvas size, and
+    # receive quality — "highest" pulls every output's full-quality stream
+    # (real time, full resolution); "lowest" uses NDI's low-bandwidth
+    # preview stream, far cheaper to decode, for smaller boxes
+    OVERVIEW_WIDTH = int(os.getenv("OVERVIEW_WIDTH", "1920"))
+    OVERVIEW_HEIGHT = int(os.getenv("OVERVIEW_HEIGHT", "1080"))
+    # A confidence monitor doesn't need 60fps; 30 halves compositing and
+    # tile-scaling work (60fps sources contribute every other frame)
+    OVERVIEW_FPS = max(1, min(60, int(os.getenv("OVERVIEW_FPS", "30"))))
+    OVERVIEW_BANDWIDTH = os.getenv("OVERVIEW_BANDWIDTH", "highest").lower()
+    if OVERVIEW_BANDWIDTH not in ("highest", "lowest"):
+        OVERVIEW_BANDWIDTH = "highest"
+
     # Preview thumbnails for the web UI — pure throwaway state, rewritten up
     # to every 2s per running instance (4/s while a popup preview streams),
     # so they default to tmpfs (/dev/shm) where available: the constant

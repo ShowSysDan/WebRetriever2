@@ -135,7 +135,8 @@ def create_app(config_class=Config):
     # Live preview popup window (one page for all instances; it reads the
     # instance id from its own URL). Registered before the SPA catch-all.
     @app.route("/preview/<int:instance_id>")
-    def preview_popup(instance_id):
+    @app.route("/preview/overview")
+    def preview_popup(instance_id=None):
         return send_from_directory(app.static_folder, "preview.html")
 
     # Serve frontend SPA
@@ -190,5 +191,16 @@ def create_app(config_class=Config):
                     logger.error(f"Failed to auto-start {inst.name}: {e}")
                     inst.running = False
             db.session.commit()
+
+        # Restore the Overview stream if it was switched on
+        settings = GlobalSettings.query.first()
+        if settings and settings.overview_enabled:
+            from app.routes import _start_overview
+            try:
+                err = _start_overview(settings)
+                if err:
+                    logging.getLogger(__name__).error(f"Overview stream not started: {err}")
+            except Exception as e:
+                logging.getLogger(__name__).error(f"Failed to start Overview stream: {e}")
 
     return app
