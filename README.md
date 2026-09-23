@@ -1,6 +1,6 @@
 # NDI Streamer
 
-[![Version](https://img.shields.io/badge/version-1.8.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.9.0-blue.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
@@ -20,7 +20,7 @@ A self-hosted Flask application that captures webpages, images, or text via head
 - **Live signage control** — see what's playing and what's next, and skip ahead with one click or a bare URL (`/api/instances/<id-or-name>/signage/skip`)
 - **Upload progress** — per-file progress readout with % uploaded, server-processing state, and clear error messages
 - **4K-safe video pipeline** — workers decode with all cores (and the box's hardware decoder when present), and every uploaded video is checked against the ideal playback format (H.264/yuv420p MP4 within the output size): anything else is transcoded once, in the background, into a light playback copy; already-perfect files are marked playback-ready untouched. Originals always kept (`VIDEO_OPTIMIZE=oversized` limits conversion to 4K-class files, `off` disables)
-- **Live preview popups** — pop any output into its own confidence-monitor window (click a thumbnail or the ⧉ button): an MJPEG stream that automatically switches the worker to larger, faster preview frames (854px @ ~4fps) while the window is open, with live state, and now/next for signage
+- **Live preview popups** — pop any output into its own confidence-monitor window (click an output card's live screen on the Overview, or **⧉ Popup Preview** on the Signage tab): an MJPEG stream that automatically switches the worker to larger, faster preview frames (854px @ ~4fps) while the window is open, with live state, and now/next for signage
 - **Video playback as NDI** — upload a video (mp4, mov, mkv, webm…) and play it out as an NDI source: play once or loop, hold the last or first frame while stopped, optional autoplay on start
 - **Show-control friendly playback API** — trigger video play/stop/load with a plain GET or POST URL on the same port as the web UI (works from Companion, Crestron, QLab, or a browser bookmark), addressing instances by id or by name
 - **Instant video switching & cueing** — swap the video playing on a running output with a single URL (hot-swap inside the worker, the NDI stream never drops), or pre-load ("cue") the next video on its first frame so the play cue fires with zero latency
@@ -30,7 +30,8 @@ A self-hosted Flask application that captures webpages, images, or text via head
 - **Custom NDI naming** — per-instance stream name; sources appear as `MACHINE (Instance Name)`, where `MACHINE` is the computer's OS hostname (e.g. `PRODUCTION (Lower Third)` — see [NDI source naming](#ndi-source-naming))
 - **Decoupled FPS** — capture at any rate (e.g. 15fps for a weather radar), NDI always outputs at the global rate (60fps) by duplicating frames
 - **Auto-refresh** — per-instance configurable interval to reload content (e.g. refresh a weather page every 30 minutes)
-- **Media library** — upload, manage, and assign images to instances via a built-in file manager
+- **Media library** — upload, manage, and assign images and videos to instances and signage playlists via a built-in file manager, with the media drive's free space shown alongside
+- **Live dashboard** — the Overview tab shows every output as a live card (with program/preview tally frames), receiver and bandwidth totals, a CPU graph (core average + per-core load), and what's on air in signage
 - **Crash recovery** — watchdog automatically restarts crashed worker processes
 - **Syslog integration** — structured event logging for all instance lifecycle events, settings changes, and media operations
 - **Systemd service** — runs on boot, restarts on failure, production-ready
@@ -248,7 +249,10 @@ Required for production:
 
 - Set `SECRET_KEY` to a long random string
   (`python3 -c 'import secrets; print(secrets.token_hex(32))'`).
-- Set `FLASK_ENV=production` (disables the debugger / auto-reloader).
+- Keep `FLASK_ENV=production` (the default). `development` turns on the
+  Werkzeug debugger and reloader, and is ignored unless `FLASK_HOST` is a
+  loopback address — the debugger console is remote code execution for
+  anyone who can reach it.
 - If you are fronting the app with nginx on the same box, set
   `FLASK_HOST=127.0.0.1` so Flask only listens on loopback. If clients will
   hit `:5000` directly on the LAN, leave it at the default `0.0.0.0` and rely
@@ -399,9 +403,10 @@ receivers can't tell their sources apart, and mDNS/DHCP/DNS will conflict.
 
 ```env
 SECRET_KEY=change-me-to-a-random-string
-FLASK_ENV=production
+FLASK_ENV=production          # "development" only takes effect on a loopback FLASK_HOST
 FLASK_HOST=0.0.0.0            # bind address. Set to 127.0.0.1 when behind nginx.
 FLASK_PORT=5000
+ALLOWED_HOSTS=                # optional, e.g. ndi-server,ndi-server.local,10.0.0.5
 ```
 
 > **Security:** the app has no built-in authentication. Anyone who can reach
@@ -409,6 +414,21 @@ FLASK_PORT=5000
 > Restrict access with a firewall (see [Firewall](#firewall)), put it behind
 > nginx with basic auth (see [Reverse proxy with TLS](#reverse-proxy-with-tls)),
 > or set `FLASK_HOST=127.0.0.1` so it's only reachable from the local machine.
+
+> **Built-in browser protections** (no configuration needed): state-changing
+> requests (`POST`/`PUT`/`DELETE`) that a browser labels as coming from
+> another site (`Sec-Fetch-Site: cross-site`/`same-site`, or a foreign
+> `Origin`) are refused with 403, so a web page elsewhere can't use a LAN
+> browser to stop outputs or upload files. Show controllers (Companion,
+> Crestron, QLab, curl) don't send those headers and are unaffected, and the
+> `GET` cue URLs stay open by design. Uploaded media is served with
+> `Content-Security-Policy: sandbox` and a server-derived content type, and
+> webpage sources must be `http://` or `https://` (no `file://`).
+>
+> **`ALLOWED_HOSTS`** (optional) blocks DNS-rebinding attacks: when set, the
+> app answers only requests whose `Host` is in the list (plus `localhost` /
+> `127.0.0.1`). List every name and IP people and controllers use to reach
+> the box — anything else gets 403.
 
 > **SECRET_KEY:** defaults to `dev-secret-key` if unset. The app logs a warning
 > on startup when it sees the default. Always generate a fresh one for
@@ -419,11 +439,44 @@ FLASK_PORT=5000
 ```env
 UPLOAD_FOLDER=app/uploads
 MAX_UPLOAD_SIZE_MB=500
+MAX_IMAGE_MEGAPIXELS=100      # larger images are rejected (8K UHD is ~33 MP)
+MAX_DECK_PAGES=300            # PDF/PowerPoint decks are cut at this many pages
 ```
 
 The media library accepts images (`png jpg jpeg gif bmp webp svg tiff`) and
 videos (`mp4 mov m4v mkv webm avi mpg mpeg`). The default size cap is 500 MB
-to leave room for video files; tune `MAX_UPLOAD_SIZE_MB` to taste.
+to leave room for video files; tune `MAX_UPLOAD_SIZE_MB` to taste. The pixel
+and page caps stop a small crafted file from making the server or a signage
+worker decode gigabytes.
+
+### Video optimization
+
+```env
+VIDEO_OPTIMIZE=all            # all | oversized | off
+VIDEO_TARGET_WIDTH=1920
+VIDEO_TARGET_HEIGHT=1080
+VIDEO_CRF=20                  # x264 quality of the one-time encode
+VIDEO_PRESET=veryfast         # x264 speed of the one-time encode
+```
+
+Needs ffmpeg. `all` converts every video that isn't already H.264/yuv420p
+within the target size into a light playback copy (originals are kept);
+`oversized` converts only videos larger than the target; `off` never
+transcodes.
+
+### Signage and runtime files
+
+```env
+PRESENTATION_RENDER_DPI=150   # PowerPoint/PDF rasterizing (≈2000×1125 per 16:9 slide)
+SIGNAGE_STILL_CACHE_MB=256    # RAM for decoded stills, per signage worker
+BROWSER_RECYCLE_HOURS=4       # full Chromium restart interval per browser instance
+# PREVIEW_FOLDER=/dev/shm/webretriever2_previews
+# SIGNAGE_RUNTIME_FOLDER=/dev/shm/webretriever2_runtime
+```
+
+Preview JPEGs and the signage now-playing status are rewritten constantly,
+so they default to tmpfs (`/dev/shm`) where it exists and fall back to the
+app folder elsewhere (e.g. Windows).
 
 ### Syslog
 
@@ -495,8 +548,8 @@ active on your box with `systemctl show ndi-streamer | grep -E "Protect|Restrict
 | `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` | Only the socket families the app needs (NDI mDNS needs AF_NETLINK on Linux) |
 | `UMask=0077` | New files default to owner-only perms |
 | `LimitNOFILE=65536` | Plenty of fds for many instances |
-| `MemoryMax=4G` | Cgroup-enforced cap; raise for big multi-instance setups |
-| `TasksMax=4096` | Caps total threads/processes |
+| `MemoryMax=12G` | Cgroup-enforced cap; raise for big multi-instance setups |
+| `TasksMax=16384` | Caps total threads/processes |
 
 Advanced hardening not enabled by default (enable cautiously — Playwright and
 Chromium use a wide syscall surface):
@@ -891,6 +944,16 @@ SYSLOG_ADDRESS=192.168.1.100:514
 | `SETTINGS_CHANGED` | Global settings modified |
 | `MEDIA_UPLOADED` | File uploaded to library |
 | `MEDIA_DELETED` | File removed from library |
+| `MEDIA_IN_USE_STOPPED` | Running instances stopped because their media was deleted |
+| `MEDIA_OPTIMIZED` | Background video optimization finished |
+| `VIDEO_PLAY` / `VIDEO_STOP` / `VIDEO_LOAD` | Video playback cue received |
+| `VIDEO_COMMAND` | Other video control command |
+| `SIGNAGE_SKIP` | Signage skipped to the next item |
+| `SIGNAGE_COMMAND` | Other signage control command |
+| `SIGNAGE_DECK_UPLOADED` | PowerPoint/PDF deck converted into a slide group |
+| `SIGNAGE_ITEMS_ADDED` / `SIGNAGE_ITEMS_UPDATED` / `SIGNAGE_ITEMS_DELETED` | Playlist items changed (bulk) |
+| `SIGNAGE_ITEM_DELETED` | Single playlist item removed |
+| `SIGNAGE_GROUP_CREATED` / `SIGNAGE_GROUP_DELETED` | Content group added or removed |
 
 ### Example syslog output
 
@@ -1190,7 +1253,7 @@ curl http://<host>:5000/api/instances/1/signage/skip
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/settings` | Get global settings |
-| `PUT` | `/api/settings` | Update hostname / output FPS |
+| `PUT` | `/api/settings` | Update hostname / output FPS (1–120) |
 
 ### Global Controls
 
@@ -1216,8 +1279,9 @@ curl http://<host>:5000/api/instances/1/signage/skip
 
 The built-in popup viewer at `/preview/:id` wraps the stream with the
 instance's name, live/stopped state, auto-reconnect, and — for signage —
-a now-playing / up-next footer. Open it from the UI (click any preview
-thumbnail or the ⧉ button) or bookmark the URL directly.
+a now-playing / up-next footer. Open it from the UI (click an output card's
+screen on the Overview, or ⧉ Popup Preview on the Signage tab) or bookmark
+the URL directly.
 
 ### Media Library
 
@@ -1266,6 +1330,7 @@ that can fire a URL can drive playback:
 |--------|----------|-------------|
 | `GET`/`POST` | `/api/instances/:ref/video/play` | Play the assigned video from the first frame (auto-starts the NDI output if needed) |
 | `GET`/`POST` | `/api/instances/:ref/video/play/:media` | Switch to a different video and play it immediately (hot-swap, no restart) |
+| `GET`/`POST` | `/api/instances/:ref/video/load` | Cue the instance's assigned video (or `?media=`) on its first frame |
 | `GET`/`POST` | `/api/instances/:ref/video/load/:media` | Cue a video: load it and hold on its first frame, so a later `play` starts instantly |
 | `GET`/`POST` | `/api/instances/:ref/video/stop` | Stop playback and hold the configured frame |
 | `GET` | `/api/instances/:ref/video/status` | Playback state + loop/hold/autoplay + loaded media |
@@ -1341,10 +1406,7 @@ Behavior notes:
 | `DELETE` | `/api/signage/groups/:id` | Delete group + its items; `?keep_items=1` ungroups instead |
 | `POST` | `/api/instances/:id/signage/reorder` | Persist a full ordering — `{"order":[{"type":"item"\|"group","id":n},..], "group_items":{"<gid>":[item ids]}}` |
 | `POST` | `/api/instances/:id/signage/upload` | Upload straight into the playlist (multipart); ppt/pptx/odp/pdf become a group of slide images |
-| `GET` | `/api/receivers` | Fleet-wide receiver view: every connection across all running instances, summed TCP bandwidth (`total_tcp_mbps`), unique receiver / connection counts, and total NIC egress (`egress_mbps`, loopback excluded) |
-| `GET` | `/api/system` | Host health: CPU average across all cores (`cpu.avg`), per-core load (`cpu.per_core`), ~5 min history sampled every 2s server-side (`cpu.history`, `[epoch_ms, percent]`), load average, memory, and free/used space on the drive holding `UPLOAD_FOLDER` (`disk`). Needs `psutil` for CPU/memory; disk works without it |
-| `GET` | `/api/instances/:ref/receivers` | Who is pulling this source: peer IPs + reverse-DNS hostnames of established NDI connections to the worker's sockets, with the SDK's own count (`sdk_receivers`) for cross-checking |
-| `GET`/`POST` | `/api/instances/:ref/signage/status` | Now playing / up next / seconds remaining (`:ref` = id or name) |
+| `GET` | `/api/instances/:ref/signage/status` | Now playing / up next / seconds remaining (`:ref` = id or name) |
 | `GET` | `/api/instances/:ref/signage/events` | Real-time now-playing stream (Server-Sent Events) — pushes the status payload on every change; usable from any `EventSource` client |
 | `GET`/`POST` | `/api/instances/:ref/signage/skip` | Crossfade to the next item now |
 
@@ -1359,6 +1421,10 @@ live reload — the NDI stream never drops.
 |--------|----------|-------------|
 | `GET` | `/api/status` | Running count, totals |
 | `GET` | `/api/health` | Per-instance health with heartbeat age |
+| `GET` | `/api/receivers` | Fleet-wide receiver view: every connection across all running instances, summed TCP bandwidth (`total_tcp_mbps`), unique receiver / connection counts, and total NIC egress (`egress_mbps`, loopback excluded) |
+| `GET` | `/api/system` | Host health: CPU average across all cores (`cpu.avg`), per-core load (`cpu.per_core`), ~5 min history sampled every 2s server-side (`cpu.history`, `[epoch_ms, percent]`), load average, memory, and free/used space on the drive holding `UPLOAD_FOLDER` (`disk`, no path). Needs `psutil` for CPU/memory; disk works without it |
+| `GET` | `/api/instances/:ref/receivers` | Who is pulling this source: peer IPs + reverse-DNS hostnames of established NDI connections to the worker's sockets, with the SDK's own count (`sdk_receivers`) for cross-checking |
+| `GET` | `/preview/:id` | Popup live-preview page (HTML) |
 
 ---
 
@@ -1450,6 +1516,53 @@ Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
 
+#### 1.9.0
+
+**CPU graph, disk readout, security hardening.**
+
+- **CPU graph and disk readout.** A CPU tile heads the Overview side
+  column: the average across all cores on a fixed 0–100% graph of the
+  last 5 minutes (hover for the value at any point), a bar per core, load
+  average and RAM, with a "High load" flag at 85%+. CPU is sampled every
+  2s by one background thread on the server (`GET /api/system`), so the
+  graph is already full when a page opens and every viewer sees the same
+  curve. Free space on the media drive shows on the Media Library tile
+  and tab, flagged "Low space" under 10% free.
+- **Security hardening** (from a full audit of the app):
+  - **Cross-site request guard.** `POST`/`PUT`/`DELETE` requests that a
+    browser marks as coming from another site (`Sec-Fetch-Site`, or a
+    foreign `Origin`) get 403, so a web page elsewhere can't use a LAN
+    browser to stop outputs or plant uploads. Show controllers send no such
+    headers and are unaffected; the `GET` cue URLs stay open by design.
+    New optional `ALLOWED_HOSTS` closes DNS rebinding.
+  - **Uploads can't run as pages.** The served content type now comes from
+    the file extension, never the uploading client (a spoofed `text/html`
+    was served back as HTML), and media files carry
+    `Content-Security-Policy: sandbox` + `nosniff`, which also defuses
+    scripted SVGs.
+  - **Webpage sources must be `http(s)://`.** `file://` URLs could render
+    local files (`.env`, the database) onto the preview and NDI output;
+    the API rejects them and the worker refuses any already saved.
+  - **Resource limits.** Width/height (16–7680 × 16–4320), capture and
+    output fps (1–120) and refresh interval are range-checked; images above
+    `MAX_IMAGE_MEGAPIXELS` (100) are rejected, including decompression
+    bombs; decks are cut at `MAX_DECK_PAGES` (300).
+  - **Debugger can't be exposed.** `FLASK_ENV` is now actually read (it
+    previously had no effect), defaults to `production`, and `development`
+    is ignored unless `FLASK_HOST` is loopback. `.env.example` no longer
+    ships `development`.
+  - `/api/system` no longer returns filesystem paths; baseline
+    `X-Frame-Options`, `Referrer-Policy` and `nosniff` headers on every
+    response; `setup.sh` writes its build log to an unpredictable temp file.
+  - Dependencies: Flask 3.1.3, Werkzeug 3.1.8, Pillow 11.3.0 (patch
+    releases).
+- **The edit dialog shows validation errors** instead of closing as if the
+  save worked.
+- **Docs**: configuration reference for every environment variable, API
+  tables corrected (missing `video/load` route, `signage/status` is GET
+  only, host-health rows moved to System), systemd limits, syslog events and
+  project layout brought up to date.
+
 #### 1.8.0
 
 **Broadcast-console UI, Instances merged into Overview.**
@@ -1469,14 +1582,6 @@ Current version is tracked in the `VERSION` file at the project root.
   or Stop All) confirms, and names any output that is on program right
   now; disabling confirms and explains that a running output keeps
   running until stopped.
-- **CPU graph and disk readout.** A CPU tile heads the Overview side
-  column: the average across all cores on a fixed 0–100% graph of the
-  last 5 minutes (hover for the value at any point), a bar per core, load
-  average and RAM, with a "High load" flag at 85%+. CPU is sampled every
-  2s by one background thread on the server (`GET /api/system`), so the
-  graph is already full when a page opens and every viewer sees the same
-  curve. Free space on the media drive shows on the Media Library tile
-  and tab, flagged "Low space" under 10% free.
 - **Broadcast-console styling.** Raised surfaces with lit top edges and
   deeper shadows, a visible aurora + grid backdrop, per-tile color tints,
   glowing tallies and pulsing live dots, machined buttons and toggles.
@@ -2024,11 +2129,18 @@ ndi-streamer/
 │   │   └── __init__.py     # SQLAlchemy models
 │   ├── routes/
 │   │   └── __init__.py     # REST API endpoints
+│   ├── sysstats.py         # CPU / memory / disk sampler for /api/system
+│   ├── transcode.py        # Background video optimizer (ffmpeg)
 │   ├── workers/
 │   │   ├── __init__.py     # Worker manager + watchdog
-│   │   └── ndi_worker.py   # Playwright + NDI worker process
+│   │   ├── ndi_worker.py   # Playwright / video / signage + NDI worker process
+│   │   └── webcam_utils.py # V4L2 camera discovery + stable IDs
 │   ├── static/
-│   │   └── index.html      # Web management UI
+│   │   ├── index.html      # Web management UI
+│   │   ├── preview.html    # Popup live-preview window
+│   │   └── lit/            # Vendored lit-html (no CDN)
+│   ├── thumbs/             # Generated media poster thumbnails
+│   ├── signage_state/      # Generated playlist files + impression logs
 │   └── uploads/            # Media library storage
 │       └── .gitkeep
 └── migrations/             # Alembic migrations (after first migrate)

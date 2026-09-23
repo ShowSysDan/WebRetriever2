@@ -15,6 +15,14 @@ class Config:
     NDI_OUTPUT_FPS = int(os.getenv("NDI_OUTPUT_FPS", "60"))
     FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
     FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
+    # "development" enables the Werkzeug debugger + reloader, but run.py only
+    # honours it on a loopback FLASK_HOST (the debugger console is remote
+    # code execution for anyone who can reach it)
+    FLASK_ENV = os.getenv("FLASK_ENV", "production")
+    # Optional DNS-rebinding guard: comma-separated hostnames/IPs the UI and
+    # API may be reached by (e.g. "ndi-server,ndi-server.local,10.0.0.5").
+    # Empty = accept any Host header (the default, for LAN convenience).
+    ALLOWED_HOSTS = [h.strip().lower() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()]
 
     # Uploads — always resolve to absolute path so Flask's send_from_directory works
     _upload_folder = os.getenv("UPLOAD_FOLDER", os.path.join(BASE_DIR, "uploads"))
@@ -29,6 +37,12 @@ class Config:
     PRESENTATION_EXTENSIONS = {"ppt", "pptx", "odp", "pdf"}
     # DPI used when rasterizing presentation slides/PDF pages
     PRESENTATION_RENDER_DPI = int(os.getenv("PRESENTATION_RENDER_DPI", "150"))
+    # Upper bounds on uploaded content, so a small crafted file can't make the
+    # server (or a signage worker) decode gigabytes: images above this many
+    # megapixels are rejected (8K UHD is ~33 MP), decks are cut at this many
+    # pages
+    MAX_IMAGE_MEGAPIXELS = int(os.getenv("MAX_IMAGE_MEGAPIXELS", "100"))
+    MAX_DECK_PAGES = int(os.getenv("MAX_DECK_PAGES", "300"))
 
     # Signage state that must SURVIVE a reboot (playlist JSON handed to
     # workers, impression logs) — generated files, not user content

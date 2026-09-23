@@ -705,7 +705,9 @@ async function _updatePreviews() {
 
 // Actions
 async function saveSettings() {
-  state.settings = await api('/settings', { method:'PUT', body:{ output_fps:parseInt(state.fpsInput)||60 }});
+  const res = await api('/settings', { method:'PUT', body:{ output_fps:parseInt(state.fpsInput)||60 }});
+  if (res && res.error) { alert(res.error); return; }
+  state.settings = res;
   render();
 }
 // Frequently-clicked controls update the UI optimistically: flip local
@@ -758,8 +760,10 @@ async function toggleEnabled(inst) {
   await api(`/instances/${inst.id}`,{method:'PUT',body:{enabled:inst.enabled}}); await loadData();
 }
 async function saveInstance(data, id) {
-  if(id) await api(`/instances/${id}`,{method:'PUT',body:data});
-  else await api('/instances',{method:'POST',body:data});
+  const res = id ? await api(`/instances/${id}`,{method:'PUT',body:data})
+                 : await api('/instances',{method:'POST',body:data});
+  // Validation errors (bad URL, out-of-range size) keep the dialog open
+  if (res && res.error) { alert(res.error); return; }
   state.modal=null; state.modalDefaults=null; await loadData(true);
 }
 // --- Uploads with progress ---------------------------------------------
@@ -1162,7 +1166,7 @@ function renderHeader() {
   return h('div',{className:'header'},
     h('div',{className:'header-left'},
       h('div',{className:'logo'},'⬡ Web',h('span',null,'Retriever V2')),
-      h('span',{className:'version'},'v1.8.0'),
+      h('span',{className:'version'},'v1.9.0'),
       h('div',{className:`status-pill ${run?'':'stopped'}`}, run?`● ${run} LIVE`:'○ STOPPED'),
       rxKnown ? h('div',{className:'status-pill rx',
         style:{cursor:'pointer'},
@@ -1503,6 +1507,16 @@ function renderMediaPage() {
 let ovEl = null;      // KPI strip
 let ovSideEl = null;  // On Air + media column
 
+// Coalesce Overview re-renders to at most one per animation frame: the CPU
+// graph's pointermove can fire 100+ times a second, and polls landing in
+// the same frame share one render
+let ovRenderQueued = false;
+function ovScheduleRender() {
+  if (ovRenderQueued) return;
+  ovRenderQueued = true;
+  requestAnimationFrame(() => { ovRenderQueued = false; ovRender(); });
+}
+
 function fmtBytes(n) {
   if (n >= 1099511627776) return (n/1099511627776).toFixed(2)+' TB';
   if (n >= 1073741824) return (n/1073741824).toFixed(1)+' GB';
@@ -1544,7 +1558,7 @@ async function updateOverview() {
         : {item:cur.id, max:st.remaining_s};
     }
   });
-  if (ovEl && document.body.contains(ovEl)) ovRender();
+  if (ovEl && document.body.contains(ovEl)) ovScheduleRender();
 }
 
 const OV_HIST = 100;
@@ -1574,7 +1588,7 @@ async function updateSystem() {
   const sys = await api('/system').catch(()=>null);
   if (!sys) return;
   state.system = sys;
-  if (ovEl && document.body.contains(ovEl)) ovRender();
+  if (ovEl && document.body.contains(ovEl)) ovScheduleRender();
   if (window.lit && diskEl && document.body.contains(diskEl)) window.lit.render(diskView(), diskEl);
 }
 
@@ -1586,7 +1600,7 @@ function diskView() {
     <span class="disk-free">…</span></div><div class="disk-meter"></div></div>`;
   const usable = d.used + d.free;
   const low = usable && d.free / usable < 0.1;
-  return html`<div class="disk ${low?'low':''}" title="Media drive: ${d.path}">
+  return html`<div class="disk ${low?'low':''}" title="Drive holding the media library">
     <div class="disk-head">
       <span class="disk-label">Disk</span>
       ${low ? html`<span class="status-warn">⚠ Low space</span>` : nothing}
@@ -1619,9 +1633,9 @@ function cpuChart(cpu) {
     let best = 0;
     for (let i = 1; i < hist.length; i++)
       if (Math.abs(hist[i][0]-t) < Math.abs(hist[best][0]-t)) best = i;
-    if (best !== state.cpuHover) { state.cpuHover = best; ovRender(); }
+    if (best !== state.cpuHover) { state.cpuHover = best; ovScheduleRender(); }
   };
-  const onLeave = () => { state.cpuHover = null; ovRender(); };
+  const onLeave = () => { state.cpuHover = null; ovScheduleRender(); };
   const ago = ms => { const s = Math.round(ms/1000); return s < 5 ? 'now' : s < 60 ? `${s}s ago` : `${Math.floor(s/60)}m ${s%60}s ago`; };
   return html`<div class="cpu-chart" @pointermove=${onMove} @pointerleave=${onLeave}>
     <svg viewBox="0 0 ${CPU_W} ${CPU_H}" preserveAspectRatio="none" aria-hidden="true">
