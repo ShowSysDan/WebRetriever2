@@ -733,6 +733,15 @@ class NDIWorker:
             page.set_content(img_html)
             page.wait_for_load_state("networkidle")
         else:  # webpage
+            # The API only accepts http(s) URLs; re-check here so rows saved
+            # before that rule (e.g. file:///…) can't render local files
+            from urllib.parse import urlsplit
+            if urlsplit(str(self.source_value).strip()).scheme.lower() not in ("http", "https"):
+                logger.error(f"{self.ndi_name}: refusing non-http(s) webpage URL")
+                page.set_content("<body style='background:#000;color:#f55;font:32px sans-serif;"
+                                 "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>"
+                                 "Webpage URL must be http:// or https://</body>")
+                return
             if reload:
                 page.reload(wait_until="networkidle", timeout=30000)
             else:

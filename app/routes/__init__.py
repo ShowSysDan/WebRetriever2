@@ -26,6 +26,7 @@ from app.models import (
     SignageGroup, SignageItem,
 )
 from app.workers import manager, server_egress_mbps
+from app import sysstats
 from app.transcode import transcoder, ffmpeg_available
 from app.logging_config import log_event
 
@@ -388,6 +389,8 @@ def update_settings():
             fps = int(data["output_fps"])
         except (ValueError, TypeError):
             return jsonify({"error": "output_fps must be a number"}), 400
+        if not 1 <= fps <= 120:
+            return jsonify({"error": "output_fps must be between 1 and 120"}), 400
         if fps != settings.output_fps:
             settings.output_fps = fps
             changed.append(f"output_fps={fps}")
@@ -456,6 +459,37 @@ def list_instances():
     return jsonify([_instance_dict(i) for i in instances])
 
 
+# Bounds for instance geometry/timing: generous for real rigs (8K canvases,
+# 120fps), but tight enough that a typo or a hostile request can't make a
+# worker allocate a 40 GB frame buffer
+_INSTANCE_INT_BOUNDS = {
+    "width": (16, 7680), "height": (16, 4320),
+    "capture_fps": (1, 120), "refresh_interval": (0, 7 * 24 * 3600),
+}
+
+
+def _validate_instance_fields(data, source_type):
+    """Return an error message for out-of-range or unsafe instance fields in
+    `data` (only the keys present are checked), else None."""
+    for field, (lo, hi) in _INSTANCE_INT_BOUNDS.items():
+        if field in data:
+            try:
+                v = int(data[field])
+            except (TypeError, ValueError):
+                return f"{field} must be a whole number"
+            if not lo <= v <= hi:
+                return f"{field} must be between {lo} and {hi}"
+            data[field] = v
+    if source_type == "webpage" and data.get("source_value"):
+        # Only real web URLs: file:// (or chrome:// etc.) would let the
+        # headless browser render local files — .env, the database — onto
+        # the preview and the NDI output
+        from urllib.parse import urlsplit
+        if urlsplit(str(data["source_value"]).strip()).scheme.lower() not in ("http", "https"):
+            return "Webpage URL must start with http:// or https://"
+    return None
+
+
 @api.route("/instances", methods=["POST"])
 def create_instance():
     data = request.get_json()
@@ -466,6 +500,9 @@ def create_instance():
 
     if OutputInstance.query.filter_by(name=data["name"]).first():
         return jsonify({"error": "Name already exists"}), 409
+    err = _validate_instance_fields(data, data.get("source_type", "webpage"))
+    if err:
+        return jsonify({"error": err}), 400
 
     inst = OutputInstance(
         name=data["name"],
@@ -509,6 +546,9 @@ def update_instance(instance_id):
     data = request.get_json()
     if not data:
         return jsonify({"error": "JSON body required"}), 400
+    err = _validate_instance_fields(data, data.get("source_type", inst.source_type))
+    if err:
+        return jsonify({"error": err}), 400
     was_running = manager.is_running(inst.id)
     needs_restart = False
     signage_dirty = False
@@ -952,6 +992,28 @@ def list_media():
     return jsonify(out)
 
 
+# Content types for every allow-listed media extension — explicit, so
+# playback doesn't depend on the host's mime.types (minimal Linux images and
+# Windows often lack mkv/m4v/webm)
+_MEDIA_MIME = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "gif": "image/gif", "bmp": "image/bmp", "webp": "image/webp",
+    "svg": "image/svg+xml", "tiff": "image/tiff",
+    "mp4": "video/mp4", "m4v": "video/mp4", "mov": "video/quicktime",
+    "mkv": "video/x-matroska", "webm": "video/webm", "avi": "video/x-msvideo",
+    "mpg": "video/mpeg", "mpeg": "video/mpeg",
+}
+
+
+def _mime_for(filename):
+    """Content type for a stored media file, from its extension."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext in _MEDIA_MIME:
+        return _MEDIA_MIME[ext]
+    import mimetypes
+    return mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
 def _probe_media(filepath, ext):
     """(width, height, duration_s) probed from an image or video on disk."""
     width_px = height_px = duration_s = None
@@ -973,6 +1035,10 @@ def _probe_media(filepath, ext):
         try:
             with PILImage.open(filepath) as img:
                 width_px, height_px = img.size
+        except PILImage.DecompressionBombError:
+            # Pillow refuses to even open it (>2x its pixel limit) — report
+            # an oversize so the upload's megapixel cap rejects it
+            width_px = height_px = 100_000
         except Exception:
             pass
     return width_px, height_px, duration_s
@@ -983,14 +1049,22 @@ def _create_media_record(filepath, unique_name, original_name, ext, mime_type=No
     """Create + commit a MediaFile row for a file already in the uploads dir.
     Returns (media, None) on success, (None, (response, status)) on failure —
     the on-disk file is removed on failure so nothing is orphaned."""
-    if not mime_type or mime_type == "application/octet-stream":
-        # Some clients don't send a useful content type — guess from the
-        # extension so browsers can play videos served back to them
-        import mimetypes
-        mime_type = mimetypes.guess_type(original_name)[0] or mime_type
+    # The type is derived from the (allow-listed) extension, never trusted
+    # from the client: a spoofed "text/html" would otherwise be served back
+    # verbatim and run as a page on this origin
+    mime_type = _mime_for(original_name)
 
     file_size = os.path.getsize(filepath)
     width_px, height_px, duration_s = _probe_media(filepath, ext)
+    max_mp = current_app.config.get("MAX_IMAGE_MEGAPIXELS", 100)
+    if (ext not in current_app.config.get("VIDEO_EXTENSIONS", set())
+            and width_px and height_px and width_px * height_px > max_mp * 1_000_000):
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+        return None, (jsonify({"error": f"Image is {width_px}×{height_px} — larger than the "
+                                        f"{max_mp} megapixel limit (MAX_IMAGE_MEGAPIXELS)"}), 413)
 
     media = MediaFile(
         uid=generate_media_uid(),
@@ -1200,11 +1274,10 @@ def serve_media_file(media_id):
     ?original=1 fetches the untouched upload."""
     media = MediaFile.query.get_or_404(media_id)
     upload_dir = current_app.config["UPLOAD_FOLDER"]
-    if request.args.get("original"):
-        return send_from_directory(upload_dir, media.filename, mimetype=media.mime_type)
-    filename = media.playback_filename
-    mime = "video/mp4" if filename != media.filename else media.mime_type
-    return send_from_directory(upload_dir, filename, mimetype=mime)
+    # Type from the stored (server-generated) filename, not the DB column —
+    # rows uploaded before 1.9.0 may hold a client-supplied type
+    filename = media.filename if request.args.get("original") else media.playback_filename
+    return send_from_directory(upload_dir, filename, mimetype=_mime_for(filename))
 
 
 @api.route("/media/<int:media_id>", methods=["DELETE"])
@@ -1583,7 +1656,8 @@ def _convert_presentation(src_path, ext):
             )
         dpi = current_app.config.get("PRESENTATION_RENDER_DPI", 150)
         result = subprocess.run(
-            ["pdftoppm", "-png", "-r", str(dpi), pdf_path,
+            ["pdftoppm", "-png", "-r", str(dpi),
+             "-l", str(current_app.config.get("MAX_DECK_PAGES", 300)), pdf_path,
              os.path.join(workdir, "slide")],
             capture_output=True, timeout=300,
         )
@@ -1760,6 +1834,17 @@ def all_receivers():
         "total_tcp_mbps": round(total_mbps, 2),
         "egress_mbps": server_egress_mbps(),
     })
+
+
+@api.route("/system", methods=["GET"])
+def system_stats():
+    """Host health for the dashboard: CPU (average across cores, per-core,
+    ~5 min history sampled every 2s server-side), memory, and space on the
+    drive holding the media library."""
+    snap = sysstats.snapshot(current_app.config["UPLOAD_FOLDER"])
+    if snap.get("disk"):
+        snap["disk"].pop("path", None)  # don't hand out filesystem layout
+    return jsonify(snap)
 
 
 @api.route("/instances/<ref>/receivers", methods=["GET"])

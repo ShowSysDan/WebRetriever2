@@ -23,19 +23,22 @@ if __name__ == "__main__":
 
     host = app.config.get("FLASK_HOST", "0.0.0.0")
     port = app.config.get("FLASK_PORT", 5000)
-    debug = app.config.get("FLASK_ENV") == "development"
-
     logger = logging.getLogger("ndi-streamer")
+    debug = app.config.get("FLASK_ENV") == "development"
+    # The Werkzeug debugger is a remote Python console: never serve it on a
+    # network interface, whatever .env says
+    if debug and host not in ("127.0.0.1", "localhost", "::1"):
+        logger.error(
+            "FLASK_ENV=development ignored: the debugger is only enabled on a "
+            "loopback FLASK_HOST (current host=%s). Running in production mode.",
+            host,
+        )
+        debug = False
+
     if app.config.get("SECRET_KEY") == "dev-secret-key":
         logger.warning(
             "SECRET_KEY is using the default value. Set SECRET_KEY in .env "
             "to a long random string before running in production."
-        )
-    if debug and host not in ("127.0.0.1", "localhost", "::1"):
-        logger.warning(
-            "FLASK_ENV=development with host=%s exposes the Flask debugger "
-            "on the network. Set FLASK_ENV=production in .env for deployment.",
-            host,
         )
 
     app.run(host=host, port=port, debug=debug)

@@ -32,6 +32,62 @@ def _add_missing_columns():
     db.session.commit()
 
 
+def _install_security_hooks(app):
+    """Browser-facing hardening for an auth-less LAN tool.
+
+    Show controllers (Companion, Crestron, QLab, curl) send plain requests
+    with no Origin / Sec-Fetch-* headers, so they are unaffected. What this
+    stops is a web page on some OTHER site driving the API through a LAN
+    browser (CSRF: auto-submitted forms, fetch with a simple content type)
+    and, when ALLOWED_HOSTS is set, DNS rebinding. The documented GET cue
+    URLs stay open on purpose — they are the show-control interface."""
+    from urllib.parse import urlsplit
+    from flask import request, abort
+
+    unsafe = {"POST", "PUT", "PATCH", "DELETE"}
+
+    @app.before_request
+    def _guard_requests():
+        allowed = app.config.get("ALLOWED_HOSTS") or []
+        if allowed:
+            host = (request.host or "").rsplit(":", 1)[0].strip("[]").lower()
+            if host not in allowed and host not in ("localhost", "127.0.0.1", "::1"):
+                abort(403, description="Host not allowed (see ALLOWED_HOSTS)")
+        if request.method in unsafe:
+            # Modern browsers label every request with where it came from —
+            # authoritative when present (and immune to a reverse proxy
+            # rewriting Host or dropping the port)
+            site = request.headers.get("Sec-Fetch-Site")
+            if site is not None:
+                if site in ("cross-site", "same-site"):
+                    abort(403, description="Cross-site request blocked")
+                return None
+            # Older browsers: fall back to the Origin header, comparing
+            # hostnames only (a proxy's Host may omit a non-default port)
+            origin = request.headers.get("Origin")
+            if origin is not None:
+                req_host = (request.host or "").rsplit(":", 1)[0].strip("[]").lower()
+                if origin == "null" or (urlsplit(origin).hostname or "") != req_host:
+                    abort(403, description="Cross-origin request blocked")
+
+    @app.after_request
+    def _security_headers(resp):
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("Referrer-Policy", "same-origin")
+        # Clickjacking guard for the management UI (its buttons stop outputs).
+        # The preview popup and the API stay frameable/embeddable — people
+        # put /preview/<id> and the MJPEG stream into other dashboards.
+        if not request.path.startswith(("/api/", "/preview/")):
+            resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        # User-uploaded files are served inline (the UI and players embed
+        # them); if one is opened as a document — an SVG with a <script>, or
+        # a file with a spoofed type — the sandbox stops it running on this
+        # origin. Has no effect on <img>/<video> embedding.
+        if request.path.startswith("/api/media/"):
+            resp.headers["Content-Security-Policy"] = "sandbox"
+        return resp
+
+
 def create_app(config_class=Config):
     app = Flask(
         __name__,
@@ -73,6 +129,7 @@ def create_app(config_class=Config):
     os.makedirs(app.config["SIGNAGE_RUNTIME_FOLDER"], exist_ok=True)
 
     # Register API
+    _install_security_hooks(app)
     app.register_blueprint(api)
 
     # Live preview popup window (one page for all instances; it reads the

@@ -138,10 +138,11 @@ if ! command -v soffice &>/dev/null || ! command -v pdftoppm &>/dev/null; then
     warn "    sudo apt install libreoffice-impress poppler-utils"
 fi
 
-# Optional: ffmpeg for background video optimization (4K uploads get a light
-# 1080p playback copy so playback never chokes on CPU decode).
+# Optional: ffmpeg for background video optimization (every upload not already
+# H.264/yuv420p within the target size gets a light playback copy, so playback
+# never chokes on CPU decode).
 if ! command -v ffmpeg &>/dev/null; then
-    warn "Optional: install ffmpeg so oversized (4K) videos are auto-optimized for smooth playback:"
+    warn "Optional: install ffmpeg so uploaded videos are auto-optimized for smooth playback:"
     warn "    sudo apt install ffmpeg"
 fi
 
@@ -258,13 +259,16 @@ info "Installing ndi-python (optional)..."
 if [ -n "$NDI_SDK_ROOT" ]; then
     export NDI_SDK_DIR="$NDI_SDK_ROOT"
 fi
-if pip install ndi-python 2>&1 | tee /tmp/ndi-python-install.log | tail -3 | grep -q "Successfully installed"; then
+# Unpredictable log name: this runs as root, and a fixed /tmp path could be
+# pre-planted as a symlink to clobber any file
+NDI_PY_LOG="$(mktemp /tmp/ndi-python-install.XXXXXX.log)"
+if pip install ndi-python 2>&1 | tee "$NDI_PY_LOG" | tail -3 | grep -q "Successfully installed"; then
     ok "ndi-python installed"
 elif pip show ndi-python &>/dev/null; then
     ok "ndi-python already installed"
 else
     warn "ndi-python could not be installed — app will run in dummy mode"
-    warn "  See /tmp/ndi-python-install.log for the build error"
+    warn "  See $NDI_PY_LOG for the build error"
     if [ -z "$NDI_SDK_ROOT" ]; then
         warn "  (no NDI SDK was found for the build to link against)"
     fi
