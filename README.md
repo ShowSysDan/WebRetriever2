@@ -1,6 +1,6 @@
 # NDI Streamer
 
-[![Version](https://img.shields.io/badge/version-1.10.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.10.1-blue.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
@@ -1311,10 +1311,14 @@ click it to open a full-size preview window.
 
 - Tiles are grouped under a header per source type, in this order: Images,
   Video, Signage, Webpage, Text, Webcam. Empty sections are left out.
-- Each tile has the output's name underneath. Tiles are 16:9 and all the
-  same size: the largest size that fits everything on the canvas. Sections
-  flow left to right and wrap like lines of text. Sources with a different
-  aspect ratio are letterboxed.
+- Each tile has the output's name underneath. Tiles are 16:9, all the same
+  size, on one grid: the largest size that fits everything on the canvas.
+  To use the space, sections flow into each other like text. A section can
+  start partway along a row and continue on the next; the continuation is
+  headed "(cont.)", and a thin divider separates sections that share a row.
+  If starting every section on a fresh row fits at the same tile size, that
+  tidier layout is used. Sources with a different aspect ratio are
+  letterboxed.
 - **The layout follows your outputs live.** Adding, renaming, deleting,
   starting or stopping an output updates the Overview within half a second,
   with no restart and no drop in the stream.
@@ -1340,6 +1344,33 @@ click it to open a full-size preview window.
   gives no video, it falls back to connecting by NDI name.
 - The name "Overview" is reserved: an output can't be named "Overview",
   since two NDI sources with one name would be indistinguishable.
+
+### Troubleshooting: tiles stuck on CONNECTING…
+
+Every tile tries, in turn:
+
+1. the output's published port on `127.0.0.1`
+2. the same port on each of this box's LAN addresses
+3. whatever NDI discovery finds named `… (<output name>)`
+4. the NDI name, built from the hostname
+
+It moves to the next after 3 seconds without video. To see what's
+happening:
+
+- **`GET /api/overview`** has a `tile_status` object. Each tile shows its
+  `state` (`connecting`, `live` or `no_signal`), the address it is using
+  (`via`), everything it `tried` in the current round, the frames received,
+  and the last `error`. It also shows whether this ndi-python's capture
+  call releases the GIL (`blocking_capture`), and how many sources NDI
+  discovery can see (`discovered`).
+- **The log** (`journalctl -u ndi-streamer`) has a line
+  `Overview: '<name>' live via <address>` when a tile connects. A tile
+  that still has no video after 20 seconds logs a warning listing
+  everything it tried.
+
+If `tried` lists only `name '…'` entries, the output's port file
+(`<id>.ndi.json` in the preview folder) is missing or its process can't
+be inspected. Check that psutil is installed, then restart the output.
 
 ### Cost
 
@@ -1645,6 +1676,35 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.10.1
+
+**Overview: tiles connect reliably, and the layout uses the space.**
+
+- **Fixed tiles stuck on CONNECTING…** Connection targets were built with
+  ndi-python's `Source(p_ndi_name=…, p_url_address=…)` constructor. That
+  constructor keeps pointers to temporary strings, so the SDK could read
+  garbage addresses. They are now set through the property setters, which
+  copy the string.
+- **Works with ndi-python 5.x as well as 6.x.** In 5.x `recv_capture`
+  holds Python's GIL (global interpreter lock) while it waits, so the
+  tile threads (and the send loop) would stall each other. The Overview
+  now checks this at startup and switches to a non-blocking polling
+  capture when needed.
+- **More ways to connect.** Tiles now try the published port on
+  `127.0.0.1` and on every LAN address, then sources found by NDI
+  discovery (matched on the output name, case-insensitively), then the
+  constructed NDI name. A receiver that hits an error restarts instead of
+  leaving its tile on CONNECTING for good.
+- **Diagnostics.** `/api/overview` includes `tile_status`: per-tile state,
+  the address in use, what was tried, and the last error. The log records
+  each tile going live, and warns with the full list of attempts when a
+  tile is still waiting after 20 seconds.
+- **Denser layout.** All tiles share one grid, and sections flow into each
+  other across rows, marked "(cont.)" with a divider. With 22 outputs on a
+  1080p canvas, tiles go from about 265×149 on 7 columns and 5 rows to
+  312×176 on 6 columns and 4 rows, roughly 37% more area. Header and name
+  bands are tighter too.
 
 #### 1.10.0
 

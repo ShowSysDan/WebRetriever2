@@ -26,10 +26,11 @@ of the other outputs, received back over NDI at full bandwidth:
     stream. Disabled instances are left out entirely; stopped ones keep
     their tile with STOPPED on it.
 
-Layout: tiles are grouped under a header per source type (SECTION_ORDER).
-All tiles share one 16:9 size — the largest that fits every section on the
-canvas when sections flow left-to-right and wrap like lines of text. Each
-tile carries its instance name underneath. Headers, labels and STOPPED
+Layout: tiles are grouped under a header per source type (SECTION_ORDER)
+on one uniform grid of equal 16:9 tiles, as large as fits. Sections flow
+into each other like text (a section can start mid-row and continue on
+the next) so rows aren't left half empty; each tile carries its instance
+name underneath. Headers, labels and STOPPED
 tiles are drawn once per layout change; per frame only live tile regions
 are copied.
 """
@@ -70,6 +71,10 @@ SECTION_TITLES = dict(SECTION_ORDER)
 # How often the layout file's mtime is checked (seconds)
 LAYOUT_POLL_S = 0.5
 
+# Per-tile connection status, written next to the layout file for the API
+STATUS_FILENAME = "overview_status.json"
+STATUS_INTERVAL_S = 1.0
+
 # A running tile whose receiver has had no video this long tries the next
 # connection candidate (local port → NDI name → re-read endpoint → ...)
 RECONNECT_AFTER_S = 3.0
@@ -93,6 +98,7 @@ BANDWIDTHS = ("highest", "lowest")
 COL_BG = (14, 15, 18)
 COL_HEADER = (138, 180, 248)
 COL_RULE = (52, 58, 70)
+COL_DIVIDER = (88, 108, 150)
 COL_LABEL = (225, 228, 234)
 COL_TILE = (0, 0, 0)
 COL_STOPPED_BG = (28, 29, 33)
@@ -208,82 +214,99 @@ def _metrics(tw: int, W: int, H: int) -> dict:
     th = max(1, round(tw * 9 / 16))
     return {
         "tw": tw, "th": th,
-        "label_h": max(14, round(th * 0.15)),
-        "header_h": max(16, round(th * 0.17)),
-        "gap": max(4, round(tw * 0.025)),
-        "margin": max(8, round(min(W, H) * 0.015)),
+        "label_h": max(14, round(th * 0.13)),
+        "header_h": max(14, round(th * 0.13)),
+        "gap": max(3, round(tw * 0.015)),
+        "margin": max(6, round(min(W, H) * 0.008)),
     }
-
-
-def _pack(sections: list, m: dict, W: int, H: int) -> Optional[list]:
-    """Shelf-pack section blocks for tile metrics m. Returns
-    [(shelf_blocks, shelf_height)] or None if it doesn't fit."""
-    tw, th, gap = m["tw"], m["th"], m["gap"]
-    avail_w, avail_h = W - 2 * m["margin"], H - 2 * m["margin"]
-    cols_max = (avail_w + gap) // (tw + gap)
-    if cols_max < 1:
-        return None
-    sgap = gap * 3  # between sections on one shelf
-    shelves, cur, cur_w, cur_h = [], [], 0, 0
-    for sec in sections:
-        n = len(sec["tiles"])
-        cols = min(n, cols_max)
-        rows = -(-n // cols)
-        bw = cols * tw + (cols - 1) * gap
-        bh = m["header_h"] + rows * (th + m["label_h"]) + (rows - 1) * gap
-        need = bw if not cur else cur_w + sgap + bw
-        if cur and need > avail_w:
-            shelves.append((cur, cur_w, cur_h))
-            cur, cur_w, cur_h = [], 0, 0
-            need = bw
-        cur.append((sec, cols, bw, bh))
-        cur_w, cur_h = need, max(cur_h, bh)
-    if cur:
-        shelves.append((cur, cur_w, cur_h))
-    total_h = sum(s[2] for s in shelves) + (len(shelves) - 1) * gap * 2
-    return shelves if total_h <= avail_h else None
 
 
 def compute_layout(entries: list, W: int, H: int) -> dict:
     """Place every entry's tile on a W×H canvas.
 
-    Returns {"sections": [{"key", "title", "header": (x, y, w, h),
-    "tiles": [{**entry, "cell": (x, y, w, h), "label": (x, y, w, h)}]}],
-    "metrics": {...}}; sections is empty when there is nothing to show."""
+    All tiles share one 16:9 size on a uniform grid; every grid row is a
+    header band, the tiles, and a name band. The tile size is the largest
+    for which the tiles fit when sections flow into each other like text
+    (a section may start mid-row and continue on the next), so no row is
+    left mostly empty just because a section ended. If starting every
+    section on a fresh row fits at that same size, that tidier arrangement
+    is used instead.
+
+    Returns {"sections": [{"key", "title", "tiles": [{**entry, "cell",
+    "label"}], "segments": [{"rect", "text", "divider"}]}], "metrics"};
+    sections is empty when there is nothing to show. A section has one
+    header segment per grid row it occupies."""
     sections = []
     for key, title in SECTION_ORDER:
         tiles = [dict(e) for e in entries if e["source_type"] == key]
         if tiles:
             sections.append({"key": key, "title": title, "tiles": tiles})
-    if not sections:
+    n = sum(len(sec["tiles"]) for sec in sections)
+    if not n:
         return {"sections": [], "metrics": None}
 
-    # Largest tile width that fits everything (a few hundred cheap passes,
-    # only on layout changes)
-    m = shelves = None
-    for tw in range(W, 15, -1):
-        m = _metrics(tw, W, H)
-        shelves = _pack(sections, m, W, H)
-        if shelves:
+    m = cols = None
+    newline = False
+    for tw in range(W, 15, -1):  # a few hundred cheap passes, on layout changes only
+        mt = _metrics(tw, W, H)
+        gap = mt["gap"]
+        c = min(n, (W - 2 * mt["margin"] + gap) // (tw + gap))
+        if c < 1:
+            continue
+        row_h = mt["header_h"] + mt["th"] + mt["label_h"]
+        avail_h = H - 2 * mt["margin"]
+
+        def height(rows):
+            return rows * row_h + (rows - 1) * gap
+
+        if height(-(-n // c)) <= avail_h:
+            m, cols = mt, c
+            newline = height(sum(-(-len(sec["tiles"]) // c) for sec in sections)) <= avail_h
             break
-    if not shelves:
+    if m is None:
         return {"sections": [], "metrics": None}
 
-    gap, th, tw = m["gap"], m["th"], m["tw"]
-    total_h = sum(s[2] for s in shelves) + (len(shelves) - 1) * gap * 2
-    y = (H - total_h) // 2
-    for blocks, shelf_w, shelf_h in shelves:
-        x = (W - shelf_w) // 2
-        for sec, cols, bw, _bh in blocks:
-            sec["header"] = (x, y, bw, m["header_h"])
-            for i, tile in enumerate(sec["tiles"]):
-                r, c = divmod(i, cols)
-                tx = x + c * (tw + gap)
-                ty = y + m["header_h"] + r * (th + m["label_h"] + gap)
-                tile["cell"] = (tx, ty, tw, th)
-                tile["label"] = (tx, ty + th, tw, m["label_h"])
-            x += bw + gap * 3
-        y += shelf_h + gap * 2
+    tw, th, gap = m["tw"], m["th"], m["gap"]
+    row_h = m["header_h"] + th + m["label_h"]
+    # Grid slots: flow fills cells in order; newline starts each section on
+    # a fresh row
+    slots, i = [], 0
+    for sec in sections:
+        if newline and i % cols:
+            i += cols - i % cols
+        for _ in sec["tiles"]:
+            slots.append(divmod(i, cols))
+            i += 1
+    rows = slots[-1][0] + 1
+    grid_w = cols * tw + (cols - 1) * gap
+    x0 = (W - grid_w) // 2
+    y0 = (H - (rows * row_h + (rows - 1) * gap)) // 2
+
+    k = 0
+    for sec in sections:
+        by_row = {}
+        for tile in sec["tiles"]:
+            r, c = slots[k]
+            k += 1
+            tx = x0 + c * (tw + gap)
+            ry = y0 + r * (row_h + gap)
+            tile["cell"] = (tx, ry + m["header_h"], tw, th)
+            tile["label"] = (tx, ry + m["header_h"] + th, tw, m["label_h"])
+            by_row.setdefault(r, []).append((c, tx, ry))
+        sec["segments"] = []
+        for j, (r, cells) in enumerate(sorted(by_row.items())):
+            c0, x_first, ry = cells[0]
+            x_last = cells[-1][1]
+            text = (f"{sec['title'].upper()}  ·  {len(sec['tiles'])}" if j == 0
+                    else f"{sec['title'].upper()}  (cont.)")
+            sec["segments"].append({
+                "rect": (x_first, ry, x_last + tw - x_first, m["header_h"]),
+                "row_h": row_h,
+                "text": text,
+                # a divider separates this section from the one before it
+                # in the same row
+                "divider": c0 > 0,
+            })
     return {"sections": sections, "metrics": m}
 
 
@@ -354,11 +377,16 @@ def render_base(layout: dict, W: int, H: int, empty_text: str = "No outputs") ->
     hfont = _font(m["header_h"] * 0.62)
     lfont = _font(m["label_h"] * 0.62)
     sfont = _font(m["th"] * 0.12)
+    gap = m["gap"]
     for sec in layout["sections"]:
-        x, y, w, h = sec["header"]
-        title = _fit_text(d, f"{sec['title'].upper()}  ·  {len(sec['tiles'])}", hfont, w)
-        d.text((x, y + h * 0.42), title, font=hfont, fill=COL_HEADER, anchor="lm")
-        d.line([(x, y + h - 3), (x + w, y + h - 3)], fill=COL_RULE, width=1)
+        for seg in sec["segments"]:
+            x, y, w, h = seg["rect"]
+            title = _fit_text(d, seg["text"], hfont, w)
+            d.text((x + 2, y + h * 0.45), title, font=hfont, fill=COL_HEADER, anchor="lm")
+            d.line([(x, y + h - 2), (x + w, y + h - 2)], fill=COL_RULE, width=1)
+            if seg["divider"]:
+                dx = x - (gap + 1) // 2
+                d.line([(dx, y), (dx, y + seg["row_h"])], fill=COL_DIVIDER, width=max(1, gap // 3))
         for t in sec["tiles"]:
             cx, cy, cw, ch = t["cell"]
             if t["running"]:
@@ -377,18 +405,140 @@ def render_placeholder(w: int, h: int, text: str, color) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------
+# NDI helpers
+# ----------------------------------------------------------------------
+
+def make_source(ndi, name: Optional[str] = None, url: Optional[str] = None):
+    """Build an ndi.Source safely. ndi-python's Source(p_ndi_name=...,
+    p_url_address=...) constructor keeps raw pointers to temporary strings
+    that are freed when the call returns, so the SDK can read garbage; the
+    property setters copy the string into storage that stays alive."""
+    src = ndi.Source()
+    if name:
+        src.ndi_name = name
+    if url:
+        src.url_address = url
+    return src
+
+
+def capture_releases_gil(ndi) -> bool:
+    """Does recv_capture release the GIL while it waits? ndi-python 6.x
+    does; 5.x holds it for the whole timeout, which would make every tile
+    thread (and the send loop) wait in turn. Measured once: a thread blocks
+    in a 300 ms capture on a dead address while this thread sleeps 50 ms —
+    if the sleep can't resume until the capture returns, the GIL was held."""
+    try:
+        recv = ndi.recv_create_v3(ndi.RecvCreateV3())
+        if recv is None:
+            return True
+        ndi.recv_connect(recv, make_source(ndi, url="127.0.0.1:1"))
+        t = threading.Thread(target=ndi.recv_capture_v2, args=(recv, 300), daemon=True)
+        t0 = time.monotonic()
+        t.start()
+        time.sleep(0.05)
+        held = time.monotonic() - t0 > 0.2
+        t.join(timeout=2)
+        ndi.recv_destroy(recv)
+        return not held
+    except Exception:
+        logger.exception("Multiview: GIL probe failed — assuming capture holds the GIL")
+        return False
+
+
+_local_ips_cache = None
+
+
+def local_ipv4s() -> list:
+    """This box's non-loopback IPv4 addresses (the NDI sender may not
+    accept loopback connections when its NDI config pins it to a NIC)."""
+    global _local_ips_cache
+    if _local_ips_cache is None:
+        ips = []
+        try:
+            import psutil
+            for addrs in psutil.net_if_addrs().values():
+                for a in addrs:
+                    if a.family == socket.AF_INET and not a.address.startswith("127."):
+                        ips.append(a.address)
+        except Exception:
+            pass
+        _local_ips_cache = ips
+    return _local_ips_cache
+
+
+class SourceFinder(threading.Thread):
+    """Keeps a snapshot of the NDI sources discovery can see (mDNS or a
+    discovery server). Uses only the non-blocking get call, so it never
+    holds the GIL for long even on bindings that don't release it."""
+
+    INTERVAL = 2.0
+
+    def __init__(self, ndi):
+        super().__init__(daemon=True, name="mv-finder")
+        self.ndi = ndi
+        self.sources: list = []  # [(ndi_name, url_address)]
+        self._halt = threading.Event()
+
+    def stop(self):
+        self._halt.set()
+
+    def run(self):
+        ndi = self.ndi
+        try:
+            finder = ndi.find_create_v2()
+        except Exception:
+            logger.exception("Multiview: NDI discovery unavailable")
+            return
+        if finder is None:
+            return
+        try:
+            while not self._halt.wait(self.INTERVAL):
+                try:
+                    found = ndi.find_get_current_sources(finder) or []
+                    self.sources = [(str(f.ndi_name or ""), str(f.url_address or ""))
+                                    for f in found]
+                except Exception:
+                    logger.debug("Multiview: discovery poll failed", exc_info=True)
+        finally:
+            try:
+                ndi.find_destroy(finder)
+            except Exception:
+                pass
+
+    def matches(self, inst_name: str, machine: str) -> list:
+        """Discovered sources for an output: '<machine> (<name>)', this
+        machine first (compared case-insensitively — the SDK's casing of
+        the machine part varies by platform)."""
+        suffix = f"({inst_name})"
+        hits = [(n, u) for n, u in self.sources if n.endswith(suffix)]
+        hits.sort(key=lambda nu: nu[0][: -len(suffix)].strip().lower() != machine.lower())
+        return hits
+
+
+# ----------------------------------------------------------------------
 # Tile receiver
 # ----------------------------------------------------------------------
+
+# A tile still not live after this long logs one warning listing what it
+# tried (and again each time the whole candidate list has been exhausted)
+CONNECT_WARN_AFTER_S = 20.0
+
 
 class TileReceiver(threading.Thread):
     """Receives one output over NDI into a tile-sized BGRX buffer.
 
-    Owns all blocking NDI receive calls (the SDK releases the GIL while
-    waiting), so the send loop never stalls on a slow or missing source."""
+    Owns all NDI receive calls, so the send loop never stalls on a slow or
+    missing source. Connection candidates are tried in turn — the worker's
+    published port on 127.0.0.1 and on this box's LAN addresses, then what
+    NDI discovery found under the output's name, then the name itself —
+    moving on after RECONNECT_AFTER_S without video, and re-read each time
+    the list runs out. Any error restarts the session after a pause; the
+    thread only ends when stopped."""
 
     def __init__(self, ndi, entry: dict, cell_w: int, cell_h: int,
                  preview_dir: Optional[str], bandwidth: str, machine: str,
-                 min_interval: float = 0.0):
+                 min_interval: float = 0.0, finder: Optional[SourceFinder] = None,
+                 blocking_capture: bool = True):
         super().__init__(daemon=True, name=f"mv-rx-{entry['id']}")
         self.ndi = ndi
         self.instance_id = entry["id"]
@@ -397,6 +547,10 @@ class TileReceiver(threading.Thread):
         self.preview_dir = preview_dir
         self.bandwidth = bandwidth
         self.machine = machine
+        self.finder = finder
+        # False when the binding holds the GIL inside recv_capture: poll with
+        # a zero timeout and sleep (which releases the GIL) in between
+        self.blocking_capture = blocking_capture
         self.buf = np.zeros((cell_h, cell_w, 4), dtype=np.uint8)
         self.buf[..., 3] = 255
         self.lock = threading.Lock()
@@ -410,17 +564,33 @@ class TileReceiver(threading.Thread):
         self._src_size = None
         self._fit = None  # (fw, fh, ox, oy)
         self._scratch = None
+        # Diagnostics, read by the compositor's status report
+        self.via = None          # candidate label currently connected/tried
+        self.tried: list = []    # labels tried in the current cycle
+        self.error = None        # last exception text
+        self.frames = 0          # frames received (for a fps estimate)
+        self._born = time.monotonic()
+        self._warned_at = 0.0
 
     def stop(self):
         self._halt.set()
 
     def _candidates(self) -> list:
+        """[(label, ndi.Source)] in the order to try them."""
         ndi = self.ndi
         cands = []
-        if self.preview_dir:
-            for port in read_endpoint_ports(self.preview_dir, self.instance_id):
-                cands.append(ndi.Source(p_url_address=f"127.0.0.1:{port}"))
-        cands.append(ndi.Source(p_ndi_name=f"{self.machine} ({self.inst_name})"))
+        ports = read_endpoint_ports(self.preview_dir, self.instance_id) if self.preview_dir else []
+        for port in ports:
+            for host in ["127.0.0.1"] + local_ipv4s():
+                url = f"{host}:{port}"
+                cands.append((url, make_source(ndi, url=url)))
+        if self.finder is not None:
+            for name, url in self.finder.matches(self.inst_name, self.machine):
+                cands.append((f"discovered '{name}' @ {url or '?'}",
+                              make_source(ndi, name=name, url=url or None)))
+        for machine in dict.fromkeys([self.machine, socket.gethostname().split(".")[0]]):
+            name = f"{machine} ({self.inst_name})"
+            cands.append((f"name '{name}'", make_source(ndi, name=name)))
         return cands
 
     def _blit(self, src: np.ndarray):
@@ -453,28 +623,51 @@ class TileReceiver(threading.Thread):
             self.buf[oy:oy + fh, ox:ox + fw, :3] = self._scratch[..., :3]
 
     def run(self):
+        while not self._halt.is_set():
+            try:
+                self._session()
+            except Exception as e:
+                self.error = f"{type(e).__name__}: {e}"
+                logger.exception(f"Multiview receiver for '{self.inst_name}' failed — retrying")
+                self._halt.wait(2.0)
+
+    def _session(self):
         ndi = self.ndi
         rc = ndi.RecvCreateV3()
         rc.color_format = ndi.RECV_COLOR_FORMAT_BGRX_BGRA
         rc.bandwidth = (ndi.RECV_BANDWIDTH_LOWEST if self.bandwidth == "lowest"
                         else ndi.RECV_BANDWIDTH_HIGHEST)
         rc.allow_video_fields = False
-        rc.ndi_recv_name = "Multiview"
+        rc.ndi_recv_name = "Overview"
         recv = ndi.recv_create_v3(rc)
         if recv is None:
-            logger.error(f"Multiview: could not create receiver for '{self.inst_name}'")
-            return
+            raise RuntimeError("recv_create_v3 returned None")
+        timeout_ms = RECV_TIMEOUT_MS if self.blocking_capture else 0
         cands, idx, switched_at = [], -1, float("-inf")
+        was_live = False
         try:
             while not self._halt.is_set():
                 now = time.monotonic()
                 if now - max(self.last_frame, switched_at) > RECONNECT_AFTER_S:
+                    if was_live:
+                        logger.warning(f"Overview: '{self.inst_name}' lost video on {self.via}")
+                        was_live = False
                     idx += 1
                     if idx >= len(cands):
+                        if self.tried and now - self._born > CONNECT_WARN_AFTER_S \
+                                and now - self._warned_at > CONNECT_WARN_AFTER_S:
+                            self._warned_at = now
+                            logger.warning(
+                                f"Overview: no video yet from '{self.inst_name}' — tried "
+                                f"{', '.join(self.tried)}"
+                            )
                         cands, idx = self._candidates(), 0
-                    ndi.recv_connect(recv, cands[idx])
+                        self.tried = []
+                    self.via = cands[idx][0]
+                    self.tried.append(self.via)
+                    ndi.recv_connect(recv, cands[idx][1])
                     switched_at = now
-                t, v, a, md = ndi.recv_capture_v2(recv, RECV_TIMEOUT_MS)
+                t, v, a, md = ndi.recv_capture_v2(recv, timeout_ms)
                 if t == ndi.FRAME_TYPE_VIDEO:
                     try:
                         got = time.monotonic()
@@ -484,19 +677,35 @@ class TileReceiver(threading.Thread):
                             self._blit(v.data)
                             self._last_blit = got
                         self.last_frame = got
+                        self.frames += 1
                     finally:
                         ndi.recv_free_video_v2(recv, v)
+                    if not was_live:
+                        was_live = True
+                        self.error = None
+                        logger.info(f"Overview: '{self.inst_name}' live via {self.via}")
                 elif t == ndi.FRAME_TYPE_AUDIO:
                     ndi.recv_free_audio_v2(recv, a)
                 elif t == ndi.FRAME_TYPE_METADATA:
                     ndi.recv_free_metadata(recv, md)
-        except Exception:
-            logger.exception(f"Multiview receiver for '{self.inst_name}' failed")
+                elif not self.blocking_capture and t == ndi.FRAME_TYPE_NONE:
+                    time.sleep(0.003)  # releases the GIL between polls
         finally:
             try:
                 ndi.recv_destroy(recv)
             except Exception:
                 pass
+
+    def status(self, now: float) -> dict:
+        if self.last_frame and now - self.last_frame <= NO_SIGNAL_AFTER_S:
+            state = "live"
+        elif self.last_frame:
+            state = "no_signal"
+        else:
+            state = "connecting"
+        return {"id": self.instance_id, "name": self.inst_name, "state": state,
+                "via": self.via, "tried": list(self.tried), "frames": self.frames,
+                "error": self.error}
 
 
 # ----------------------------------------------------------------------
@@ -531,6 +740,21 @@ class MultiviewCompositor:
         self._mtime = None
         self._last_poll = float("-inf")
         self._wait = self._nosig = None
+        self.status_path = os.path.join(os.path.dirname(layout_path) or ".",
+                                        STATUS_FILENAME) if layout_path else None
+        self._last_status = float("-inf")
+        self.finder = None
+        self.blocking_capture = True
+        if ndi is not None:
+            self.blocking_capture = capture_releases_gil(ndi)
+            self.finder = SourceFinder(ndi)
+            self.finder.start()
+            logger.info(
+                "Overview: recv_capture "
+                + ("releases the GIL — blocking capture" if self.blocking_capture
+                   else "holds the GIL (older ndi-python) — polling capture")
+                + f"; local addresses {['127.0.0.1'] + local_ipv4s()}"
+            )
 
     def poll_layout(self, frame_buffer: np.ndarray, now: float, force: bool = False) -> bool:
         """Re-read the layout file if it changed; on a real change re-render
@@ -581,7 +805,8 @@ class MultiviewCompositor:
             if iid not in self.receivers:
                 rx = TileReceiver(self.ndi, t, t["cell"][2], t["cell"][3],
                                   self.preview_dir, self.bandwidth, self.machine,
-                                  self.min_interval)
+                                  self.min_interval, finder=self.finder,
+                                  blocking_capture=self.blocking_capture)
                 rx.start()
                 self.receivers[iid] = rx
         logger.info(
@@ -601,7 +826,28 @@ class MultiviewCompositor:
                 with rx.lock:
                     frame_buffer[y:y + h, x:x + w] = rx.buf
 
+    def write_status(self, now: float):
+        """Atomically write per-tile connection state (for /api/overview),
+        at most once per STATUS_INTERVAL_S."""
+        if not self.status_path or now - self._last_status < STATUS_INTERVAL_S:
+            return
+        self._last_status = now
+        data = {
+            "blocking_capture": self.blocking_capture,
+            "discovered": len(self.finder.sources) if self.finder else 0,
+            "tiles": [rx.status(now) for rx in self.receivers.values()],
+        }
+        try:
+            fd, tmp = tempfile.mkstemp(suffix=".json", dir=os.path.dirname(self.status_path))
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, self.status_path)
+        except OSError:
+            pass
+
     def close(self):
+        if self.finder is not None:
+            self.finder.stop()
         for rx in self.receivers.values():
             rx.stop()
         for rx in self.receivers.values():

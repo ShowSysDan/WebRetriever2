@@ -1800,6 +1800,7 @@ class NDIWorker:
                 frame_start = time.monotonic()
                 comp.poll_layout(frame_buffer, frame_start)
                 comp.compose(frame_buffer, frame_start)
+                comp.write_status(frame_start)
 
                 if ndi is not None:
                     video_frame.data = frame_buffer

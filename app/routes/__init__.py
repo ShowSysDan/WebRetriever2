@@ -223,6 +223,18 @@ def _start_overview(settings=None):  # settings kept for call-site symmetry
     return None
 
 
+def _overview_tile_status():
+    if not manager.is_running(OVERVIEW_INSTANCE_ID):
+        return None
+    from app.workers.multiview import STATUS_FILENAME
+    path = os.path.join(current_app.config["SIGNAGE_RUNTIME_FOLDER"], STATUS_FILENAME)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
 def _overview_state(settings=None):
     if not settings:
         settings = GlobalSettings.query.first()
@@ -244,6 +256,10 @@ def _overview_state(settings=None):
         "fps": cfg.get("OVERVIEW_FPS", 30),
         "bandwidth": cfg.get("OVERVIEW_BANDWIDTH", "highest"),
         "tiles": tiles,
+        # Per-tile connection state written by the worker: state
+        # (connecting | live | no_signal), the address in use, what was
+        # tried, frames received, last error — for diagnosing CONNECTING
+        "tile_status": _overview_tile_status(),
         "preview_url": f"/api/instances/{OVERVIEW_INSTANCE_ID}/preview",
         "popup_url": "/preview/overview",
     }
