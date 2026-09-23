@@ -7,6 +7,8 @@ Features:
   - Hang detection: shared heartbeat values let the watchdog detect workers
     that are alive but stuck (e.g. Playwright blocked on an unresponsive page)
   - Configurable browser recycling interval passed to each worker
+  - Self-healing watchdog: one bad restart can't kill it, and if its thread
+    ever dies anyway the next status poll re-arms it
 """
 
 import os
@@ -47,6 +49,10 @@ DEFAULT_RECYCLE_HOURS = 4
 # relaunching Chromium) every watchdog tick forever.
 RESTART_BACKOFF_MAX = 300.0
 RESTART_STABLE_RESET = 120.0
+
+# If the watchdog loop itself hits an unexpected error, pause this long
+# before resuming so a persistent fault can't spin a CPU core.
+WATCHDOG_ERROR_PAUSE = 5.0
 
 
 # --- Receiver identification (socket level) --------------------------------
@@ -261,6 +267,9 @@ class WorkerManager:
         self._configs: Dict[int, dict] = {}
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
+        # Monotonic time of the last completed watchdog pass (0 = never),
+        # reported by watchdog_status() so a stalled watchdog is visible
+        self._watchdog_last_tick = 0.0
         # Restart backoff bookkeeping: iid -> (consecutive_failures, last_restart_monotonic)
         self._restart_meta: Dict[int, tuple] = {}
         # Flask serves requests on multiple threads and the watchdog runs on
@@ -618,17 +627,52 @@ class WorkerManager:
     # ------------------------------------------------------------------
 
     def _ensure_watchdog(self):
-        if self._watchdog_thread and self._watchdog_thread.is_alive():
-            return
-        self._watchdog_stop.clear()
-        self._watchdog_thread = threading.Thread(
-            target=self._watchdog_loop, daemon=True, name="worker-watchdog"
-        )
-        self._watchdog_thread.start()
-        logger.info("Watchdog started")
+        """Start the watchdog thread if it isn't running. Holds the lifecycle
+        lock so it can't interleave with the loop's own exit decision."""
+        with self._lock:
+            if self._watchdog_thread and self._watchdog_thread.is_alive():
+                return
+            self._watchdog_stop.clear()
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog_main, daemon=True, name="worker-watchdog"
+            )
+            self._watchdog_thread.start()
+            logger.info("Watchdog started")
+
+    def watchdog_status(self) -> dict:
+        """Report watchdog liveness — and re-arm it if instances are tracked
+        but the thread is gone. Called from the status/health/system
+        endpoints (the dashboard polls /api/system every 2s, monitors poll
+        /api/health), so even a watchdog killed by something unforeseen
+        comes back within one poll instead of waiting for the next manual
+        Start. The healthy path takes no lock, so a poll never stalls
+        behind a restart that is busy killing a hung worker."""
+        alive = bool(self._watchdog_thread and self._watchdog_thread.is_alive())
+        rearmed = False
+        if not alive and self._configs:
+            with self._lock:
+                alive = bool(self._watchdog_thread and self._watchdog_thread.is_alive())
+                if not alive and self._configs:
+                    log_event("WATCHDOG_REARMED",
+                              f"tracked={len(self._configs)} reason=thread not running",
+                              level="warning")
+                    self._ensure_watchdog()
+                    alive = rearmed = True
+        last = self._watchdog_last_tick
+        return {
+            "running": alive,
+            "rearmed": rearmed,
+            "tracked_instances": len(self._configs),
+            "last_check_age_s": round(time.monotonic() - last, 1) if last else None,
+        }
 
     def _restart_instance(self, iid: int, reason: str):
-        """Kill (if needed) and restart a worker from stored config."""
+        """Kill (if needed) and restart a worker from stored config.
+
+        Kill and respawn are guarded separately: a kill that throws must not
+        skip the respawn, and a respawn that throws leaves the instance in
+        _configs with no process — the next watchdog pass sees it as
+        crashed and retries under the normal backoff."""
         with self._lock:
             config = self._configs.get(iid)
             if not config:
@@ -638,19 +682,33 @@ class WorkerManager:
 
             # Kill existing process
             proc = self._processes.get(iid)
-            if proc and proc.is_alive():
-                proc.terminate()
-                proc.join(timeout=5)
-                if proc.is_alive():
-                    # Hung beyond SIGTERM — kill the whole group so the
-                    # Playwright driver + Chromium tree die with the worker
-                    _kill_process_tree(proc)
-                    proc.join(timeout=3)
+            try:
+                if proc and proc.is_alive():
+                    proc.terminate()
+                    proc.join(timeout=5)
+                    if proc.is_alive():
+                        # Hung beyond SIGTERM — kill the whole group so the
+                        # Playwright driver + Chromium tree die with the worker
+                        _kill_process_tree(proc)
+                        proc.join(timeout=3)
+            except Exception as e:
+                log_event("INSTANCE_KILL_FAILED",
+                          f"id={iid} pid={getattr(proc, 'pid', None)} error={e!r}",
+                          level="error")
 
             # Clean up old refs (_spawn recreates control values as needed)
             self._forget_instance(iid)
 
-            process = self._spawn(iid, config)
+            try:
+                process = self._spawn(iid, config)
+            except Exception as e:
+                # Drop any half-registered refs so the next pass sees a clean
+                # "crashed" instance rather than a stale, never-started one
+                self._forget_instance(iid)
+                log_event("INSTANCE_RESTART_FAILED",
+                          f"id={iid} reason={reason} error={e!r} (will retry)",
+                          level="error")
+                return
             log_event("INSTANCE_RESTARTED", f"id={iid} reason={reason} new_pid={process.pid}")
 
     def _next_restart_allowed(self, iid: int, now: float) -> bool:
@@ -674,42 +732,72 @@ class WorkerManager:
             )
         return True
 
+    def _watchdog_main(self):
+        """Thread target: supervises _watchdog_loop. Any exception that
+        escapes a pass is logged and the loop resumes after a short pause —
+        the watchdog only ends when told to stop or nothing is tracked."""
+        while not self._watchdog_stop.is_set():
+            try:
+                self._watchdog_loop()
+                return  # clean exit: stop requested or nothing tracked
+            except Exception:
+                logger.exception("Watchdog pass failed — resuming")
+                log_event("WATCHDOG_ERROR", "unexpected error in watchdog pass, resuming",
+                          level="error")
+                self._watchdog_stop.wait(WATCHDOG_ERROR_PAUSE)
+
     def _watchdog_loop(self):
         """
         Runs every WATCHDOG_INTERVAL seconds. Detects:
           1. Dead processes (crashed)
           2. Hung processes (alive but heartbeat stale)
         Restarts are rate-limited per instance with exponential backoff.
+        Each instance is checked and restarted in isolation: a failure on
+        one never skips the others.
         """
-        while not self._watchdog_stop.is_set():
-            time.sleep(WATCHDOG_INTERVAL)
-
+        while not self._watchdog_stop.wait(WATCHDOG_INTERVAL):
             now = time.monotonic()
             issues = []
 
             for iid in list(self._configs.keys()):
-                proc = self._processes.get(iid)
-                hb = self._heartbeats.get(iid)
+                try:
+                    proc = self._processes.get(iid)
+                    hb = self._heartbeats.get(iid)
 
-                if proc is None or not proc.is_alive():
-                    issues.append((iid, "crashed"))
-                    continue
+                    if proc is None or not proc.is_alive():
+                        issues.append((iid, "crashed"))
+                        continue
 
-                # Check heartbeat staleness
-                if hb is not None:
-                    last_beat = hb.value
-                    stale = now - last_beat
-                    if stale > HEARTBEAT_TIMEOUT:
-                        issues.append((iid, f"hung (heartbeat stale {stale:.0f}s)"))
+                    # Check heartbeat staleness
+                    if hb is not None:
+                        last_beat = hb.value
+                        stale = now - last_beat
+                        if stale > HEARTBEAT_TIMEOUT:
+                            issues.append((iid, f"hung (heartbeat stale {stale:.0f}s)"))
+                except Exception:
+                    logger.exception(f"Watchdog: health check failed for instance {iid}")
 
             for iid, reason in issues:
-                if self._next_restart_allowed(iid, now):
-                    self._restart_instance(iid, reason)
+                try:
+                    if self._next_restart_allowed(iid, now):
+                        self._restart_instance(iid, reason)
+                except Exception as e:
+                    logger.exception(f"Watchdog: restart of instance {iid} failed")
+                    log_event("INSTANCE_RESTART_FAILED",
+                              f"id={iid} reason={reason} error={e!r} (will retry)",
+                              level="error")
 
-            # If nothing tracked, stop watching
-            if not self._configs:
-                logger.info("Watchdog: no instances tracked, stopping")
-                break
+            self._watchdog_last_tick = time.monotonic()
+
+            # If nothing tracked, stop watching. Decided under the lifecycle
+            # lock and the thread ref cleared before exiting, so a Start that
+            # races this can't see a dying thread as "alive" and skip
+            # launching a new watchdog.
+            with self._lock:
+                if not self._configs:
+                    logger.info("Watchdog: no instances tracked, stopping")
+                    self._watchdog_thread = None
+                    return
 
     def cleanup_dead(self):
         """Remove refs to dead processes not in configs (manually stopped)."""

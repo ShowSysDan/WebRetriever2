@@ -1844,6 +1844,8 @@ def system_stats():
     snap = sysstats.snapshot(current_app.config["UPLOAD_FOLDER"])
     if snap.get("disk"):
         snap["disk"].pop("path", None)  # don't hand out filesystem layout
+    # Polled every 2s by the dashboard — doubles as the watchdog re-arm point
+    snap["watchdog"] = manager.watchdog_status()
     return jsonify(snap)
 
 
@@ -1966,12 +1968,15 @@ def status():
         "running_count": len(running_ids),
         "total_instances": OutputInstance.query.count(),
         "media_count": MediaFile.query.count(),
+        # Also re-arms the watchdog if its thread has died
+        "watchdog": manager.watchdog_status(),
     })
 
 
 @api.route("/health", methods=["GET"])
 def health():
     """Per-instance health details including heartbeat age."""
+    manager.watchdog_status()  # re-arms the watchdog if its thread died
     instances = OutputInstance.query.all()
     health_data = []
     for inst in instances:

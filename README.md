@@ -1,6 +1,6 @@
 # NDI Streamer
 
-[![Version](https://img.shields.io/badge/version-1.9.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.9.1-blue.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-gray.svg)]()
 
@@ -32,7 +32,7 @@ A self-hosted Flask application that captures webpages, images, or text via head
 - **Auto-refresh** — per-instance configurable interval to reload content (e.g. refresh a weather page every 30 minutes)
 - **Media library** — upload, manage, and assign images and videos to instances and signage playlists via a built-in file manager, with the media drive's free space shown alongside
 - **Live dashboard** — the Overview tab shows every output as a live card (with program/preview tally frames), receiver and bandwidth totals, a CPU graph (core average + per-core load), and what's on air in signage
-- **Crash recovery** — watchdog automatically restarts crashed worker processes
+- **Crash recovery** — every output runs in its own process, so one crashing or hanging never takes down the others; a self-healing watchdog restarts only the failed one
 - **Syslog integration** — structured event logging for all instance lifecycle events, settings changes, and media operations
 - **Systemd service** — runs on boot, restarts on failure, production-ready
 - **Database portable** — SQLite by default, one-line swap to PostgreSQL
@@ -1004,7 +1004,7 @@ Apr  9 15:01:44 prod-server ndi-streamer: [WARNING] ndi_streamer.events - [INSTA
 ```
 
 - Each instance runs in an isolated **process** (not thread) — a crash in one does not affect others
-- The **watchdog thread** monitors processes every 5 seconds and auto-restarts any that crash
+- The **watchdog thread** monitors processes every 5 seconds and auto-restarts any that crash or hang; it is self-healing (see [Output Isolation & Watchdog Self-Healing](#output-isolation--watchdog-self-healing))
 - **Browser workers** (webpage, image, text) render in headless Chromium and capture JPEG screenshots at the **instance capture FPS**; NDI sends at the **global output FPS** by duplicating frames
 - **Native workers** never launch a browser: webcams are grabbed via V4L2/OpenCV, and video files and signage playlists are decoded with OpenCV/FFmpeg. Signage stills and video frames are letterboxed onto in-memory canvases, and crossfades are alpha-blended per output frame (`cv2.addWeighted`) straight into the NDI frame buffer — frame timing is set by the worker, not a browser compositor
 - Signage playlists can therefore only contain stills and video files, not live webpages
@@ -1079,6 +1079,41 @@ instance with exponential backoff: 5s → 10s → 20s → 40s … capped at 5 mi
 A worker that then stays up for 2+ minutes is considered recovered and the
 backoff resets. Repeated failures log `INSTANCE_RESTART_BACKOFF` warnings to
 syslog so external monitoring can catch chronic flappers.
+
+### Output Isolation & Watchdog Self-Healing
+
+Every output is its own OS process with its own NDI sender, frame buffer and
+browser/decoder. When one output crashes or hangs, the other outputs keep
+streaming and only that output is restarted. What all outputs share is the
+main app process and its single watchdog thread, so the watchdog is built so
+that it can't fail silently:
+
+- **Each instance is checked and restarted on its own.** An error while
+  checking or restarting one output (a failed fork under memory pressure,
+  a kill that throws) is logged and the watchdog carries on with the rest.
+- **A failed respawn retries automatically.** If a new worker can't be
+  started, the output stays tracked with no process. The next pass sees it
+  as crashed and tries again under the normal restart backoff.
+  Logged as `INSTANCE_RESTART_FAILED` (and `INSTANCE_KILL_FAILED` if killing
+  the old worker failed).
+- **The watchdog supervises itself.** An unexpected error anywhere in a pass
+  is logged (`WATCHDOG_ERROR`) and the watchdog resumes after 5 seconds
+  instead of stopping.
+- **Re-armed from polling.** `/api/system` (polled every 2s by the
+  dashboard), `/api/status` and `/api/health` check that the watchdog thread
+  is alive while outputs are running, and restart it if it isn't
+  (`WATCHDOG_REARMED`). Before, a dead watchdog stayed dead until someone
+  pressed Start on an output.
+- `/api/status` and `/api/system` return a `watchdog` object
+  (`running`, `rearmed`, `tracked_instances`, `last_check_age_s`). If
+  `last_check_age_s` goes well past 5s, the watchdog is stuck — for example
+  a single thread busy killing several hung workers one after another, each
+  of which can take up to ~8s.
+
+```
+Apr 10 03:42:15 prod ndi-streamer: [ERROR] [INSTANCE_RESTART_FAILED] id=3 reason=crashed error=OSError(12, 'Cannot allocate memory') (will retry)
+Apr 10 03:42:25 prod ndi-streamer: [INFO] [INSTANCE_RESTARTED] id=3 reason=crashed new_pid=51244
+```
 
 ### Sizing Guide
 
@@ -1419,10 +1454,10 @@ live reload — the NDI stream never drops.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/status` | Running count, totals |
-| `GET` | `/api/health` | Per-instance health with heartbeat age |
+| `GET` | `/api/status` | Running count, totals, and watchdog state (`watchdog`: `running`, `rearmed`, `tracked_instances`, `last_check_age_s`) |
+| `GET` | `/api/health` | Per-instance health with heartbeat age (also re-arms the watchdog if its thread has died) |
 | `GET` | `/api/receivers` | Fleet-wide receiver view: every connection across all running instances, summed TCP bandwidth (`total_tcp_mbps`), unique receiver / connection counts, and total NIC egress (`egress_mbps`, loopback excluded) |
-| `GET` | `/api/system` | Host health: CPU average across all cores (`cpu.avg`), per-core load (`cpu.per_core`), ~5 min history sampled every 2s server-side (`cpu.history`, `[epoch_ms, percent]`), load average, memory, and free/used space on the drive holding `UPLOAD_FOLDER` (`disk`, no path). Needs `psutil` for CPU/memory; disk works without it |
+| `GET` | `/api/system` | Host health: CPU average across all cores (`cpu.avg`), per-core load (`cpu.per_core`), ~5 min history sampled every 2s server-side (`cpu.history`, `[epoch_ms, percent]`), load average, memory, and free/used space on the drive holding `UPLOAD_FOLDER` (`disk`, no path), plus watchdog state (`watchdog`, same shape as `/api/status`). Needs `psutil` for CPU/memory; disk works without it |
 | `GET` | `/api/instances/:ref/receivers` | Who is pulling this source: peer IPs + reverse-DNS hostnames of established NDI connections to the worker's sockets, with the SDK's own count (`sdk_receivers`) for cross-checking |
 | `GET` | `/preview/:id` | Popup live-preview page (HTML) |
 
@@ -1515,6 +1550,27 @@ This project follows [Semantic Versioning](https://semver.org/):
 Current version is tracked in the `VERSION` file at the project root.
 
 ### Changelog
+
+#### 1.9.1
+
+**Watchdog hardening.**
+
+- **One bad restart can no longer disable crash recovery for every
+  output.** Before, an exception while restarting a worker (e.g. a fork
+  failing under memory pressure) killed the single watchdog thread. Running
+  outputs kept streaming, but nothing was auto-restarted again until someone
+  pressed Start. Now each instance is checked and restarted on its own, a
+  failed respawn is retried on the next pass under the normal backoff, and
+  the watchdog loop supervises itself and resumes after unexpected errors.
+- **Self-re-arming.** `/api/system`, `/api/status` and `/api/health` restart
+  the watchdog thread if it has died while outputs are running.
+- **Start/idle race fixed.** When the last output stopped, the watchdog could
+  be exiting at the same moment a new Start saw it as still alive, which
+  left the new output unwatched. The exit decision is now made under the
+  lifecycle lock.
+- New `watchdog` object in `/api/status` and `/api/system`; new syslog events
+  `INSTANCE_RESTART_FAILED`, `INSTANCE_KILL_FAILED`, `WATCHDOG_ERROR`,
+  `WATCHDOG_REARMED`.
 
 #### 1.9.0
 
