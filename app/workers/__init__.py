@@ -350,7 +350,6 @@ class WorkerManager:
         text_settings: Optional[dict] = None,
         video_settings: Optional[dict] = None,
         signage_settings: Optional[dict] = None,
-        multiview_settings: Optional[dict] = None,
         preview_dir: Optional[str] = None,
         preview_interval: float = 2.0,
     ) -> bool:
@@ -369,7 +368,6 @@ class WorkerManager:
                 text_settings=text_settings,
                 video_settings=video_settings,
                 signage_settings=signage_settings,
-                multiview_settings=multiview_settings,
                 preview_dir=preview_dir,
                 preview_interval=preview_interval,
             )
@@ -408,20 +406,11 @@ class WorkerManager:
             log_event("INSTANCE_STOPPED", f"id={instance_id}")
             return True
 
-    def stop_all(self, keep=()):
-        """Stop every worker except the ids in `keep` (the API's Stop All
-        leaves the Overview stream running; shutdown stops everything)."""
-        ids = [iid for iid in self._workers.keys() if iid not in keep]
+    def stop_all(self):
+        ids = list(self._workers.keys())
         for iid in ids:
             self.stop_instance(iid)
         log_event("ALL_STOPPED", f"count={len(ids)}")
-
-    def is_wanted(self, instance_id: int) -> bool:
-        """True while an instance is supposed to be running — started and
-        not manually stopped — even during a crash/restart gap. Multiview
-        layouts use this so a tile shows NO SIGNAL while the watchdog
-        recovers an output, and STOPPED only when someone stopped it."""
-        return instance_id in self._configs
 
     def is_running(self, instance_id: int) -> bool:
         proc = self._processes.get(instance_id)

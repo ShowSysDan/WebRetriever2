@@ -46,11 +46,6 @@
 // The instance id (or URL-encoded name) comes from this page's own URL:
 // /preview/<id>
 const ref = decodeURIComponent(location.pathname.split('/').pop());
-// /preview/overview shows the built-in Overview stream (not a DB instance)
-const isOverview = ref.toLowerCase() === 'overview';
-const infoUrl = isOverview ? '/api/overview' : `/api/instances/${encodeURIComponent(ref)}`;
-const streamUrl = isOverview ? '/api/overview/preview/stream'
-                             : `/api/instances/${encodeURIComponent(ref)}/preview/stream`;
 const img = document.getElementById('stream');
 const overlay = document.getElementById('overlay');
 const overlayText = document.getElementById('overlay-text');
@@ -67,7 +62,7 @@ function setOverlay(text) {
 function connectStream() {
   streamUp = false;
   // Cache-busting param forces a fresh multipart connection on reconnect
-  img.src = `${streamUrl}?t=${Date.now()}`;
+  img.src = `/api/instances/${encodeURIComponent(ref)}/preview/stream?t=${Date.now()}`;
 }
 
 img.addEventListener('load', () => { streamUp = true; setOverlay(null); });
@@ -79,15 +74,14 @@ img.addEventListener('error', () => {
 
 async function poll() {
   try {
-    const res = await fetch(infoUrl);
+    const res = await fetch(`/api/instances/${encodeURIComponent(ref)}`);
     if (!res.ok) { setOverlay('Instance not found'); pill.textContent='?'; return; }
     const wasRunning = inst && inst.running;
     inst = await res.json();
     document.getElementById('name').textContent = inst.name;
     document.title = `Preview — ${inst.name}`;
-    document.getElementById('meta').textContent = isOverview
-      ? `${inst.ndi_source} · ${inst.width}×${inst.height} · ${inst.tiles} output${inst.tiles===1?'':'s'}`
-      : `#${inst.id} · ${inst.width}×${inst.height} · ${inst.source_type}`;
+    document.getElementById('meta').textContent =
+      `#${inst.id} · ${inst.width}×${inst.height} · ${inst.source_type}`;
     pill.textContent = inst.running ? '● LIVE' : '○ STOPPED';
     pill.classList.toggle('off', !inst.running);
     if (!inst.running) {

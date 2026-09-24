@@ -32,6 +32,49 @@ def _add_missing_columns():
     db.session.commit()
 
 
+def _remove_overview_leftovers(app):
+    """Clean up after the Overview stream (added in 1.10.0, removed in
+    1.10.2) on boxes that ran it: its runtime files and its settings
+    column. Idempotent and best-effort — each step is skipped quietly if
+    there is nothing to do or it can't be done."""
+    logger = logging.getLogger(__name__)
+    removed = 0
+    preview_dir = app.config.get("PREVIEW_FOLDER")
+    if preview_dir and os.path.isdir(preview_dir):
+        # Per-worker NDI endpoint files (<id>.ndi.json) the Overview read,
+        # and its own thumbnail (0.jpg — it ran under reserved id 0, which
+        # no database row can have)
+        for name in os.listdir(preview_dir):
+            if name.endswith(".ndi.json") or name == "0.jpg":
+                try:
+                    os.remove(os.path.join(preview_dir, name))
+                    removed += 1
+                except OSError:
+                    pass
+    runtime_dir = app.config.get("SIGNAGE_RUNTIME_FOLDER")
+    for name in ("multiview_layout.json", "overview_status.json"):
+        try:
+            os.remove(os.path.join(runtime_dir, name))
+            removed += 1
+        except (OSError, TypeError):
+            pass
+    if removed:
+        logger.info(f"Removed {removed} leftover Overview stream file(s)")
+
+    # The global_settings.overview_enabled column: unused now. DROP COLUMN
+    # needs SQLite 3.35+ (any PostgreSQL); older SQLite keeps the column,
+    # which is harmless since nothing reads it.
+    try:
+        cols = {c["name"] for c in sa_inspect(db.engine).get_columns("global_settings")}
+        if "overview_enabled" in cols:
+            db.session.execute(text("ALTER TABLE global_settings DROP COLUMN overview_enabled"))
+            db.session.commit()
+            logger.info("DB migrated: dropped unused global_settings.overview_enabled")
+    except Exception as e:
+        db.session.rollback()
+        logger.debug(f"Could not drop global_settings.overview_enabled (harmless): {e}")
+
+
 def _install_security_hooks(app):
     """Browser-facing hardening for an auth-less LAN tool.
 
@@ -135,8 +178,7 @@ def create_app(config_class=Config):
     # Live preview popup window (one page for all instances; it reads the
     # instance id from its own URL). Registered before the SPA catch-all.
     @app.route("/preview/<int:instance_id>")
-    @app.route("/preview/overview")
-    def preview_popup(instance_id=None):
+    def preview_popup(instance_id):
         return send_from_directory(app.static_folder, "preview.html")
 
     # Serve frontend SPA
@@ -151,6 +193,7 @@ def create_app(config_class=Config):
     with app.app_context():
         db.create_all()
         _add_missing_columns()
+        _remove_overview_leftovers(app)
         # Backfill permanent uids for media uploaded before the uid column
         # existed (new uploads get one at upload time)
         backfilled = 0
@@ -191,16 +234,5 @@ def create_app(config_class=Config):
                     logger.error(f"Failed to auto-start {inst.name}: {e}")
                     inst.running = False
             db.session.commit()
-
-        # Restore the Overview stream if it was switched on
-        settings = GlobalSettings.query.first()
-        if settings and settings.overview_enabled:
-            from app.routes import _start_overview
-            try:
-                err = _start_overview(settings)
-                if err:
-                    logging.getLogger(__name__).error(f"Overview stream not started: {err}")
-            except Exception as e:
-                logging.getLogger(__name__).error(f"Failed to start Overview stream: {e}")
 
     return app

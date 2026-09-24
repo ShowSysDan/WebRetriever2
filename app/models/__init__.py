@@ -24,9 +24,6 @@ class GlobalSettings(db.Model):
     ndi_hostname = db.Column(db.String(128), nullable=False, default="NDI-STREAMER")
     output_fps = db.Column(db.Integer, nullable=False, default=60)
     all_running = db.Column(db.Boolean, nullable=False, default=False)
-    # Built-in Overview multiview stream on/off (nullable for ADD COLUMN
-    # auto-migration; NULL = off). Restored at boot like running outputs.
-    overview_enabled = db.Column(db.Boolean, nullable=True, default=False)
     updated_at = db.Column(
         db.DateTime, default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
@@ -38,7 +35,6 @@ class GlobalSettings(db.Model):
             "ndi_hostname": self.ndi_hostname,
             "output_fps": self.output_fps,
             "all_running": self.all_running,
-            "overview_enabled": bool(self.overview_enabled),
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 

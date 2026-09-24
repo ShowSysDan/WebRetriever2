@@ -26,7 +26,6 @@ from app.models import (
     SignageGroup, SignageItem,
 )
 from app.workers import manager, server_egress_mbps
-from app.workers.multiview import OVERVIEW_INSTANCE_ID, OVERVIEW_NAME, ndi_machine_name
 from app import sysstats
 from app.transcode import transcoder, ffmpeg_available
 from app.logging_config import log_event
@@ -107,7 +106,7 @@ def _start_worker(inst, settings=None):
             current_app.config["UPLOAD_FOLDER"], inst.media_file.playback_filename
         )
 
-    started = manager.start_instance(
+    return manager.start_instance(
         instance_id=inst.id,
         ndi_name=inst.ndi_source_name,
         source_type=inst.source_type,
@@ -123,194 +122,6 @@ def _start_worker(inst, settings=None):
         preview_dir=current_app.config.get("PREVIEW_FOLDER"),
         preview_interval=current_app.config.get("PREVIEW_INTERVAL", 2.0),
     )
-    _sync_multiview()  # this output's tile on the Overview stream flips to live
-    return started
-
-
-# =========================================================================
-# Overview stream — built-in multiview of every output
-#
-# One per box, switched on/off from the app. It runs as a worker under a
-# reserved id (OVERVIEW_INSTANCE_ID, never a DB row) and follows a layout
-# file rewritten on every instance change, so tiles appear, disappear and
-# flip STOPPED/live without restarting it.
-# =========================================================================
-
-# Last layout written, so no-op syncs (most API calls) don't touch the disk
-_multiview_last = None
-_multiview_lock = threading.Lock()
-
-
-def _multiview_layout_path():
-    return os.path.join(current_app.config["SIGNAGE_RUNTIME_FOLDER"], "multiview_layout.json")
-
-
-def _write_multiview_layout(force=False):
-    """(Re)write the layout JSON the Overview worker polls: every enabled
-    instance in creation order, with whether it is meant to be running. Disabled instances are left out (their tile disappears);
-    stopped ones stay in with running=false (their tile reads STOPPED).
-    Call after anything that changes instances or their run state — the
-    write is skipped when nothing changed."""
-    global _multiview_last
-    instances = (OutputInstance.query
-                 .filter(OutputInstance.enabled.is_(True))
-                 .order_by(OutputInstance.created_at).all())
-    layout = {"instances": [
-        {"id": i.id, "name": i.name, "source_type": i.source_type,
-         "running": manager.is_wanted(i.id)}
-        for i in instances
-    ]}
-    with _multiview_lock:
-        if not force and layout == _multiview_last:
-            return
-        folder = current_app.config["SIGNAGE_RUNTIME_FOLDER"]
-        os.makedirs(folder, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(suffix=".json", dir=folder)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(layout, f)
-            os.replace(tmp, _multiview_layout_path())
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-        _multiview_last = layout
-
-
-def _sync_multiview():
-    """Best-effort layout refresh after an instance change — a failure here
-    must never fail the API call that triggered it."""
-    try:
-        _write_multiview_layout()
-    except Exception:
-        logger.exception("Multiview layout write failed")
-
-
-def _name_is_reserved(name):
-    """The Overview stream owns the NDI name "Overview" on this box — two
-    senders with one name would be indistinguishable to receivers."""
-    return str(name or "").strip().lower() == OVERVIEW_NAME.lower()
-
-
-def _start_overview(settings=None):  # settings kept for call-site symmetry
-    """Start the Overview worker. Returns an error message, or None."""
-    if manager.is_running(OVERVIEW_INSTANCE_ID):
-        return None
-    clash = next((i for i in OutputInstance.query.all() if _name_is_reserved(i.name)), None)
-    if clash:
-        return (f"An output is already named '{clash.name}' — rename it first, "
-                f"the Overview stream uses that NDI name")
-    _write_multiview_layout(force=True)
-    cfg = current_app.config
-    manager.start_instance(
-        instance_id=OVERVIEW_INSTANCE_ID,
-        ndi_name=OVERVIEW_NAME,
-        source_type="multiview",
-        source_value="",
-        width=cfg.get("OVERVIEW_WIDTH", 1920),
-        height=cfg.get("OVERVIEW_HEIGHT", 1080),
-        capture_fps=cfg.get("OVERVIEW_FPS", 30),
-        output_fps=cfg.get("OVERVIEW_FPS", 30),  # own rate, not the global output FPS
-        multiview_settings={
-            "layout_path": _multiview_layout_path(),
-            "bandwidth": cfg.get("OVERVIEW_BANDWIDTH", "highest"),
-        },
-        preview_dir=cfg.get("PREVIEW_FOLDER"),
-        preview_interval=cfg.get("PREVIEW_INTERVAL", 2.0),
-    )
-    return None
-
-
-def _overview_tile_status():
-    if not manager.is_running(OVERVIEW_INSTANCE_ID):
-        return None
-    from app.workers.multiview import STATUS_FILENAME
-    path = os.path.join(current_app.config["SIGNAGE_RUNTIME_FOLDER"], STATUS_FILENAME)
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
-
-
-def _overview_state(settings=None):
-    if not settings:
-        settings = GlobalSettings.query.first()
-    cfg = current_app.config
-    health = manager.get_instance_health(OVERVIEW_INSTANCE_ID)
-    tiles = OutputInstance.query.filter(OutputInstance.enabled.is_(True)).count()
-    return {
-        # id/name/width/height/source_type/running mirror an instance dict,
-        # so the popup preview page can show the Overview like any output
-        "id": OVERVIEW_INSTANCE_ID,
-        "name": OVERVIEW_NAME,
-        "source_type": "overview",
-        "enabled": bool(settings and settings.overview_enabled),
-        "running": manager.is_running(OVERVIEW_INSTANCE_ID),
-        "healthy": bool(health and health["healthy"]),
-        "ndi_source": f"{ndi_machine_name()} ({OVERVIEW_NAME})",
-        "width": cfg.get("OVERVIEW_WIDTH", 1920),
-        "height": cfg.get("OVERVIEW_HEIGHT", 1080),
-        "fps": cfg.get("OVERVIEW_FPS", 30),
-        "bandwidth": cfg.get("OVERVIEW_BANDWIDTH", "highest"),
-        "tiles": tiles,
-        # Per-tile connection state written by the worker: state
-        # (connecting | live | no_signal), the address in use, what was
-        # tried, frames received, last error — for diagnosing CONNECTING
-        "tile_status": _overview_tile_status(),
-        "preview_url": f"/api/instances/{OVERVIEW_INSTANCE_ID}/preview",
-        "popup_url": "/preview/overview",
-    }
-
-
-def _set_overview(enabled):
-    """Persist the toggle and start/stop the worker. Returns (state, error)."""
-    settings = GlobalSettings.query.first()
-    if enabled:
-        err = _start_overview(settings)
-        if err:
-            return None, err
-        log_event("OVERVIEW_STARTED", f"ndi='{OVERVIEW_NAME}'")
-    elif manager.is_running(OVERVIEW_INSTANCE_ID) or manager.is_wanted(OVERVIEW_INSTANCE_ID):
-        manager.stop_instance(OVERVIEW_INSTANCE_ID)
-        log_event("OVERVIEW_STOPPED", "")
-    if settings:
-        settings.overview_enabled = bool(enabled)
-        db.session.commit()
-    return _overview_state(settings), None
-
-
-@api.route("/overview", methods=["GET"])
-def overview_get():
-    return jsonify(_overview_state())
-
-
-@api.route("/overview", methods=["POST", "PUT"])
-def overview_set():
-    data = request.get_json(silent=True) or {}
-    if "enabled" not in data:
-        return jsonify({"error": "'enabled' (true/false) is required"}), 400
-    state, err = _set_overview(bool(data["enabled"]))
-    if err:
-        return jsonify({"error": err}), 409
-    return jsonify(state)
-
-
-# Plain-URL switches for show controllers, like the video cue URLs
-@api.route("/overview/on", methods=["GET", "POST"])
-def overview_on():
-    state, err = _set_overview(True)
-    if err:
-        return jsonify({"error": err}), 409
-    return jsonify(state)
-
-
-@api.route("/overview/off", methods=["GET", "POST"])
-def overview_off():
-    state, _ = _set_overview(False)
-    return jsonify(state)
 
 
 # =========================================================================
@@ -609,20 +420,18 @@ def start_all():
     if settings:
         settings.all_running = True
     db.session.commit()
-    _sync_multiview()
     log_event("ALL_STARTED", f"count={len(started)}")
     return jsonify({"started": started, "count": len(started)})
 
 
 @api.route("/stop-all", methods=["POST"])
 def stop_all():
-    manager.stop_all(keep={OVERVIEW_INSTANCE_ID})  # Overview has its own toggle
+    manager.stop_all()
     OutputInstance.query.update({OutputInstance.running: False})
     settings = GlobalSettings.query.first()
     if settings:
         settings.all_running = False
     db.session.commit()
-    _sync_multiview()
     return jsonify({"message": "All instances stopped"})
 
 
@@ -659,16 +468,9 @@ _INSTANCE_INT_BOUNDS = {
 }
 
 
-_SOURCE_TYPES = {"webpage", "image", "text", "webcam", "video", "signage"}
-
-
 def _validate_instance_fields(data, source_type):
     """Return an error message for out-of-range or unsafe instance fields in
     `data` (only the keys present are checked), else None."""
-    if "source_type" in data and data["source_type"] not in _SOURCE_TYPES:
-        return f"source_type must be one of: {', '.join(sorted(_SOURCE_TYPES))}"
-    if "name" in data and _name_is_reserved(data["name"]):
-        return f"'{OVERVIEW_NAME}' is reserved for the Overview stream"
     for field, (lo, hi) in _INSTANCE_INT_BOUNDS.items():
         if field in data:
             try:
@@ -727,7 +529,6 @@ def create_instance():
     db.session.add(inst)
     db.session.commit()
     log_event("INSTANCE_CREATED", f"id={inst.id} name='{inst.name}'")
-    _sync_multiview()
     return jsonify(inst.to_dict()), 201
 
 
@@ -791,7 +592,6 @@ def update_instance(instance_id):
         db.session.commit()
     elif signage_dirty:
         _sync_signage(inst)
-    _sync_multiview()  # name / type / enabled may have changed
 
     return jsonify(inst.to_dict())
 
@@ -813,10 +613,6 @@ def delete_instance(instance_id):
             os.remove(os.path.join(preview_dir, f"{instance_id}.jpg"))
         except OSError:
             pass
-        try:
-            os.remove(os.path.join(preview_dir, f"{instance_id}.ndi.json"))
-        except OSError:
-            pass
 
     # Signage runtime state files (playlist/status/impressions) are keyed by
     # instance id — clean them up so they can't leak or be inherited by a
@@ -827,7 +623,6 @@ def delete_instance(instance_id):
         except OSError:
             pass
 
-    _sync_multiview()
     log_event("INSTANCE_DELETED", f"id={instance_id} name='{name}'")
     return jsonify({"message": f"Instance '{name}' deleted"})
 
@@ -854,7 +649,6 @@ def stop_instance(instance_id):
     manager.stop_instance(inst.id)
     inst.running = False
     db.session.commit()
-    _sync_multiview()
     return jsonify(inst.to_dict())
 
 
@@ -1097,20 +891,12 @@ def instance_preview_stream(ref):
     mode (854px @ ~4fps instead of the 320px/2s list thumbnails). The
     stream ends shortly after the instance stops; the popup page reconnects
     when it starts again."""
-    return _preview_stream(_resolve_instance(ref).id)
-
-
-@api.route("/overview/preview/stream", methods=["GET"])
-def overview_preview_stream():
-    """Live MJPEG of the Overview stream, for the popup viewer."""
-    return _preview_stream(OVERVIEW_INSTANCE_ID)
-
-
-def _preview_stream(instance_id):
+    inst = _resolve_instance(ref)
     preview_dir = current_app.config.get("PREVIEW_FOLDER")
     if not preview_dir:
         return jsonify({"error": "Previews not configured"}), 404
-    path = os.path.join(preview_dir, f"{instance_id}.jpg")
+    path = os.path.join(preview_dir, f"{inst.id}.jpg")
+    instance_id = inst.id
 
     def generate():
         last_mtime = None
@@ -2176,7 +1962,7 @@ def list_webcams():
 
 @api.route("/status", methods=["GET"])
 def status():
-    running_ids = [i for i in manager.get_running_ids() if i != OVERVIEW_INSTANCE_ID]
+    running_ids = manager.get_running_ids()
     return jsonify({
         "running_instances": running_ids,
         "running_count": len(running_ids),
