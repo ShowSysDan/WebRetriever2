@@ -1559,12 +1559,23 @@ output encode even with no other receivers), so it has been taken out
 entirely. The code is back to exactly 1.9.1, including the watchdog
 hardening.
 
-Left over on boxes that ran 1.10.x, all harmless:
+Leftovers on boxes that ran 1.10.x are cleaned up automatically at
+startup:
 
-- an unused `overview_enabled` column in `global_settings`
-- `<id>.ndi.json` files in the preview folder (tmpfs, cleared on reboot)
-- `multiview_layout.json` in the runtime folder
-- any `OVERVIEW_*` lines in `.env`, which are now ignored
+- the per-output `<id>.ndi.json` endpoint files and the Overview's own
+  `0.jpg` thumbnail in the preview folder, and
+  `multiview_layout.json` / `overview_status.json` in the runtime folder,
+  are deleted
+- the unused `global_settings.overview_enabled` column is dropped. This
+  needs PostgreSQL or SQLite 3.35+ (Debian 12 and Ubuntu 22.04 ship
+  newer); on older SQLite the column stays, and nothing reads it
+
+The only manual step: delete any `OVERVIEW_WIDTH`, `OVERVIEW_HEIGHT`,
+`OVERVIEW_FPS` or `OVERVIEW_BANDWIDTH` lines you added to `.env`. They
+are ignored, so leaving them does no harm.
+
+A memory soak test of this release (server, workers and web UI) is
+described under [Performance Notes](#performance-notes).
 
 #### 1.9.1
 
