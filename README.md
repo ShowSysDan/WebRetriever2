@@ -1491,6 +1491,22 @@ live reload — the NDI stream never drops.
 - Multiple simultaneous cameras: spread them across USB controllers/ports if you hit
   bandwidth limits, and budget ~125 Mbps of network per 1080p60 NDI stream
 
+### Memory soak (measured, 1.10.2)
+
+Checked after the Overview stream was removed, to confirm this release
+leaks nothing. The test box was a 4-core VM running 7 outputs (two
+looping videos, an image, a signage playlist, two live webpages, and
+text):
+
+| What | Load | Result |
+|------|------|--------|
+| Server process | 20 min: 119,000 API requests (`/system`, `/status`, `/health`, `/instances`, `/receivers`, previews, signage status) plus a worker killed every 30s (40 watchdog restarts) | RSS **83.8 MB at the start and 83.8 MB at the end**; threads 5–6, open files 38–40, both flat |
+| Web UI | Overview tab open 15 min (all its polling), forced GC before each sample | JS heap 1.07 → 1.25 MB in the first ~9 min, then flat; ~1,000 page elements and 78–79 listeners throughout; no page errors |
+
+An earlier 8-minute warm-up run showed the server climbing from 80 to
+84 MB, the Python allocator filling its pools. It then stayed flat for
+the whole 20-minute run.
+
 ### Scaling & worst-case capacity (measured, 0.4.0)
 
 Stress-tested with a **540-file media library**, rapid switching, and
